@@ -150,6 +150,106 @@ function App() {
     }
   }
 
+  function groupImportRows(rows) {
+  const groups = new Map()
+  for (const row of rows) {
+    if (!row.documentNo || !row.productName || !Number(row.qty)) continue
+    const key = `${row.operation}|${row.documentNo}`
+    if (!groups.has(key)) {
+      groups.set(key, {
+        operation: row.operation,
+        documentNo: row.documentNo,
+        issueDate: row.issueDate || new Date().toISOString().slice(0, 10),
+        invoiceNo: row.invoiceNo || null,
+        contractorName: row.contractorName || null,
+        notes: row.notes || null,
+        items: []
+      })
+    }
+    groups.get(key).items.push(row)
+  }
+  return [...groups.values()]
+}
+
+async function getExistingOperationKeys(groups) {
+  const keys = new Set()
+  const documentNos = [...new Set(groups.map(g => g.documentNo).filter(Boolean))]
+
+  for (let i = 0; i < documentNos.length; i += 100) {
+    const chunk = documentNos.slice(i, i + 100)
+    const { data, error } = await supabase
+      .from('operations')
+      .select('operation_type, document_no')
+      .in('document_no', chunk)
+    if (error) throw error
+    for (const op of data || []) {
+      keys.add(`${op.operation_type}|${op.document_no}`)
+    }
+  }
+  return keys
+}
+
+async function createIncomingLot(productId, operationId, operationDate, qty) {
+  const { data: lotNo, error: lotNoErr } = await supabase.rpc('generate_lot_no', {
+    p_product_id: productId,
+    p_date: operationDate
+  })
+  if (lotNoErr) throw lotNoErr
+
+  const { data: lot, error: lotErr } = await supabase
+    .from('lots')
+    .insert({
+      product_id: productId,
+      lot_no: lotNo,
+      source_operation_id: operationId,
+      production_date: operationDate,
+      initial_qty: qty,
+      remaining_qty: qty,
+      unit: 'kg'
+    })
+    .select('id')
+    .single()
+  if (lotErr) throw lotErr
+  return lot.id
+}
+
+async function allocateFifo(operationId, productId, qtyNeeded) {
+  let remainingToAllocate = Number(qtyNeeded) || 0
+  const allocations = []
+
+  const { data: lots, error } = await supabase
+    .from('lots')
+    .select('id, remaining_qty, production_date, created_at')
+    .eq('product_id', productId)
+    .gt('remaining_qty', 0)
+    .order('production_date', { ascending: true })
+    .order('created_at', { ascending: true })
+  if (error) throw error
+
+  for (const lot of lots || []) {
+    if (remainingToAllocate <= 0) break
+    const available = Number(lot.remaining_qty) || 0
+    const take = Math.min(available, remainingToAllocate)
+    const newRemaining = available - take
+
+    const { error: updateErr } = await supabase
+      .from('lots')
+      .update({ remaining_qty: newRemaining, status: newRemaining <= 0 ? 'zuzyta' : 'aktywna' })
+      .eq('id', lot.id)
+    if (updateErr) throw updateErr
+
+    const { error: allocErr } = await supabase
+      .from('fifo_allocations')
+      .insert({ operation_id: operationId, source_lot_id: lot.id, product_id: productId, qty: take })
+    if (allocErr) throw allocErr
+
+    allocations.push({ lotId: lot.id, qty: take })
+    remainingToAllocate -= take
+  }
+
+  return { allocations, shortage: remainingToAllocate }
+}
+
   async function saveToSupabase() {
     if (!supabase) {
       setMessage('Brak konfiguracji Supabase. Uzupełnij plik .env na podstawie .env.example.')
@@ -159,49 +259,101 @@ function App() {
       setMessage('Najpierw wczytaj plik Excel.')
       return
     }
+
+    setMessage('Trwa import. Nie klikaj ponownie przycisku zapisu...')
+
     try {
+      const productCache = new Map()
+      const contractorCache = new Map()
+      const groups = groupImportRows(filteredRows)
+      const existingKeys = await getExistingOperationKeys(groups)
+      const groupsToImport = groups.filter(g => !existingKeys.has(`${g.operation}|${g.documentNo}`))
+      const duplicateCount = groups.length - groupsToImport.length
+
       const { data: imported, error: fileError } = await supabase
         .from('imported_files')
-        .insert({ filename: fileName || 'import.xlsx', rows_count: rows.length })
+        .insert({
+          filename: fileName || 'import.xlsx',
+          rows_count: rows.length,
+          status: duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
+        })
         .select('id')
         .single()
       if (fileError) throw fileError
 
-      const productCache = new Map()
-      const contractorCache = new Map()
+      let importedOperations = 0
+      let importedItems = 0
+      let createdLots = 0
+      let fifoAllocations = 0
+      let shortageCount = 0
+      let shortageKg = 0
 
-      for (const row of filteredRows) {
-        const contractorId = await getOrCreateContractor(row.contractorName, contractorCache)
+      for (const group of groupsToImport) {
+        const contractorId = await getOrCreateContractor(group.contractorName, contractorCache)
 
         const { data: op, error: opErr } = await supabase
           .from('operations')
           .insert({
-            operation_type: row.operation,
-            operation_date: row.issueDate || new Date().toISOString().slice(0, 10),
-            document_no: row.documentNo,
-            invoice_no: row.invoiceNo,
+            operation_type: group.operation,
+            operation_date: group.issueDate,
+            document_no: group.documentNo,
+            invoice_no: group.invoiceNo,
             contractor_id: contractorId,
             imported_file_id: imported.id,
-            notes: row.notes || null
+            notes: group.notes || null
           })
           .select('id')
           .single()
-        if (opErr) throw opErr
+        if (opErr) {
+          // Dodatkowe zabezpieczenie przy równoczesnym lub ponownym imporcie.
+          if (String(opErr.message || '').includes('duplicate')) continue
+          throw opErr
+        }
+        importedOperations += 1
 
-        const productId = await getOrCreateProduct(row.productName, productCache)
+        for (const row of group.items) {
+          const productId = await getOrCreateProduct(row.productName, productCache)
+          const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
+          let lotId = null
 
-        const direction = row.operation === 'przyjecie' ? 'przychod' : 'rozchod'
-        const { error: itemErr } = await supabase.from('operation_items').insert({
-          operation_id: op.id,
-          product_id: productId,
-          qty: row.qty,
-          unit: 'kg',
-          direction,
-          raw_product_name: row.productName
-        })
-        if (itemErr) throw itemErr
+          const { data: item, error: itemErr } = await supabase
+            .from('operation_items')
+            .insert({
+              operation_id: op.id,
+              product_id: productId,
+              qty: row.qty,
+              unit: 'kg',
+              direction,
+              raw_product_name: row.productName
+            })
+            .select('id')
+            .single()
+          if (itemErr) throw itemErr
+          importedItems += 1
+
+          if (direction === 'przychod') {
+            lotId = await createIncomingLot(productId, op.id, group.issueDate, row.qty)
+            createdLots += 1
+            const { error: itemLotErr } = await supabase
+              .from('operation_items')
+              .update({ lot_id: lotId })
+              .eq('id', item.id)
+            if (itemLotErr) throw itemLotErr
+          } else {
+            const result = await allocateFifo(op.id, productId, row.qty)
+            fifoAllocations += result.allocations.length
+            if (result.shortage > 0) {
+              shortageCount += 1
+              shortageKg += result.shortage
+            }
+          }
+        }
       }
-      setMessage('Zapisano import do nowego Supabase HACCP. To jeszcze nie uruchamia pełnego FIFO — to baza pod kolejną wersję.')
+
+      setMessage(
+        `Import zakończony. Zaimportowano dokumentów: ${importedOperations}, pozycji: ${importedItems}, utworzono partii: ${createdLots}, rozliczeń FIFO: ${fifoAllocations}. Pominięto duplikatów: ${duplicateCount}.` +
+        (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '')
+      )
     } catch (err) {
       setMessage(`Błąd zapisu do Supabase: ${err.message}`)
     }
