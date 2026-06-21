@@ -22,6 +22,106 @@ const DOCS = [
   ['Specyfikacje', 'S01-S09', 'Specyfikacje produktów i opakowań']
 ]
 
+
+function normalizeText(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ł/g, 'l')
+    .replace(/\s+/g, ' ')
+}
+
+const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
+  ...PRODUCTS.map(([name, code]) => [normalizeText(name), code]),
+  [normalizeText('Jabłko przemysłowe'), 'Jab'],
+  [normalizeText('Jabłko'), 'Jab']
+])
+
+function baseCodeForProduct(productName) {
+  const normalized = normalizeText(productName)
+  const known = PRODUCT_CODE_BY_NORMALIZED_NAME.get(normalized)
+  if (known) return known
+  const text = String(productName || 'Produkt')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ł/g, 'l')
+    .replace(/[^a-zA-Z0-9]/g, '')
+  return (text.slice(0, 8) || 'X')
+}
+
+async function getOrCreateProduct(productName, cache) {
+  const name = productName || 'Produkt do dopasowania'
+  const key = normalizeText(name)
+  if (cache.has(key)) return cache.get(key)
+
+  const { data: existingByName, error: nameErr } = await supabase
+    .from('products')
+    .select('id, name, code')
+    .eq('name', name)
+    .maybeSingle()
+  if (nameErr) throw nameErr
+  if (existingByName) {
+    cache.set(key, existingByName.id)
+    return existingByName.id
+  }
+
+  let code = baseCodeForProduct(name)
+  let suffix = 2
+  while (true) {
+    const { data: existingByCode, error: codeErr } = await supabase
+      .from('products')
+      .select('id, name, code')
+      .eq('code', code)
+      .maybeSingle()
+    if (codeErr) throw codeErr
+
+    if (!existingByCode) break
+    if (normalizeText(existingByCode.name) === key) {
+      cache.set(key, existingByCode.id)
+      return existingByCode.id
+    }
+    code = `${baseCodeForProduct(name)}${suffix}`
+    suffix += 1
+  }
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from('products')
+    .insert({ name, code, product_type: 'surowiec_lub_produkt' })
+    .select('id')
+    .single()
+  if (insertErr) throw insertErr
+  cache.set(key, inserted.id)
+  return inserted.id
+}
+
+async function getOrCreateContractor(contractorName, cache) {
+  if (!contractorName) return null
+  const key = normalizeText(contractorName)
+  if (cache.has(key)) return cache.get(key)
+
+  const { data: existing, error: selectErr } = await supabase
+    .from('contractors')
+    .select('id')
+    .eq('name', contractorName)
+    .maybeSingle()
+  if (selectErr) throw selectErr
+  if (existing) {
+    cache.set(key, existing.id)
+    return existing.id
+  }
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from('contractors')
+    .insert({ name: contractorName, contractor_type: 'oba' })
+    .select('id')
+    .single()
+  if (insertErr) throw insertErr
+  cache.set(key, inserted.id)
+  return inserted.id
+}
+
 function StatCard({ icon: Icon, label, value }) {
   return <div className="stat"><Icon size={22}/><div><strong>{value}</strong><span>{label}</span></div></div>
 }
@@ -67,17 +167,11 @@ function App() {
         .single()
       if (fileError) throw fileError
 
+      const productCache = new Map()
+      const contractorCache = new Map()
+
       for (const row of filteredRows) {
-        let contractorId = null
-        if (row.contractorName) {
-          const { data: contractor, error: cErr } = await supabase
-            .from('contractors')
-            .upsert({ name: row.contractorName, contractor_type: 'oba' }, { onConflict: 'name' })
-            .select('id')
-            .single()
-          if (cErr) throw cErr
-          contractorId = contractor.id
-        }
+        const contractorId = await getOrCreateContractor(row.contractorName, contractorCache)
 
         const { data: op, error: opErr } = await supabase
           .from('operations')
@@ -94,18 +188,12 @@ function App() {
           .single()
         if (opErr) throw opErr
 
-        const productName = row.productName || 'Produkt do dopasowania'
-        const { data: product, error: pErr } = await supabase
-          .from('products')
-          .upsert({ name: productName, code: productName.slice(0, 3).replace(/\W/g, '') || 'X', product_type: 'surowiec_lub_produkt' }, { onConflict: 'name' })
-          .select('id')
-          .single()
-        if (pErr) throw pErr
+        const productId = await getOrCreateProduct(row.productName, productCache)
 
         const direction = row.operation === 'przyjecie' ? 'przychod' : 'rozchod'
         const { error: itemErr } = await supabase.from('operation_items').insert({
           operation_id: op.id,
-          product_id: product.id,
+          product_id: productId,
           qty: row.qty,
           unit: 'kg',
           direction,
