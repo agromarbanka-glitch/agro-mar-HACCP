@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import './style.css'
@@ -36,7 +36,9 @@ function normalizeText(value) {
 const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
   ...PRODUCTS.map(([name, code]) => [normalizeText(name), code]),
   [normalizeText('Jabłko przemysłowe'), 'Jab'],
-  [normalizeText('Jabłko'), 'Jab']
+  [normalizeText('Jabłko'), 'Jab'],
+  [normalizeText('Jabłko na obierkę'), 'Jo'],
+  [normalizeText('Jabłko obierka'), 'Jo']
 ])
 
 function baseCodeForProduct(productName) {
@@ -130,6 +132,9 @@ function App() {
   const [rows, setRows] = useState([])
   const [fileName, setFileName] = useState('')
   const [message, setMessage] = useState('')
+  const [stockRows, setStockRows] = useState([])
+  const [fifoRows, setFifoRows] = useState([])
+  const [loadingStock, setLoadingStock] = useState(false)
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -250,6 +255,34 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
   return { allocations, shortage: remainingToAllocate }
 }
 
+
+  async function loadFifoData() {
+    if (!supabase) return
+    setLoadingStock(true)
+    try {
+      const { data: lotsData, error: lotsErr } = await supabase
+        .from('lots')
+        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, products(name, code)')
+        .order('production_date', { ascending: true })
+        .order('created_at', { ascending: true })
+      if (lotsErr) throw lotsErr
+
+      const { data: allocationsData, error: allocErr } = await supabase
+        .from('fifo_allocations')
+        .select('id, qty, products(name, code), lots(lot_no), operations(document_no, operation_date)')
+        .order('created_at', { ascending: false })
+        .limit(80)
+      if (allocErr) throw allocErr
+
+      setStockRows(lotsData || [])
+      setFifoRows(allocationsData || [])
+    } catch (err) {
+      setMessage(`Błąd odczytu stanów FIFO: ${err.message}`)
+    } finally {
+      setLoadingStock(false)
+    }
+  }
+
   async function saveToSupabase() {
     if (!supabase) {
       setMessage('Brak konfiguracji Supabase. Uzupełnij plik .env na podstawie .env.example.')
@@ -354,6 +387,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         `Import zakończony. Zaimportowano dokumentów: ${importedOperations}, pozycji: ${importedItems}, utworzono partii: ${createdLots}, rozliczeń FIFO: ${fifoAllocations}. Pominięto duplikatów: ${duplicateCount}.` +
         (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '')
       )
+      await loadFifoData()
     } catch (err) {
       setMessage(`Błąd zapisu do Supabase: ${err.message}`)
     }
@@ -401,6 +435,28 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           </tr>)}</tbody>
         </table></div>
       </>}
+    </section>
+
+    <section className="card">
+      <div className="section-title"><Warehouse/><div><h2>Stany partii i FIFO</h2><p>Podgląd pozostałych kilogramów z PZ oraz ostatnich rozliczeń WZ/FV według FIFO.</p></div></div>
+      <div className="actions"><button className="secondary" onClick={loadFifoData} disabled={loadingStock}><RefreshCcw size={16}/> {loadingStock ? 'Odświeżanie...' : 'Odśwież stany FIFO'}</button></div>
+      <div className="summary">
+        <span>Partie: <b>{stockRows.length}</b></span>
+        <span>Pozostało kg: <b>{stockRows.reduce((s, l) => s + (Number(l.remaining_qty) || 0), 0).toLocaleString('pl-PL')}</b></span>
+        <span>Rozliczenia FIFO: <b>{fifoRows.length}</b></span>
+      </div>
+      {stockRows.length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Produkt</th><th>Kod</th><th>Partia</th><th>Data</th><th>Ilość pocz.</th><th>Pozostało</th><th>Status</th></tr></thead>
+        <tbody>{stockRows.slice(0, 120).map(l => <tr key={l.id}>
+          <td>{l.products?.name}</td><td>{l.products?.code}</td><td>{l.lot_no}</td><td>{l.production_date}</td><td>{Number(l.initial_qty || 0).toLocaleString('pl-PL')}</td><td><b>{Number(l.remaining_qty || 0).toLocaleString('pl-PL')}</b></td><td><span className="pill">{l.status}</span></td>
+        </tr>)}</tbody>
+      </table></div>}
+      {fifoRows.length > 0 && <><h3>Ostatnie rozliczenia FIFO</h3><div className="table-wrap small"><table>
+        <thead><tr><th>WZ/FV</th><th>Data</th><th>Produkt</th><th>Partia PZ</th><th>Ilość zdjęta</th></tr></thead>
+        <tbody>{fifoRows.map(a => <tr key={a.id}>
+          <td>{a.operations?.document_no}</td><td>{a.operations?.operation_date}</td><td>{a.products?.name}</td><td>{a.lots?.lot_no}</td><td>{Number(a.qty || 0).toLocaleString('pl-PL')}</td>
+        </tr>)}</tbody>
+      </table></div></>}
     </section>
 
     <section className="two">

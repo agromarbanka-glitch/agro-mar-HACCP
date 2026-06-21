@@ -21,10 +21,14 @@ p { margin: 0; }
 .actions { margin-top: 14px; }
 button { border: 0; background: #23472b; color: white; padding: 13px 18px; border-radius: 12px; font-weight: 800; cursor: pointer; }
 button:hover { opacity: .92; }
+button.secondary { display:inline-flex; align-items:center; gap:8px; background:#edf4ed; color:#23472b; }
+button:disabled { opacity:.55; cursor: wait; }
 .message { margin-top: 14px; padding: 12px; border-radius: 12px; background: #eef6ef; color: #25472c; }
 .summary { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
 .summary span, .pill { background: #eef1ed; border-radius: 999px; padding: 8px 12px; }
 .table-wrap { overflow: auto; max-height: 430px; border: 1px solid #e5e9e3; border-radius: 14px; }
+.table-wrap.small { max-height: 360px; margin-top: 12px; }
+h3 { margin: 20px 0 10px; font-size: 17px; }
 table { width: 100%; border-collapse: collapse; min-width: 900px; }
 th, td { border-bottom: 1px solid #e5e9e3; padding: 10px; text-align: left; font-size: 14px; }
 th { position: sticky; top: 0; background: #f7faf6; z-index: 1; }
