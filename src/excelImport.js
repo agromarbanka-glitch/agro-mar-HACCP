@@ -67,7 +67,9 @@ export async function readAgromarExcel(file) {
 
 export function classifyOperation(documentType, documentNo) {
   const text = `${documentType} ${documentNo}`.toUpperCase()
-  if (text.includes('PZ')) return 'przyjecie'
+  // Przyjęcia na magazyn: PZ oraz przesunięcia magazynowe MM.
+  if (text.includes('PZ') || text.includes('MM')) return 'przyjecie'
+  // Rozchody/sprzedaż: WZ, FV, FS. Ilości w Excelu mogą być ujemne, ale w bazie zapisujemy je jako dodatni rozchód.
   if (text.includes('WZ') || text.includes('FV') || text.includes('FS')) return 'sprzedaz_bez_produkcji'
   return 'przyjecie'
 }

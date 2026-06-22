@@ -312,7 +312,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO odświeżone. Wersja v7.')
+      setMessage('Stany FIFO odświeżone. Wersja v8.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -384,6 +384,10 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         for (const row of group.items) {
           const productId = await getOrCreateProduct(row.productName, productCache)
           const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
+          // W plikach WZ/FV ilości często są ujemne. Do FIFO i partii zapisujemy zawsze dodatnią ilość,
+          // a kierunek operacji określa, czy to przychód czy rozchód.
+          const itemQty = Math.abs(Number(row.qty) || 0)
+          if (itemQty <= 0) continue
           let lotId = null
 
           const { data: item, error: itemErr } = await supabase
@@ -391,7 +395,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
             .insert({
               operation_id: op.id,
               product_id: productId,
-              qty: row.qty,
+              qty: itemQty,
               unit: 'kg',
               direction,
               raw_product_name: row.productName
@@ -402,7 +406,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           importedItems += 1
 
           if (direction === 'przychod') {
-            lotId = await createIncomingLot(productId, op.id, group.issueDate, row.qty)
+            lotId = await createIncomingLot(productId, op.id, group.issueDate, itemQty)
             createdLots += 1
             const { error: itemLotErr } = await supabase
               .from('operation_items')
@@ -410,7 +414,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
               .eq('id', item.id)
             if (itemLotErr) throw itemLotErr
           } else {
-            const result = await allocateFifo(op.id, productId, row.qty)
+            const result = await allocateFifo(op.id, productId, itemQty)
             fifoAllocations += result.allocations.length
             if (result.shortage > 0) {
               shortageCount += 1
@@ -437,7 +441,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v7 FIFO</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v8 FIFO/MM</div>
     </header>
 
     <section className="warning">
