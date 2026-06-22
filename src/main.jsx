@@ -269,7 +269,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       const { data: allocationsData, error: allocErr } = await supabase
         .from('fifo_allocations')
-        .select('id, qty, products(name, code), lots(lot_no), operations(document_no, operation_date)')
+        select('id, qty, products(name, code), lots! fifo_allocations_source_lot_id_fkey(lot_no), operations(document_no, operation_date)')
         .order('created_at', { ascending: false })
         .limit(80)
       if (allocErr) throw allocErr
