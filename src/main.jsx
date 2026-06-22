@@ -260,24 +260,61 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
     if (!supabase) return
     setLoadingStock(true)
     try {
-      const { data: lotsData, error: lotsErr } = await supabase
+      // Wersja v7: celowo bez zagnieżdżonych relacji Supabase, żeby ominąć błędy typu select/relationship.
+      const { data: lotsRaw, error: lotsErr } = await supabase
         .from('lots')
-        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, products(name, code)')
+        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, product_id, created_at')
         .order('production_date', { ascending: true })
         .order('created_at', { ascending: true })
       if (lotsErr) throw lotsErr
 
-      const { data: allocationsData, error: allocErr } = await supabase
+      const { data: allocationsRaw, error: allocErr } = await supabase
         .from('fifo_allocations')
         .select('id, qty, source_lot_id, output_lot_id, product_id, operation_id, created_at')
         .order('created_at', { ascending: false })
         .limit(80)
       if (allocErr) throw allocErr
 
-      setStockRows(lotsData || [])
-      setFifoRows(allocationsData || [])
+      const productIds = Array.from(new Set([
+        ...(lotsRaw || []).map(l => l.product_id).filter(Boolean),
+        ...(allocationsRaw || []).map(a => a.product_id).filter(Boolean)
+      ]))
+      const operationIds = Array.from(new Set((allocationsRaw || []).map(a => a.operation_id).filter(Boolean)))
+
+      let productMap = new Map()
+      if (productIds.length) {
+        const { data: productsRaw, error: productsErr } = await supabase
+          .from('products')
+          .select('id, name, code')
+          .in('id', productIds)
+        if (productsErr) throw productsErr
+        productMap = new Map((productsRaw || []).map(p => [p.id, p]))
+      }
+
+      let operationMap = new Map()
+      if (operationIds.length) {
+        const { data: operationsRaw, error: operationsErr } = await supabase
+          .from('operations')
+          .select('id, document_no, operation_date')
+          .in('id', operationIds)
+        if (operationsErr) throw operationsErr
+        operationMap = new Map((operationsRaw || []).map(o => [o.id, o]))
+      }
+
+      const lotMap = new Map((lotsRaw || []).map(l => [l.id, l]))
+      const lotsData = (lotsRaw || []).map(l => ({ ...l, products: productMap.get(l.product_id) || null }))
+      const allocationsData = (allocationsRaw || []).map(a => ({
+        ...a,
+        products: productMap.get(a.product_id) || null,
+        operations: operationMap.get(a.operation_id) || null,
+        lots: lotMap.get(a.source_lot_id) || null
+      }))
+
+      setStockRows(lotsData)
+      setFifoRows(allocationsData)
+      setMessage('Stany FIFO odświeżone. Wersja v7.')
     } catch (err) {
-      setMessage(`Błąd odczytu stanów FIFO: ${err.message}`)
+      setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
       setLoadingStock(false)
     }
@@ -400,7 +437,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v7 FIFO</div>
     </header>
 
     <section className="warning">
