@@ -138,7 +138,7 @@ function App() {
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
-  const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz_bez_produkcji').length
+  const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
   const qtySum = filteredRows.reduce((s, r) => s + (Number(r.qty) || 0), 0)
 
   async function handleFile(e) {
@@ -312,7 +312,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO odświeżone. Wersja v8.')
+      setMessage('Stany FIFO odświeżone. Wersja v9.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -441,7 +441,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v8 FIFO/MM</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v9 FIFO NAPRAWIONE</div>
     </header>
 
     <section className="warning">

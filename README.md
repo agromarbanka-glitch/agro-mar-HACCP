@@ -1,8 +1,8 @@
-# AGRO-MAR HACCP / IFS / FIFO - v8
+# AGRO-MAR HACCP / IFS / FIFO — v9 naprawa FIFO
 
-Zmiany v8:
-- MM traktowane jako przyjęcie magazynowe.
-- WZ/FV/FS traktowane jako sprzedaż/rozchód.
-- Ujemne ilości z WZ/FV są zapisywane jako dodatni rozchód, żeby FIFO mogło je rozliczyć.
-- Importer nie tworzy ujemnych partii dla sprzedaży.
-- Dołączony SQL: `supabase/2026-v8-clean-negative-lots.sql` czyści błędne ujemne partie z testów.
+Zmiany v9:
+- WZ/FV/FS zapisywane jako `sprzedaz`, nie `sprzedaz_bez_produkcji`.
+- Ilość sprzedaży do FIFO liczona jako wartość bezwzględna, więc ujemne ilości z Excela rozliczają się poprawnie.
+- PZ i MM traktowane jako przyjęcia.
+- WZ/FV nie tworzą ujemnych partii.
+- Dołączony SQL: `supabase/2026-v9-reset-fifo-i-sprzedaz.sql`.
