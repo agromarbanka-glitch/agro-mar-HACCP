@@ -219,7 +219,7 @@ async function createIncomingLot(productId, operationId, operationDate, qty) {
 }
 
 async function allocateFifo(operationId, productId, qtyNeeded) {
-  let remainingToAllocate = Number(qtyNeeded) || 0
+  let remainingToAllocate = Math.abs(Number(qtyNeeded) || 0)
   const allocations = []
 
   const { data: lots, error } = await supabase
