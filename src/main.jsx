@@ -43,7 +43,8 @@ function productGroupForName(productName) {
   if (text.includes('truskawk')) return 'truskawka'
   if (text.includes('aronia')) return 'aronia'
   if (text.includes('sliw')) return 'sliwka'
-  if (text.includes('jabl')) return 'jablko'
+  if (text.includes('obier')) return 'jab_obier'
+  if (text.includes('jabl')) return 'jab_przem'
   return text.split(' ')[0] || 'inna'
 }
 
@@ -442,7 +443,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO, komory i magazyn partii odświeżone. Wersja v13.')
+      setMessage('Stany FIFO, komory i magazyn partii odświeżone. Wersja v14.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -768,7 +769,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v13 MAGAZYN PARTII NAPRAWIONY</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v14 GRUPY I MAGAZYN</div>
     </header>
 
     <section className="warning">

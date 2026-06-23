@@ -1,17 +1,13 @@
-# AGRO-MAR HACCP / IFS / FIFO — v13 Magazyn partii naprawiony
+# AGRO-MAR HACCP/FIFO v14
 
-Zmiany v13:
-- ekran Magazyn partii automatycznie pobiera aktywne partie po wejściu na stronę,
-- licznik aktywnych partii i pozostałych kg działa na danych z `lots.remaining_qty`,
-- widok pokazuje partię, produkt, grupę, komorę, datę przyjęcia, pozostałą ilość i status,
-- poprawiono kod produktu „Jabłko na obierkę” na `Jabobier`,
-- zachowano FIFO po dacie przyjęcia i partii,
-- zachowano blokadę mieszania grup w komorach,
-- przygotowano SQL ujednolicający kody produktów i stare numery `Jablkona/` → `Jabobier/`.
+Zakres:
+- rozdzielenie grup magazynowych jabłek:
+  - `jab_przem` = jabłko przemysłowe,
+  - `jab_obier` = jabłko na obierkę,
+- stały kod partii `Jabobier` dla jabłka na obierkę,
+- utrzymanie numeracji po kodzie produktu,
+- przygotowanie do dalszego testu przerobu/produkcji,
+- wersja widoczna w nagłówku aplikacji jako v14.
 
-Kolejność:
-1. Wgraj ZIP do GitHub.
-2. Poczekaj na Ready w Vercel.
-3. Uruchom SQL `supabase/2026-v13-magazyn-partii-naprawa.sql` w Supabase.
-4. Otwórz aplikację i zrób Ctrl+F5.
-5. Sprawdź sekcję Magazyn partii.
+Po wgraniu paczki do GitHub i wdrożeniu Vercel uruchom SQL:
+`supabase/2026-v14-grupy-magazynowe-i-produkcja.sql`.
