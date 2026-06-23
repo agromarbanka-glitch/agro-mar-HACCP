@@ -1,13 +1,13 @@
-# AGRO-MAR HACCP/FIFO v14
+# AGRO-MAR HACCP/FIFO v15
 
-Zakres:
-- rozdzielenie grup magazynowych jabłek:
-  - `jab_przem` = jabłko przemysłowe,
-  - `jab_obier` = jabłko na obierkę,
-- stały kod partii `Jabobier` dla jabłka na obierkę,
-- utrzymanie numeracji po kodzie produktu,
-- przygotowanie do dalszego testu przerobu/produkcji,
-- wersja widoczna w nagłówku aplikacji jako v14.
+Wersja v15 rozwija moduł Produkcja / Przerób.
 
-Po wgraniu paczki do GitHub i wdrożeniu Vercel uruchom SQL:
-`supabase/2026-v14-grupy-magazynowe-i-produkcja.sql`.
+Dodano:
+- obliczanie uzysku procentowego,
+- ręczne wpisanie ilości produktu gotowego,
+- produkty gotowe pulpowe: Malina pulpa, Porzeczka czarna pulpa, Porzeczka czerwona pulpa, Jabłko pulpa,
+- powiązanie partii wejściowej z partią wyjściową,
+- widok `v_production_trace` do kontroli produkcji.
+
+Po wgraniu plików do GitHub uruchom w Supabase:
+`supabase/2026-v15-produkcja-przerob-uzysk.sql`

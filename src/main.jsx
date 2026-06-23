@@ -6,9 +6,9 @@ import { readAgromarExcel, classifyOperation } from './excelImport'
 import './style.css'
 
 const PRODUCTS = [
-  ['Malina pulpa', 'Mp'], ['Porzeczka czarna', 'Pcz'], ['Porzeczka czerwona', 'Pk'], ['Truskawka', 'T'],
+  ['Malina pulpa', 'Mp'], ['Porzeczka czarna', 'Pcz'], ['Porzeczka czarna pulpa', 'Pczp'], ['Porzeczka czerwona', 'Pk'], ['Porzeczka czerwona pulpa', 'Pkp'], ['Truskawka', 'T'],
   ['Truskawka z szypułką', 'Tsz'], ['Aronia', 'A'], ['Śliwka', 'S'], ['Wiśnia', 'W'],
-  ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab']
+  ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab'], ['Jabłko pulpa', 'Jp']
 ]
 
 const DOCS = [
@@ -43,6 +43,7 @@ function productGroupForName(productName) {
   if (text.includes('truskawk')) return 'truskawka'
   if (text.includes('aronia')) return 'aronia'
   if (text.includes('sliw')) return 'sliwka'
+  if (text.includes('jabl') && text.includes('pulpa')) return 'jab_pulpa'
   if (text.includes('obier')) return 'jab_obier'
   if (text.includes('jabl')) return 'jab_przem'
   return text.split(' ')[0] || 'inna'
@@ -71,7 +72,10 @@ const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
   [normalizeText('Jabłko'), 'Jab'],
   [normalizeText('Jabłko na obierkę'), 'Jabobier'],
   [normalizeText('Jabłko obierka'), 'Jabobier'],
-  [normalizeText('Jabłko na obierke'), 'Jabobier']
+  [normalizeText('Jabłko na obierke'), 'Jabobier'],
+  [normalizeText('Porzeczka czarna pulpa'), 'Pczp'],
+  [normalizeText('Porzeczka czerwona pulpa'), 'Pkp'],
+  [normalizeText('Jabłko pulpa'), 'Jp']
 ])
 
 function baseCodeForProduct(productName) {
@@ -174,6 +178,7 @@ function App() {
   const [productionInputQty, setProductionInputQty] = useState('')
   const [productionOutputName, setProductionOutputName] = useState('Malina pulpa')
   const [productionOutputQty, setProductionOutputQty] = useState('')
+  const [productionYieldPercent, setProductionYieldPercent] = useState('92')
   const [lotEditId, setLotEditId] = useState('')
   const [lotEditNewNo, setLotEditNewNo] = useState('')
   const [lotEditReason, setLotEditReason] = useState('')
@@ -443,7 +448,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO, komory i magazyn partii odświeżone. Wersja v14.')
+      setMessage('Stany FIFO, komory, magazyn partii i produkcja odświeżone. Wersja v15.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -451,6 +456,18 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
     }
   }
 
+
+  function calculateProductionOutputQty() {
+    const inputQty = Math.abs(Number(productionInputQty) || 0)
+    const yieldPercent = Math.abs(Number(productionYieldPercent) || 0)
+    if (!inputQty || !yieldPercent) {
+      setMessage('Podaj ilość wejściową i procent uzysku.')
+      return
+    }
+    const calculated = Math.round(inputQty * yieldPercent) / 100
+    setProductionOutputQty(String(calculated))
+    setMessage(`Obliczono uzysk: ${inputQty.toLocaleString('pl-PL')} kg × ${yieldPercent}% = ${calculated.toLocaleString('pl-PL')} kg produktu gotowego.`)
+  }
 
   async function createProductionConversion() {
     if (!supabase) {
@@ -527,7 +544,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       })
       if (allocErr) throw allocErr
 
-      setMessage(`Utworzono produkcję ${documentNo}. Produkt gotowy otrzymał nową partię.`)
+      setMessage(`Utworzono produkcję ${documentNo}. Zdjęto ${inputQty.toLocaleString('pl-PL')} kg z partii ${sourceLot.lot_no}, utworzono ${outputQty.toLocaleString('pl-PL')} kg: ${productionOutputName}.`)
       setProductionInputLotId('')
       setProductionInputQty('')
       setProductionOutputQty('')
@@ -882,19 +899,23 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <label>Produkt gotowy
           <select value={productionOutputName} onChange={e => setProductionOutputName(e.target.value)}>
             <option>Malina pulpa</option>
-            <option>Porzeczka czarna</option>
-            <option>Porzeczka czerwona</option>
+            <option>Porzeczka czarna pulpa</option>
+            <option>Porzeczka czerwona pulpa</option>
+            <option>Jabłko pulpa</option>
             <option>Truskawka</option>
             <option>Jabłko obierka</option>
             <option>Jabłko na obierkę</option>
           </select>
         </label>
+        <label>Uzysk %
+          <input value={productionYieldPercent} onChange={e => setProductionYieldPercent(e.target.value)} placeholder="np. 92" />
+        </label>
         <label>Ilość produktu gotowego kg
           <input value={productionOutputQty} onChange={e => setProductionOutputQty(e.target.value)} placeholder="np. 4800" />
         </label>
       </div>
-      <div className="actions"><button className="secondary" onClick={createProductionConversion}>Utwórz przerób / produkcję</button></div>
-      <p className="hint">Przykład: wybierz partię Malina I, wpisz ilość, wybierz „Malina pulpa”. System zdejmie ilość z partii wejściowej i utworzy nową partię produktu gotowego w CCP1.</p>
+      <div className="actions"><button className="ghost" onClick={calculateProductionOutputQty}>Oblicz wg uzysku</button><button className="secondary" onClick={createProductionConversion}>Utwórz przerób / produkcję</button></div>
+      <p className="hint">Przykład: wybierz partię Malina I, wpisz ilość, wybierz „Malina pulpa”. System zdejmie ilość z partii wejściowej, utworzy nową partię produktu gotowego, zapisze powiązanie partia wejściowa → partia wyjściowa i przypisze pulpę do CCP1.</p>
     </section>
 
     <section className="card">
