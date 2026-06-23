@@ -1,13 +1,11 @@
-# AGRO-MAR HACCP/FIFO v21
+# AGRO-MAR HACCP/FIFO v16
 
-Zmiany:
-- nowe górne menu: Start, Importy Excel, Magazyn, Produkcja/Przerób, Kartoteki HACCP, Raporty, Ustawienia,
-- rejestr importów Excel,
-- podgląd operacji z importu,
-- usuwanie importu tylko przez administratora z podwójnym potwierdzeniem,
-- zapis usunięcia importu do audytu,
-- uporządkowana zakładka Kartoteki HACCP,
-- osobna zakładka Ustawienia na kody produktów i dokumenty.
+Poprawki:
+- usunięto z listy „Jabłko pulpa”, bo taki produkt nie istnieje,
+- dodano produkty gotowe/identyfikacyjne: Malina I, Malina Extra, Wiśnia, Aronia, Śliwka, Truskawka, Porzeczki, Jabłka,
+- pulpy dalej trafiają do CCP1,
+- produkty gotowe bez pulpy trafiają do CP3,
+- zachowana identyfikowalność nawet bez przerobu.
 
 Po wdrożeniu uruchom SQL:
-`supabase/2026-v21-menu-importy-kartoteki.sql`
+`supabase/2026-v16-produkty-gotowe-identyfikowalnosc.sql`

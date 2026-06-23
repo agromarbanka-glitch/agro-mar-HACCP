@@ -894,7 +894,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v21 MENU I IMPORTY</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v21.1 MENU NAPRAWIONE</div>
     </header>
 
     <section className="warning">
@@ -907,6 +907,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       {tabs.map(([key, label, Icon]) => <button key={key} className={activeTab === key ? 'tab active' : 'tab'} onClick={() => setActiveTab(key)}><Icon size={16}/>{label}</button>)}
     </nav>
 
+    {activeTab === 'dashboard' && <>
     <div className="grid stats">
       <StatCard icon={Package} value={PRODUCTS.length} label="produktów startowych" />
       <StatCard icon={FileText} value="40+" label="szablonów dokumentów" />
@@ -935,7 +936,30 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         </table></div>
       </>}
     </section>
+    </>}
 
+
+    {activeTab === 'importy' && <>
+    <section className="card">
+      <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
+      <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
+      {message && <p className="message">{message}</p>}
+      <div className="actions"><button onClick={saveToSupabase}>Zapisz import do Supabase</button></div>
+      {rows.length > 0 && <>
+        <div className="summary">
+          <span>Wiersze: <b>{rows.length}</b></span>
+          <span>Przyjęcia/PZ: <b>{pzCount}</b></span>
+          <span>Sprzedaż/WZ/FV: <b>{salesCount}</b></span>
+          <span>Suma ilości: <b>{qtySum.toLocaleString('pl-PL')}</b></span>
+        </div>
+        <div className="table-wrap"><table>
+          <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
+          <tbody>{filteredRows.slice(0, 100).map((row, i) => <tr key={i}>
+            <td>{row.documentType}</td><td>{row.documentNo}</td><td>{row.issueDate}</td><td>{row.productName}</td><td>{row.qty}</td><td>{row.contractorName}</td><td><span className="pill">{row.operation}</span></td>
+          </tr>)}</tbody>
+        </table></div>
+      </>}
+    </section>
 
     <section className="card" id="importy-excel">
       <div className="section-title"><Upload/><div><h2>Rejestr importów Excel</h2><p>Podgląd wgranych plików i bezpieczne usuwanie importu przez administratora z podwójnym potwierdzeniem.</p></div></div>
@@ -958,8 +982,10 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         </tr>)}</tbody>
       </table></div></>}
     </section>
+    </>}
 
 
+    {activeTab === 'magazyn' && <>
     <section className="card">
       <div className="section-title"><Warehouse/><div><h2>Komory CP/CCP</h2><p>CP2: 2 komory surowca, CP3: 2 komory produktu gotowego, CCP1: 4 beczki pulpy. System blokuje mieszanie różnych grup w jednej komorze.</p></div></div>
       <div className="chamber-grid">
@@ -1013,7 +1039,9 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         </tr>)}</tbody>
       </table></div>}
     </section>
+    </>}
 
+    {activeTab === 'produkcja' && <>
     <section className="card">
       <div className="section-title"><Package/><div><h2>Produkcja / Przerób</h2><p>Ręczna decyzja, czy dana partia surowca idzie do przerobu na pulpę lub produkt gotowy. FIFO dalej zostaje po dacie przyjęcia i partii.</p></div></div>
       <div className="form-grid">
@@ -1081,7 +1109,9 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       <div className="actions"><button className="secondary" onClick={changeLotNumberAsAdmin} disabled={userRole !== 'admin'}>Zmień numer partii</button></div>
       {userRole !== 'admin' && <p className="hint danger-text">Magazynier nie może zmieniać numerów partii.</p>}
     </section>
+    </>}
 
+    {activeTab === 'magazyn' && <>
     <section className="card">
       <div className="section-title"><Warehouse/><div><h2>Stany partii i FIFO</h2><p>Podgląd pozostałych kilogramów z PZ oraz ostatnich rozliczeń WZ/FV według FIFO.</p></div></div>
       <div className="actions"><button className="secondary" onClick={loadFifoData} disabled={loadingStock}><RefreshCcw size={16}/> {loadingStock ? 'Odświeżanie...' : 'Odśwież stany FIFO'}</button></div>
@@ -1103,7 +1133,9 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         </tr>)}</tbody>
       </table></div></>}
     </section>
+    </>}
 
+    {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
       <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>Wybierz kartę, podejrzyj dokumenty i pola P/N. Domyślnie system ustawia P, z możliwością ręcznej zmiany na N w kolejnym etapie edycji.</p></div></div>
       <div className="haccp-tabs">
@@ -1123,12 +1155,16 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         </tr>)}</tbody>
       </table></div>}
     </section>
+    </>}
 
+    {activeTab === 'raporty' && <section className="card"><div className="section-title"><FileText/><div><h2>Raporty</h2><p>Tu będą raporty temperatur, FIFO, identyfikowalności i wydruki PDF.</p></div></div><p className="hint">Moduł raportów będzie rozbudowany w kolejnym etapie.</p></section>}
 
+    {activeTab === 'ustawienia' && <>
     <section className="two">
       <div className="card"><h2>Produkty i kody partii</h2><div className="chips">{PRODUCTS.map(([n,c]) => <span key={c}>{n} <b>{c}/001/2026</b></span>)}</div></div>
       <div className="card"><h2>Zakładki dokumentów</h2>{DOCS.map(d => <div className="doc" key={d[0]}><b>{d[0]}</b><span>{d[1]}</span><small>{d[2]}</small></div>)}</div>
     </section>
+    </>}
   </div>
 }
 
