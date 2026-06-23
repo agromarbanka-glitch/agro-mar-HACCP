@@ -48,3 +48,4 @@ th { position: sticky; top: 0; background: #f7faf6; z-index: 1; }
 .chamber em { color: #536156; font-style: normal; font-size: 13px; margin-top: 6px; }
 @media (max-width: 850px) { .chamber-grid { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 520px) { .chamber-grid { grid-template-columns: 1fr; } }
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:16px 0}.form-grid label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#213}.form-grid input,.form-grid select{border:1px solid #d8d8d8;border-radius:12px;padding:11px;background:white;font-size:14px}.hint{color:#667;margin-top:8px}.danger-text{color:#a33;font-weight:700}

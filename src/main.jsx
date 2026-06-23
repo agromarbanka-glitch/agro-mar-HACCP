@@ -167,6 +167,14 @@ function App() {
   const [fifoRows, setFifoRows] = useState([])
   const [loadingStock, setLoadingStock] = useState(false)
   const [chamberRows, setChamberRows] = useState([])
+  const [userRole, setUserRole] = useState('admin')
+  const [productionInputLotId, setProductionInputLotId] = useState('')
+  const [productionInputQty, setProductionInputQty] = useState('')
+  const [productionOutputName, setProductionOutputName] = useState('Malina pulpa')
+  const [productionOutputQty, setProductionOutputQty] = useState('')
+  const [lotEditId, setLotEditId] = useState('')
+  const [lotEditNewNo, setLotEditNewNo] = useState('')
+  const [lotEditReason, setLotEditReason] = useState('')
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -407,11 +415,143 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO i komory odświeżone. Wersja v10.')
+      setMessage('Stany FIFO i komory odświeżone. Wersja v11.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
       setLoadingStock(false)
+    }
+  }
+
+
+  async function createProductionConversion() {
+    if (!supabase) {
+      setMessage('Brak konfiguracji Supabase.')
+      return
+    }
+    const sourceLot = stockRows.find(l => l.id === productionInputLotId)
+    if (!sourceLot) {
+      setMessage('Najpierw wybierz partię wejściową do przerobu.')
+      return
+    }
+    const inputQty = Math.abs(Number(productionInputQty) || 0)
+    const outputQty = Math.abs(Number(productionOutputQty) || 0)
+    if (inputQty <= 0 || outputQty <= 0) {
+      setMessage('Podaj ilość wejściową i ilość produktu gotowego większą od zera.')
+      return
+    }
+    if (inputQty > Number(sourceLot.remaining_qty || 0)) {
+      setMessage('Nie można zużyć więcej niż pozostało na wybranej partii.')
+      return
+    }
+    if (!window.confirm(`Potwierdzasz przerób ${inputQty.toLocaleString('pl-PL')} kg z partii ${sourceLot.lot_no} na ${productionOutputName}?`)) return
+
+    try {
+      const today = new Date().toISOString().slice(0, 10)
+      const outputProductId = await getOrCreateProduct(productionOutputName, new Map())
+      const documentNo = `PROD/${today.replaceAll('-', '')}/${Date.now().toString().slice(-5)}`
+
+      const { data: op, error: opErr } = await supabase
+        .from('operations')
+        .insert({ operation_type: 'produkcja', operation_date: today, document_no: documentNo, notes: `Przerób ręczny: ${sourceLot.lot_no} -> ${productionOutputName}` })
+        .select('id')
+        .single()
+      if (opErr) throw opErr
+
+      const newRemaining = Number(sourceLot.remaining_qty || 0) - inputQty
+      const { error: srcUpdateErr } = await supabase
+        .from('lots')
+        .update({ remaining_qty: newRemaining, status: newRemaining <= 0 ? 'zuzyta' : 'aktywna' })
+        .eq('id', sourceLot.id)
+      if (srcUpdateErr) throw srcUpdateErr
+
+      const { error: outItemErr } = await supabase.from('operation_items').insert({
+        operation_id: op.id,
+        product_id: sourceLot.product_id,
+        qty: inputQty,
+        unit: 'kg',
+        lot_id: sourceLot.id,
+        direction: 'rozchod',
+        raw_product_name: sourceLot.products?.name || 'surowiec do przerobu',
+        notes: 'Ręczny przerób na pulpę / produkt gotowy'
+      })
+      if (outItemErr) throw outItemErr
+
+      const outputLotId = await createIncomingLot(outputProductId, op.id, today, outputQty, productionOutputName)
+      const { error: inItemErr } = await supabase.from('operation_items').insert({
+        operation_id: op.id,
+        product_id: outputProductId,
+        qty: outputQty,
+        unit: 'kg',
+        lot_id: outputLotId,
+        direction: 'przychod',
+        raw_product_name: productionOutputName,
+        notes: `Powstało z partii ${sourceLot.lot_no}`
+      })
+      if (inItemErr) throw inItemErr
+
+      const { error: allocErr } = await supabase.from('fifo_allocations').insert({
+        operation_id: op.id,
+        source_lot_id: sourceLot.id,
+        output_lot_id: outputLotId,
+        product_id: sourceLot.product_id,
+        qty: inputQty
+      })
+      if (allocErr) throw allocErr
+
+      setMessage(`Utworzono produkcję ${documentNo}. Produkt gotowy otrzymał nową partię.`)
+      setProductionInputLotId('')
+      setProductionInputQty('')
+      setProductionOutputQty('')
+      await loadFifoData()
+    } catch (err) {
+      setMessage(`Błąd produkcji/przerobu: ${err.message}`)
+    }
+  }
+
+  async function changeLotNumberAsAdmin() {
+    if (!supabase) return
+    if (userRole !== 'admin') {
+      setMessage('Tylko administrator może zmienić numer partii.')
+      return
+    }
+    const selectedLot = stockRows.find(l => l.id === lotEditId)
+    if (!selectedLot) {
+      setMessage('Wybierz partię do zmiany numeru.')
+      return
+    }
+    const newNo = String(lotEditNewNo || '').trim()
+    const reason = String(lotEditReason || '').trim()
+    if (!newNo || !reason) {
+      setMessage('Podaj nowy numer partii i powód zmiany.')
+      return
+    }
+    if (!window.confirm('Uwaga! Zmiana numeru partii wpływa na identyfikowalność HACCP/IFS. Czy na pewno kontynuować?')) return
+    if (!window.confirm(`Potwierdź zmianę numeru partii: ${selectedLot.lot_no} → ${newNo}`)) return
+
+    try {
+      const { error: histErr } = await supabase.from('lot_change_history').insert({
+        lot_id: selectedLot.id,
+        old_lot_no: selectedLot.lot_no,
+        new_lot_no: newNo,
+        reason,
+        changed_by_role: userRole
+      })
+      if (histErr) throw histErr
+
+      const { error: updErr } = await supabase
+        .from('lots')
+        .update({ lot_no: newNo })
+        .eq('id', selectedLot.id)
+      if (updErr) throw updErr
+
+      setMessage(`Zmieniono numer partii ${selectedLot.lot_no} → ${newNo}. Zapisano historię zmiany.`)
+      setLotEditId('')
+      setLotEditNewNo('')
+      setLotEditReason('')
+      await loadFifoData()
+    } catch (err) {
+      setMessage(`Błąd zmiany numeru partii: ${err.message}`)
     }
   }
 
@@ -536,7 +676,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v10 KOMORY CP/CCP</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v11 PRODUKCJA / PARTIE</div>
     </header>
 
     <section className="warning">
@@ -585,6 +725,62 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           </div>
         })}
       </div>
+    </section>
+
+
+    <section className="card">
+      <div className="section-title"><Package/><div><h2>Produkcja / Przerób</h2><p>Ręczna decyzja, czy dana partia surowca idzie do przerobu na pulpę lub produkt gotowy. FIFO dalej zostaje po dacie przyjęcia i partii.</p></div></div>
+      <div className="form-grid">
+        <label>Rola użytkownika
+          <select value={userRole} onChange={e => setUserRole(e.target.value)}>
+            <option value="admin">Administrator</option>
+            <option value="magazynier">Magazynier</option>
+          </select>
+        </label>
+        <label>Partia wejściowa
+          <select value={productionInputLotId} onChange={e => setProductionInputLotId(e.target.value)}>
+            <option value="">Wybierz partię z magazynu</option>
+            {stockRows.filter(l => Number(l.remaining_qty || 0) > 0).slice(0, 500).map(l => <option key={l.id} value={l.id}>{l.lot_no} · {l.products?.name} · {Number(l.remaining_qty || 0).toLocaleString('pl-PL')} kg · {l.production_date}</option>)}
+          </select>
+        </label>
+        <label>Ilość do przerobu kg
+          <input value={productionInputQty} onChange={e => setProductionInputQty(e.target.value)} placeholder="np. 5000" />
+        </label>
+        <label>Produkt gotowy
+          <select value={productionOutputName} onChange={e => setProductionOutputName(e.target.value)}>
+            <option>Malina pulpa</option>
+            <option>Porzeczka czarna</option>
+            <option>Porzeczka czerwona</option>
+            <option>Truskawka</option>
+            <option>Jabłko obierka</option>
+          </select>
+        </label>
+        <label>Ilość produktu gotowego kg
+          <input value={productionOutputQty} onChange={e => setProductionOutputQty(e.target.value)} placeholder="np. 4800" />
+        </label>
+      </div>
+      <div className="actions"><button className="secondary" onClick={createProductionConversion}>Utwórz przerób / produkcję</button></div>
+      <p className="hint">Przykład: wybierz partię Malina I, wpisz ilość, wybierz „Malina pulpa”. System zdejmie ilość z partii wejściowej i utworzy nową partię produktu gotowego w CCP1.</p>
+    </section>
+
+    <section className="card">
+      <div className="section-title"><ShieldCheck/><div><h2>Zmiana numeru partii</h2><p>Tylko administrator, zawsze z potwierdzeniem i zapisem historii zmiany.</p></div></div>
+      <div className="form-grid">
+        <label>Partia
+          <select value={lotEditId} onChange={e => setLotEditId(e.target.value)} disabled={userRole !== 'admin'}>
+            <option value="">Wybierz partię</option>
+            {stockRows.slice(0, 800).map(l => <option key={l.id} value={l.id}>{l.lot_no} · {l.products?.name}</option>)}
+          </select>
+        </label>
+        <label>Nowy numer partii
+          <input value={lotEditNewNo} onChange={e => setLotEditNewNo(e.target.value)} disabled={userRole !== 'admin'} placeholder="np. M1/003/2026" />
+        </label>
+        <label>Powód zmiany
+          <input value={lotEditReason} onChange={e => setLotEditReason(e.target.value)} disabled={userRole !== 'admin'} placeholder="Wymagane uzasadnienie" />
+        </label>
+      </div>
+      <div className="actions"><button className="secondary" onClick={changeLotNumberAsAdmin} disabled={userRole !== 'admin'}>Zmień numer partii</button></div>
+      {userRole !== 'admin' && <p className="hint danger-text">Magazynier nie może zmieniać numerów partii.</p>}
     </section>
 
     <section className="card">

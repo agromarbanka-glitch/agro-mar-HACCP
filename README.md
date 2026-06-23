@@ -1,3 +1,10 @@
+# AGRO-MAR HACCP/FIFO v11
+
+Dodano moduł Produkcja / Przerób oraz zmianę numeru partii tylko dla administratora z historią zmian.
+
+Po wgraniu plików do GitHub uruchom w Supabase plik:
+`supabase/2026-v11-produkcja-i-partie-admin.sql`
+
 # AGRO-MAR HACCP / IFS / FIFO — v10 KOMORY CP/CCP
 
 Wersja v10 dodaje logikę komór i beczek:
