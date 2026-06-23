@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import './style.css'
@@ -190,6 +190,11 @@ function App() {
   const [moveLotId, setMoveLotId] = useState('')
   const [targetChamberId, setTargetChamberId] = useState('')
   const [moveReason, setMoveReason] = useState('')
+  const [activeTab, setActiveTab] = useState('dashboard')
+  const [importRows, setImportRows] = useState([])
+  const [importPreview, setImportPreview] = useState([])
+  const [haccpDocs, setHaccpDocs] = useState([])
+  const [docsFilter, setDocsFilter] = useState('K01')
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -207,6 +212,8 @@ function App() {
   useEffect(() => {
     if (isSupabaseConfigured) {
       loadFifoData()
+      loadImports()
+      loadHaccpDocs()
     }
   }, [])
 
@@ -669,6 +676,101 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
     }
   }
 
+
+  async function loadImports() {
+    if (!supabase) return
+    try {
+      const { data, error } = await supabase
+        .from('imported_files')
+        .select('*')
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+        .limit(100)
+      if (error) throw error
+      setImportRows(data || [])
+    } catch (err) {
+      setMessage(`Błąd odczytu importów Excel: ${err.message}`)
+    }
+  }
+
+  async function loadImportPreview(fileId) {
+    if (!supabase || !fileId) return
+    try {
+      const { data, error } = await supabase
+        .from('operations')
+        .select('id, operation_type, operation_date, document_no, invoice_no, notes, operation_items(qty, direction, raw_product_name)')
+        .eq('imported_file_id', fileId)
+        .order('operation_date', { ascending: false })
+        .limit(80)
+      if (error) throw error
+      setImportPreview(data || [])
+      setMessage(`Wczytano podgląd importu: ${(data || []).length} dokumentów.`)
+    } catch (err) {
+      setMessage(`Błąd podglądu importu: ${err.message}`)
+    }
+  }
+
+  async function deleteImportedFile(fileId, fileNameForConfirm) {
+    if (!supabase) return
+    if (userRole !== 'admin') {
+      setMessage('Tylko administrator może usuwać importy Excel.')
+      return
+    }
+    const first = window.confirm(`UWAGA: usuwasz import Excel: ${fileNameForConfirm || fileId}. Operacja usunie powiązane operacje, pozycje, partie i rozliczenia FIFO. Kontynuować?`)
+    if (!first) return
+    const typed = window.prompt('Drugie potwierdzenie. Wpisz dokładnie: USUŃ IMPORT')
+    if (normalizeText(typed) !== normalizeText('USUŃ IMPORT')) {
+      setMessage('Usuwanie anulowane — wpisano nieprawidłowe potwierdzenie.')
+      return
+    }
+    const reason = window.prompt('Podaj powód usunięcia importu:')
+    if (!String(reason || '').trim()) {
+      setMessage('Usuwanie anulowane — powód jest wymagany.')
+      return
+    }
+    try {
+      const { error } = await supabase.rpc('delete_import_excel_admin', {
+        p_imported_file_id: fileId,
+        p_reason: reason,
+        p_user_role: userRole
+      })
+      if (error) throw error
+      setMessage('Import został usunięty przez administratora. Zapisano ślad w audycie.')
+      setImportPreview([])
+      await loadImports()
+      await loadFifoData()
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`Błąd usuwania importu: ${err.message}`)
+    }
+  }
+
+  async function loadHaccpDocs() {
+    if (!supabase) return
+    try {
+      const { data, error } = await supabase
+        .from('haccp_documents')
+        .select('id, document_type, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, created_at')
+        .order('document_date', { ascending: false })
+        .limit(500)
+      if (error) throw error
+      setHaccpDocs(data || [])
+    } catch (err) {
+      // haccp_documents pojawia się dopiero po SQL v18/v19/v20.
+      setHaccpDocs([])
+    }
+  }
+
+  const tabs = [
+    ['dashboard', 'Start', LayoutDashboard],
+    ['importy', 'Importy Excel', Upload],
+    ['magazyn', 'Magazyn', Warehouse],
+    ['produkcja', 'Produkcja / Przerób', Package],
+    ['kartoteki', 'Kartoteki HACCP', ClipboardList],
+    ['raporty', 'Raporty', FileText],
+    ['ustawienia', 'Ustawienia', Settings]
+  ]
+
   async function saveToSupabase() {
     if (!supabase) {
       setMessage('Brak konfiguracji Supabase. Uzupełnij plik .env na podstawie .env.example.')
@@ -778,6 +880,8 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '')
       )
       await loadFifoData()
+      await loadImports()
+      await loadHaccpDocs()
     } catch (err) {
       setMessage(`Błąd zapisu do Supabase: ${err.message}`)
     }
@@ -790,13 +894,18 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v14 GRUPY I MAGAZYN</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v21 MENU I IMPORTY</div>
     </header>
 
     <section className="warning">
       <AlertTriangle size={20}/>
       <div><strong>Ważne:</strong> ta aplikacja ma być podłączona wyłącznie do nowego projektu Supabase <b>AGRO-MAR-HACCP</b>, nigdy do starej bazy opakowań.</div>
     </section>
+
+
+    <nav className="top-tabs">
+      {tabs.map(([key, label, Icon]) => <button key={key} className={activeTab === key ? 'tab active' : 'tab'} onClick={() => setActiveTab(key)}><Icon size={16}/>{label}</button>)}
+    </nav>
 
     <div className="grid stats">
       <StatCard icon={Package} value={PRODUCTS.length} label="produktów startowych" />
@@ -825,6 +934,29 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           </tr>)}</tbody>
         </table></div>
       </>}
+    </section>
+
+
+    <section className="card" id="importy-excel">
+      <div className="section-title"><Upload/><div><h2>Rejestr importów Excel</h2><p>Podgląd wgranych plików i bezpieczne usuwanie importu przez administratora z podwójnym potwierdzeniem.</p></div></div>
+      <div className="actions"><button className="secondary" onClick={loadImports}><RefreshCcw size={16}/> Odśwież importy</button></div>
+      {importRows.length === 0 && <p className="hint">Brak importów do wyświetlenia albo uruchom SQL v21.</p>}
+      {importRows.length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Plik</th><th>Data</th><th>Wiersze</th><th>Status</th><th>Akcje</th></tr></thead>
+        <tbody>{importRows.map(f => <tr key={f.id}>
+          <td><b>{f.filename || f.file_name || 'import.xlsx'}</b></td>
+          <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
+          <td>{f.rows_count || f.row_count || '-'}</td>
+          <td><span className="pill">{f.status || 'wczytany'}</span></td>
+          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id)}><Eye size={14}/> Podgląd</button><button className="danger mini" onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> Usuń</button></td>
+        </tr>)}</tbody>
+      </table></div>}
+      {importPreview.length > 0 && <><h3>Podgląd pozycji z importu</h3><div className="table-wrap small"><table>
+        <thead><tr><th>Typ</th><th>Data</th><th>Dokument</th><th>FV</th><th>Pozycje</th></tr></thead>
+        <tbody>{importPreview.map(op => <tr key={op.id}>
+          <td>{op.operation_type}</td><td>{op.operation_date}</td><td>{op.document_no}</td><td>{op.invoice_no}</td><td>{(op.operation_items || []).map(i => `${i.raw_product_name || ''}: ${Number(i.qty || 0).toLocaleString('pl-PL')} kg`).join(' | ')}</td>
+        </tr>)}</tbody>
+      </table></div></>}
     </section>
 
 
@@ -971,6 +1103,27 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         </tr>)}</tbody>
       </table></div></>}
     </section>
+
+    <section className="card" id="kartoteki-haccp">
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>Wybierz kartę, podejrzyj dokumenty i pola P/N. Domyślnie system ustawia P, z możliwością ręcznej zmiany na N w kolejnym etapie edycji.</p></div></div>
+      <div className="haccp-tabs">
+        {[
+          ['K01','K01 – Karta kontroli przyjęcia surowców'],
+          ['K02','K02 – Magazynowanie surowców CP2'],
+          ['K04','K04 – Magazynowanie produktów gotowych CP3/CCP1'],
+          ['K07','K07 – Kontrola sita / identyfikowalność']
+        ].map(([code, label]) => <button key={code} className={docsFilter === code ? 'tab active' : 'tab'} onClick={() => setDocsFilter(code)}>{label}</button>)}
+      </div>
+      <div className="actions"><button className="secondary" onClick={loadHaccpDocs}><RefreshCcw size={16}/> Odśwież kartoteki</button></div>
+      {haccpDocs.filter(d => d.document_type === docsFilter).length === 0 && <p className="hint">Brak dokumentów {docsFilter}. Dla K04/K07 pojawią się po utworzeniu partii produktu gotowego lub pracy w CP3/CCP1.</p>}
+      {haccpDocs.filter(d => d.document_type === docsFilter).length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Typ</th><th>Data</th><th>Partia</th><th>Produkt</th><th>Komora</th><th>Ilość</th><th>P/N</th></tr></thead>
+        <tbody>{haccpDocs.filter(d => d.document_type === docsFilter).slice(0, 200).map(d => <tr key={d.id}>
+          <td><b>{d.document_type}</b></td><td>{d.document_date}</td><td>{d.lot_no}</td><td>{d.product_name}</td><td>{d.chamber_code || '-'}</td><td>{Number(d.qty || 0).toLocaleString('pl-PL')}</td><td><span className="pill">{Object.entries(d.data || {}).filter(([k]) => !['uwagi','podpis'].includes(k)).map(([k,v]) => `${k}: ${v}`).slice(0,3).join(' | ')}</span></td>
+        </tr>)}</tbody>
+      </table></div>}
+    </section>
+
 
     <section className="two">
       <div className="card"><h2>Produkty i kody partii</h2><div className="chips">{PRODUCTS.map(([n,c]) => <span key={c}>{n} <b>{c}/001/2026</b></span>)}</div></div>

@@ -1,10 +1,13 @@
-# AGRO-MAR HACCP/FIFO v20
+# AGRO-MAR HACCP/FIFO v21
 
-Poprawka generowania dokumentów HACCP po v19:
-- K02 dla komór CP2,
-- K04 dla CP3/CCP1,
-- K07 dla CCP1,
-- synchronizacja `chamber_id` i `storage_chamber_id`,
-- pola P/N domyślnie jako P.
+Zmiany:
+- nowe górne menu: Start, Importy Excel, Magazyn, Produkcja/Przerób, Kartoteki HACCP, Raporty, Ustawienia,
+- rejestr importów Excel,
+- podgląd operacji z importu,
+- usuwanie importu tylko przez administratora z podwójnym potwierdzeniem,
+- zapis usunięcia importu do audytu,
+- uporządkowana zakładka Kartoteki HACCP,
+- osobna zakładka Ustawienia na kody produktów i dokumenty.
 
-Uruchom plik SQL w Supabase SQL Editor.
+Po wdrożeniu uruchom SQL:
+`supabase/2026-v21-menu-importy-kartoteki.sql`
