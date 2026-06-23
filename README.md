@@ -1,11 +1,10 @@
-# AGRO-MAR HACCP/FIFO v19
+# AGRO-MAR HACCP/FIFO v20
 
-Zakres:
-- K02 Magazyn surowca CP2
-- K04 Magazyn produktu gotowego CP3/CCP1
-- K07 Kontrola sita
-- historia komór i widok zajętości komór
-- domyślne wartości P/N = P z możliwością zmiany
-- admin override mieszania asortymentów z powodem
+Poprawka generowania dokumentów HACCP po v19:
+- K02 dla komór CP2,
+- K04 dla CP3/CCP1,
+- K07 dla CCP1,
+- synchronizacja `chamber_id` i `storage_chamber_id`,
+- pola P/N domyślnie jako P.
 
-Wgraj pliki do GitHub, poczekaj na Vercel Ready, następnie uruchom SQL z katalogu supabase.
+Uruchom plik SQL w Supabase SQL Editor.
