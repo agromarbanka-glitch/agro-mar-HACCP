@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
@@ -8,7 +8,7 @@ import './style.css'
 const PRODUCTS = [
   ['Malina pulpa', 'Mp'], ['Porzeczka czarna', 'Pcz'], ['Porzeczka czerwona', 'Pk'], ['Truskawka', 'T'],
   ['Truskawka z szypułką', 'Tsz'], ['Aronia', 'A'], ['Śliwka', 'S'], ['Wiśnia', 'W'],
-  ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jo']
+  ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab']
 ]
 
 const DOCS = [
@@ -68,8 +68,9 @@ const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
   ...PRODUCTS.map(([name, code]) => [normalizeText(name), code]),
   [normalizeText('Jabłko przemysłowe'), 'Jab'],
   [normalizeText('Jabłko'), 'Jab'],
-  [normalizeText('Jabłko na obierkę'), 'Jo'],
-  [normalizeText('Jabłko obierka'), 'Jo']
+  [normalizeText('Jabłko na obierkę'), 'Jabobier'],
+  [normalizeText('Jabłko obierka'), 'Jabobier'],
+  [normalizeText('Jabłko na obierke'), 'Jabobier']
 ])
 
 function baseCodeForProduct(productName) {
@@ -192,6 +193,12 @@ function App() {
       return normalizeText(`${l.lot_no} ${l.products?.name || ''} ${l.product_group || ''} ${l.chamber?.code || ''}`).includes(q)
     }).slice(0, 250)
   }, [activeLots, lotSearch])
+
+  useEffect(() => {
+    if (isSupabaseConfigured) {
+      loadFifoData()
+    }
+  }, [])
 
   async function handleFile(e) {
     const file = e.target.files?.[0]
@@ -417,7 +424,15 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       }
 
       const lotMap = new Map((lotsRaw || []).map(l => [l.id, l]))
-      const lotsData = (lotsRaw || []).map(l => ({ ...l, products: productMap.get(l.product_id) || null, chamber: chamberMap.get(l.storage_chamber_id) || null }))
+      const lotsData = (lotsRaw || []).map(l => {
+        const product = productMap.get(l.product_id) || null
+        return {
+          ...l,
+          product_group: l.product_group || product?.product_group || productGroupForName(product?.name || ''),
+          products: product,
+          chamber: chamberMap.get(l.storage_chamber_id) || null
+        }
+      })
       const allocationsData = (allocationsRaw || []).map(a => ({
         ...a,
         products: productMap.get(a.product_id) || null,
@@ -427,7 +442,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO, komory i magazyn partii odświeżone. Wersja v12.')
+      setMessage('Stany FIFO, komory i magazyn partii odświeżone. Wersja v13.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -753,7 +768,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v12 MAGAZYN PARTII</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v13 MAGAZYN PARTII NAPRAWIONY</div>
     </header>
 
     <section className="warning">
@@ -836,6 +851,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       </div>
       <div className="actions"><button className="secondary" onClick={moveLotToChamber}>Przypisz / przenieś partię</button></div>
       <p className="hint">System zablokuje przeniesienie, jeśli w wybranej komorze znajduje się inna grupa asortymentowa, np. wiśnia zamiast maliny.</p>
+      {activeLots.length === 0 && <p className="hint danger-text">Brak aktywnych partii w widoku. Kliknij "Odśwież magazyn partii" albo sprawdź w Supabase, czy remaining_qty jest większe od 0.</p>}
       {visibleWarehouseLots.length > 0 && <div className="table-wrap small"><table>
         <thead><tr><th>Partia</th><th>Produkt</th><th>Grupa</th><th>Komora</th><th>Data przyjęcia</th><th>Pozostało kg</th><th>Status</th></tr></thead>
         <tbody>{visibleWarehouseLots.map(l => <tr key={l.id}>
@@ -869,6 +885,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
             <option>Porzeczka czerwona</option>
             <option>Truskawka</option>
             <option>Jabłko obierka</option>
+            <option>Jabłko na obierkę</option>
           </select>
         </label>
         <label>Ilość produktu gotowego kg
