@@ -23,6 +23,37 @@ const DOCS = [
 ]
 
 
+const CHAMBERS = [
+  ['CP2-1', 'Komora CP2-1', 'CP2', 'Surowce'],
+  ['CP2-2', 'Komora CP2-2', 'CP2', 'Surowce'],
+  ['CP3-1', 'Komora CP3-1', 'CP3', 'Produkt gotowy'],
+  ['CP3-2', 'Komora CP3-2', 'CP3', 'Produkt gotowy'],
+  ['CCP1-1', 'Beczka CCP1-1', 'CCP1', 'Pulpa'],
+  ['CCP1-2', 'Beczka CCP1-2', 'CCP1', 'Pulpa'],
+  ['CCP1-3', 'Beczka CCP1-3', 'CCP1', 'Pulpa'],
+  ['CCP1-4', 'Beczka CCP1-4', 'CCP1', 'Pulpa']
+]
+
+function productGroupForName(productName) {
+  const text = normalizeText(productName)
+  if (text.includes('malin')) return 'malina'
+  if (text.includes('wisn')) return 'wisnia'
+  if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
+  if (text.includes('porzeczka czerwona')) return 'porzeczka_czerwona'
+  if (text.includes('truskawk')) return 'truskawka'
+  if (text.includes('aronia')) return 'aronia'
+  if (text.includes('sliw')) return 'sliwka'
+  if (text.includes('jabl')) return 'jablko'
+  return text.split(' ')[0] || 'inna'
+}
+
+function targetControlPointForProduct(productName) {
+  const text = normalizeText(productName)
+  if (text.includes('pulpa')) return 'CCP1'
+  return 'CP2'
+}
+
+
 function normalizeText(value) {
   return String(value || '')
     .trim()
@@ -60,7 +91,7 @@ async function getOrCreateProduct(productName, cache) {
 
   const { data: existingByName, error: nameErr } = await supabase
     .from('products')
-    .select('id, name, code')
+    .select('id, name, code, product_group')
     .eq('name', name)
     .maybeSingle()
   if (nameErr) throw nameErr
@@ -74,7 +105,7 @@ async function getOrCreateProduct(productName, cache) {
   while (true) {
     const { data: existingByCode, error: codeErr } = await supabase
       .from('products')
-      .select('id, name, code')
+      .select('id, name, code, product_group')
       .eq('code', code)
       .maybeSingle()
     if (codeErr) throw codeErr
@@ -90,7 +121,7 @@ async function getOrCreateProduct(productName, cache) {
 
   const { data: inserted, error: insertErr } = await supabase
     .from('products')
-    .insert({ name, code, product_type: 'surowiec_lub_produkt' })
+    .insert({ name, code, product_type: 'surowiec_lub_produkt', product_group: productGroupForName(name) })
     .select('id')
     .single()
   if (insertErr) throw insertErr
@@ -135,6 +166,7 @@ function App() {
   const [stockRows, setStockRows] = useState([])
   const [fifoRows, setFifoRows] = useState([])
   const [loadingStock, setLoadingStock] = useState(false)
+  const [chamberRows, setChamberRows] = useState([])
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -194,12 +226,56 @@ async function getExistingOperationKeys(groups) {
   return keys
 }
 
-async function createIncomingLot(productId, operationId, operationDate, qty) {
+async function findCompatibleChamber(productGroup, controlPoint) {
+  const { data: chambers, error: chambersErr } = await supabase
+    .from('storage_chambers')
+    .select('id, code, name, control_point')
+    .eq('control_point', controlPoint)
+    .eq('is_active', true)
+    .order('code', { ascending: true })
+  if (chambersErr) throw chambersErr
+  if (!chambers?.length) return null
+
+  const chamberIds = chambers.map(c => c.id)
+  const { data: activeLots, error: lotsErr } = await supabase
+    .from('lots')
+    .select('storage_chamber_id, product_group, remaining_qty')
+    .in('storage_chamber_id', chamberIds)
+    .gt('remaining_qty', 0)
+  if (lotsErr) throw lotsErr
+
+  const groupsByChamber = new Map()
+  for (const lot of activeLots || []) {
+    if (!lot.storage_chamber_id || !lot.product_group) continue
+    if (!groupsByChamber.has(lot.storage_chamber_id)) groupsByChamber.set(lot.storage_chamber_id, new Set())
+    groupsByChamber.get(lot.storage_chamber_id).add(lot.product_group)
+  }
+
+  // Najpierw wybierz komorę, w której jest już ta sama grupa produktu.
+  for (const chamber of chambers) {
+    const groups = groupsByChamber.get(chamber.id)
+    if (groups && groups.size === 1 && groups.has(productGroup)) return chamber.id
+  }
+
+  // Potem wybierz pustą komorę.
+  for (const chamber of chambers) {
+    if (!groupsByChamber.has(chamber.id)) return chamber.id
+  }
+
+  const occupied = chambers.map(ch => `${ch.code}: ${Array.from(groupsByChamber.get(ch.id) || []).join(', ') || 'pusta'}`).join('; ')
+  throw new Error(`Brak wolnej komory ${controlPoint} dla grupy ${productGroup}. Nie wolno mieszać różnych asortymentów w jednej komorze. Obecnie: ${occupied}`)
+}
+
+async function createIncomingLot(productId, operationId, operationDate, qty, productName) {
   const { data: lotNo, error: lotNoErr } = await supabase.rpc('generate_lot_no', {
     p_product_id: productId,
     p_date: operationDate
   })
   if (lotNoErr) throw lotNoErr
+
+  const productGroup = productGroupForName(productName)
+  const controlPoint = targetControlPointForProduct(productName)
+  const storageChamberId = await findCompatibleChamber(productGroup, controlPoint)
 
   const { data: lot, error: lotErr } = await supabase
     .from('lots')
@@ -210,7 +286,9 @@ async function createIncomingLot(productId, operationId, operationDate, qty) {
       production_date: operationDate,
       initial_qty: qty,
       remaining_qty: qty,
-      unit: 'kg'
+      unit: 'kg',
+      product_group: productGroup,
+      storage_chamber_id: storageChamberId
     })
     .select('id')
     .single()
@@ -263,7 +341,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       // Wersja v7: celowo bez zagnieżdżonych relacji Supabase, żeby ominąć błędy typu select/relationship.
       const { data: lotsRaw, error: lotsErr } = await supabase
         .from('lots')
-        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, product_id, created_at')
+        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, product_id, product_group, storage_chamber_id, created_at')
         .order('production_date', { ascending: true })
         .order('created_at', { ascending: true })
       if (lotsErr) throw lotsErr
@@ -285,7 +363,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       if (productIds.length) {
         const { data: productsRaw, error: productsErr } = await supabase
           .from('products')
-          .select('id, name, code')
+          .select('id, name, code, product_group')
           .in('id', productIds)
         if (productsErr) throw productsErr
         productMap = new Map((productsRaw || []).map(p => [p.id, p]))
@@ -301,8 +379,25 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         operationMap = new Map((operationsRaw || []).map(o => [o.id, o]))
       }
 
+      let chamberMap = new Map()
+      try {
+        const { data: chambersRaw } = await supabase
+          .from('storage_chambers')
+          .select('id, code, name, control_point, chamber_type')
+          .order('code', { ascending: true })
+        chamberMap = new Map((chambersRaw || []).map(c => [c.id, c]))
+        const chamberStatus = (chambersRaw || []).map(c => {
+          const chamberLots = (lotsRaw || []).filter(l => l.storage_chamber_id === c.id && Number(l.remaining_qty || 0) > 0)
+          const groups = Array.from(new Set(chamberLots.map(l => l.product_group).filter(Boolean)))
+          return { ...c, lotsCount: chamberLots.length, remainingQty: chamberLots.reduce((sum, l) => sum + (Number(l.remaining_qty) || 0), 0), groups }
+        })
+        setChamberRows(chamberStatus)
+      } catch (_) {
+        setChamberRows([])
+      }
+
       const lotMap = new Map((lotsRaw || []).map(l => [l.id, l]))
-      const lotsData = (lotsRaw || []).map(l => ({ ...l, products: productMap.get(l.product_id) || null }))
+      const lotsData = (lotsRaw || []).map(l => ({ ...l, products: productMap.get(l.product_id) || null, chamber: chamberMap.get(l.storage_chamber_id) || null }))
       const allocationsData = (allocationsRaw || []).map(a => ({
         ...a,
         products: productMap.get(a.product_id) || null,
@@ -312,7 +407,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO odświeżone. Wersja v9.')
+      setMessage('Stany FIFO i komory odświeżone. Wersja v10.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -406,7 +501,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           importedItems += 1
 
           if (direction === 'przychod') {
-            lotId = await createIncomingLot(productId, op.id, group.issueDate, itemQty)
+            lotId = await createIncomingLot(productId, op.id, group.issueDate, itemQty, row.productName)
             createdLots += 1
             const { error: itemLotErr } = await supabase
               .from('operation_items')
@@ -441,7 +536,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v9 FIFO NAPRAWIONE</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v10 KOMORY CP/CCP</div>
     </header>
 
     <section className="warning">
@@ -478,6 +573,20 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       </>}
     </section>
 
+
+    <section className="card">
+      <div className="section-title"><Warehouse/><div><h2>Komory CP/CCP</h2><p>CP2: 2 komory surowca, CP3: 2 komory produktu gotowego, CCP1: 4 beczki pulpy. System blokuje mieszanie różnych grup w jednej komorze.</p></div></div>
+      <div className="chamber-grid">
+        {CHAMBERS.map(([code, name, point, kind]) => {
+          const row = chamberRows.find(c => c.code === code)
+          return <div className="chamber" key={code}>
+            <strong>{code}</strong><span>{name}</span><small>{point} · {kind}</small>
+            <em>{row ? (row.groups.length ? `Grupa: ${row.groups.join(', ')} · ${Number(row.remainingQty || 0).toLocaleString('pl-PL')} kg` : 'Pusta / gotowa do przypisania') : 'Uruchom SQL v10 i odśwież stany'}</em>
+          </div>
+        })}
+      </div>
+    </section>
+
     <section className="card">
       <div className="section-title"><Warehouse/><div><h2>Stany partii i FIFO</h2><p>Podgląd pozostałych kilogramów z PZ oraz ostatnich rozliczeń WZ/FV według FIFO.</p></div></div>
       <div className="actions"><button className="secondary" onClick={loadFifoData} disabled={loadingStock}><RefreshCcw size={16}/> {loadingStock ? 'Odświeżanie...' : 'Odśwież stany FIFO'}</button></div>
@@ -487,9 +596,9 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <span>Rozliczenia FIFO: <b>{fifoRows.length}</b></span>
       </div>
       {stockRows.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr><th>Produkt</th><th>Kod</th><th>Partia</th><th>Data</th><th>Ilość pocz.</th><th>Pozostało</th><th>Status</th></tr></thead>
+        <thead><tr><th>Produkt</th><th>Grupa</th><th>Komora</th><th>Kod</th><th>Partia</th><th>Data</th><th>Ilość pocz.</th><th>Pozostało</th><th>Status</th></tr></thead>
         <tbody>{stockRows.slice(0, 120).map(l => <tr key={l.id}>
-          <td>{l.products?.name}</td><td>{l.products?.code}</td><td>{l.lot_no}</td><td>{l.production_date}</td><td>{Number(l.initial_qty || 0).toLocaleString('pl-PL')}</td><td><b>{Number(l.remaining_qty || 0).toLocaleString('pl-PL')}</b></td><td><span className="pill">{l.status}</span></td>
+          <td>{l.products?.name}</td><td>{l.product_group || l.products?.product_group}</td><td>{l.chamber?.code || '-'}</td><td>{l.products?.code}</td><td>{l.lot_no}</td><td>{l.production_date}</td><td>{Number(l.initial_qty || 0).toLocaleString('pl-PL')}</td><td><b>{Number(l.remaining_qty || 0).toLocaleString('pl-PL')}</b></td><td><span className="pill">{l.status}</span></td>
         </tr>)}</tbody>
       </table></div>}
       {fifoRows.length > 0 && <><h3>Ostatnie rozliczenia FIFO</h3><div className="table-wrap small"><table>

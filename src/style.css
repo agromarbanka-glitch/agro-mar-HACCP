@@ -40,3 +40,11 @@ th { position: sticky; top: 0; background: #f7faf6; z-index: 1; }
 .doc small { color: #68736b; }
 @media (max-width: 850px) { header, .two { display:block; } .grid.stats { grid-template-columns: 1fr 1fr; } h1 { font-size: 32px; } .badge { margin-top: 12px; } }
 @media (max-width: 520px) { .page { padding: 16px; } .grid.stats { grid-template-columns: 1fr; } .doc { grid-template-columns: 1fr; } }
+.chamber-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.chamber { border: 1px solid #e5e9e3; border-radius: 16px; padding: 14px; background: #fbfcfb; display: grid; gap: 4px; }
+.chamber strong { font-size: 18px; color: #23472b; }
+.chamber span { font-weight: 700; }
+.chamber small { color: #68736b; }
+.chamber em { color: #536156; font-style: normal; font-size: 13px; margin-top: 6px; }
+@media (max-width: 850px) { .chamber-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 520px) { .chamber-grid { grid-template-columns: 1fr; } }

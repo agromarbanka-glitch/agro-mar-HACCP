@@ -1,8 +1,17 @@
-# AGRO-MAR HACCP / IFS / FIFO — v9 naprawa FIFO
+# AGRO-MAR HACCP / IFS / FIFO — v10 KOMORY CP/CCP
 
-Zmiany v9:
-- WZ/FV/FS zapisywane jako `sprzedaz`, nie `sprzedaz_bez_produkcji`.
-- Ilość sprzedaży do FIFO liczona jako wartość bezwzględna, więc ujemne ilości z Excela rozliczają się poprawnie.
-- PZ i MM traktowane jako przyjęcia.
-- WZ/FV nie tworzą ujemnych partii.
-- Dołączony SQL: `supabase/2026-v9-reset-fifo-i-sprzedaz.sql`.
+Wersja v10 dodaje logikę komór i beczek:
+
+- CP2: 2 komory surowca,
+- CP3: 2 komory produktu gotowego,
+- CCP1: 4 beczki pulpy,
+- blokada mieszania różnych grup asortymentów w jednej komorze,
+- Malina extra / Malina klasa I / Malina pulpa są traktowane jako jedna grupa: `malina`,
+- MM i PZ są przyjęciem,
+- WZ/FV rozlicza FIFO i nie tworzy ujemnych partii.
+
+Po wgraniu do GitHub uruchom w Supabase:
+
+`supabase/2026-v10-komory-cp-ccp.sql`
+
+Potem w aplikacji odśwież `Ctrl+F5` i kliknij `Odśwież stany FIFO`.
