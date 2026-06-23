@@ -1,11 +1,8 @@
-# AGRO-MAR HACCP/FIFO v16
+# AGRO-MAR HACCP v18
 
-Poprawki:
-- usunięto z listy „Jabłko pulpa”, bo taki produkt nie istnieje,
-- dodano produkty gotowe/identyfikacyjne: Malina I, Malina Extra, Wiśnia, Aronia, Śliwka, Truskawka, Porzeczki, Jabłka,
-- pulpy dalej trafiają do CCP1,
-- produkty gotowe bez pulpy trafiają do CP3,
-- zachowana identyfikowalność nawet bez przerobu.
-
-Po wdrożeniu uruchom SQL:
-`supabase/2026-v16-produkty-gotowe-identyfikowalnosc.sql`
+Zmiany:
+- Identyfikowalność partii / karta partii.
+- K01/K02/K04 – start dokumentów HACCP.
+- Pola P/N domyślnie ustawiane na P, z możliwością ręcznej zmiany.
+- Admin może awaryjnie wymusić mieszanie grup w komorze po ostrzeżeniu i podaniu powodu.
+- Magazynier nadal ma blokadę mieszania grup.
