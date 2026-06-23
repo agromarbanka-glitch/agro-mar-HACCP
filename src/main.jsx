@@ -8,7 +8,7 @@ import './style.css'
 const PRODUCTS = [
   ['Malina pulpa', 'Mp'], ['Porzeczka czarna', 'Pcz'], ['Porzeczka czarna pulpa', 'Pczp'], ['Porzeczka czerwona', 'Pk'], ['Porzeczka czerwona pulpa', 'Pkp'], ['Truskawka', 'T'],
   ['Truskawka z szypułką', 'Tsz'], ['Aronia', 'A'], ['Śliwka', 'S'], ['Wiśnia', 'W'],
-  ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab'], ['Jabłko pulpa', 'Jp']
+  ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab']
 ]
 
 const DOCS = [
@@ -43,7 +43,6 @@ function productGroupForName(productName) {
   if (text.includes('truskawk')) return 'truskawka'
   if (text.includes('aronia')) return 'aronia'
   if (text.includes('sliw')) return 'sliwka'
-  if (text.includes('jabl') && text.includes('pulpa')) return 'jab_pulpa'
   if (text.includes('obier')) return 'jab_obier'
   if (text.includes('jabl')) return 'jab_przem'
   return text.split(' ')[0] || 'inna'
@@ -53,6 +52,12 @@ function targetControlPointForProduct(productName) {
   const text = normalizeText(productName)
   if (text.includes('pulpa')) return 'CCP1'
   return 'CP2'
+}
+
+function targetControlPointForProductionOutput(productName) {
+  const text = normalizeText(productName)
+  if (text.includes('pulpa')) return 'CCP1'
+  return 'CP3'
 }
 
 
@@ -75,7 +80,6 @@ const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
   [normalizeText('Jabłko na obierke'), 'Jabobier'],
   [normalizeText('Porzeczka czarna pulpa'), 'Pczp'],
   [normalizeText('Porzeczka czerwona pulpa'), 'Pkp'],
-  [normalizeText('Jabłko pulpa'), 'Jp']
 ])
 
 function baseCodeForProduct(productName) {
@@ -299,7 +303,7 @@ async function findCompatibleChamber(productGroup, controlPoint) {
   throw new Error(`Brak wolnej komory ${controlPoint} dla grupy ${productGroup}. Nie wolno mieszać różnych asortymentów w jednej komorze. Obecnie: ${occupied}`)
 }
 
-async function createIncomingLot(productId, operationId, operationDate, qty, productName) {
+async function createIncomingLot(productId, operationId, operationDate, qty, productName, forcedControlPoint = null) {
   const { data: lotNo, error: lotNoErr } = await supabase.rpc('generate_lot_no', {
     p_product_id: productId,
     p_date: operationDate
@@ -307,7 +311,7 @@ async function createIncomingLot(productId, operationId, operationDate, qty, pro
   if (lotNoErr) throw lotNoErr
 
   const productGroup = productGroupForName(productName)
-  const controlPoint = targetControlPointForProduct(productName)
+  const controlPoint = forcedControlPoint || targetControlPointForProduct(productName)
   const storageChamberId = await findCompatibleChamber(productGroup, controlPoint)
 
   const { data: lot, error: lotErr } = await supabase
@@ -522,7 +526,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       })
       if (outItemErr) throw outItemErr
 
-      const outputLotId = await createIncomingLot(outputProductId, op.id, today, outputQty, productionOutputName)
+      const outputLotId = await createIncomingLot(outputProductId, op.id, today, outputQty, productionOutputName, targetControlPointForProductionOutput(productionOutputName))
       const { error: inItemErr } = await supabase.from('operation_items').insert({
         operation_id: op.id,
         product_id: outputProductId,
@@ -901,8 +905,16 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
             <option>Malina pulpa</option>
             <option>Porzeczka czarna pulpa</option>
             <option>Porzeczka czerwona pulpa</option>
-            <option>Jabłko pulpa</option>
+            <option>Malina klasa I</option>
+            <option>Malina extra</option>
+            <option>Wiśnia</option>
+            <option>Aronia</option>
+            <option>Śliwka</option>
             <option>Truskawka</option>
+            <option>Truskawka z szypułką</option>
+            <option>Porzeczka czarna</option>
+            <option>Porzeczka czerwona</option>
+            <option>Jabłko przemysłowe</option>
             <option>Jabłko obierka</option>
             <option>Jabłko na obierkę</option>
           </select>
@@ -911,11 +923,11 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           <input value={productionYieldPercent} onChange={e => setProductionYieldPercent(e.target.value)} placeholder="np. 92" />
         </label>
         <label>Ilość produktu gotowego kg
-          <input value={productionOutputQty} onChange={e => setProductionOutputQty(e.target.value)} placeholder="np. 4800" />
+          <input value={productionOutputQty} onChange={e => setProductionOutputQty(e.target.value)} placeholder="np. 4800 albo taka sama ilość bez przerobu" />
         </label>
       </div>
       <div className="actions"><button className="ghost" onClick={calculateProductionOutputQty}>Oblicz wg uzysku</button><button className="secondary" onClick={createProductionConversion}>Utwórz przerób / produkcję</button></div>
-      <p className="hint">Przykład: wybierz partię Malina I, wpisz ilość, wybierz „Malina pulpa”. System zdejmie ilość z partii wejściowej, utworzy nową partię produktu gotowego, zapisze powiązanie partia wejściowa → partia wyjściowa i przypisze pulpę do CCP1.</p>
+      <p className="hint">Przykład: wybierz partię Malina I, wpisz ilość, wybierz „Malina pulpa” albo ten sam owoc bez przerobu. System zdejmie ilość z partii wejściowej, utworzy nową partię produktu gotowego, zapisze powiązanie partia wejściowa → partia wyjściowa i przypisze pulpę do CCP1.</p>
     </section>
 
     <section className="card">
