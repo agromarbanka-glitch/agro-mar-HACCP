@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import './style.css'
@@ -175,11 +175,23 @@ function App() {
   const [lotEditId, setLotEditId] = useState('')
   const [lotEditNewNo, setLotEditNewNo] = useState('')
   const [lotEditReason, setLotEditReason] = useState('')
+  const [lotSearch, setLotSearch] = useState('')
+  const [moveLotId, setMoveLotId] = useState('')
+  const [targetChamberId, setTargetChamberId] = useState('')
+  const [moveReason, setMoveReason] = useState('')
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
   const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
   const qtySum = filteredRows.reduce((s, r) => s + (Number(r.qty) || 0), 0)
+  const activeLots = useMemo(() => stockRows.filter(l => Number(l.remaining_qty || 0) > 0), [stockRows])
+  const visibleWarehouseLots = useMemo(() => {
+    const q = normalizeText(lotSearch)
+    return activeLots.filter(l => {
+      if (!q) return true
+      return normalizeText(`${l.lot_no} ${l.products?.name || ''} ${l.product_group || ''} ${l.chamber?.code || ''}`).includes(q)
+    }).slice(0, 250)
+  }, [activeLots, lotSearch])
 
   async function handleFile(e) {
     const file = e.target.files?.[0]
@@ -415,7 +427,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
-      setMessage('Stany FIFO i komory odświeżone. Wersja v11.')
+      setMessage('Stany FIFO, komory i magazyn partii odświeżone. Wersja v12.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
     } finally {
@@ -506,6 +518,71 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       await loadFifoData()
     } catch (err) {
       setMessage(`Błąd produkcji/przerobu: ${err.message}`)
+    }
+  }
+
+
+  function activeGroupsInChamber(chamberId, ignoreLotId = null) {
+    return Array.from(new Set(
+      stockRows
+        .filter(l => l.storage_chamber_id === chamberId && l.id !== ignoreLotId && Number(l.remaining_qty || 0) > 0)
+        .map(l => l.product_group || l.products?.product_group || productGroupForName(l.products?.name))
+        .filter(Boolean)
+    ))
+  }
+
+  async function moveLotToChamber() {
+    if (!supabase) return
+    const selectedLot = stockRows.find(l => l.id === moveLotId)
+    const chamber = chamberRows.find(c => c.id === targetChamberId)
+    if (!selectedLot) {
+      setMessage('Wybierz partię magazynową do przypisania lub przeniesienia.')
+      return
+    }
+    if (!chamber) {
+      setMessage('Wybierz komorę docelową.')
+      return
+    }
+    const reason = String(moveReason || '').trim()
+    if (!reason) {
+      setMessage('Podaj powód przypisania/przeniesienia partii do komory.')
+      return
+    }
+
+    const lotGroup = selectedLot.product_group || selectedLot.products?.product_group || productGroupForName(selectedLot.products?.name)
+    const groups = activeGroupsInChamber(chamber.id, selectedLot.id)
+    if (groups.length && !groups.includes(lotGroup)) {
+      setMessage(`Nie można przenieść partii ${selectedLot.lot_no} do ${chamber.code}. W komorze jest już grupa: ${groups.join(', ')}. Nie wolno mieszać różnych asortymentów.`)
+      return
+    }
+
+    const oldCode = selectedLot.chamber?.code || 'brak komory'
+    if (!window.confirm(`Potwierdź przypisanie/przeniesienie partii ${selectedLot.lot_no} (${selectedLot.products?.name || ''}) z ${oldCode} do ${chamber.code}.`)) return
+
+    try {
+      const { error: histErr } = await supabase.from('lot_location_history').insert({
+        lot_id: selectedLot.id,
+        old_chamber_id: selectedLot.storage_chamber_id || null,
+        new_chamber_id: chamber.id,
+        product_group: lotGroup,
+        reason,
+        changed_by_role: userRole
+      })
+      if (histErr) throw histErr
+
+      const { error: updErr } = await supabase
+        .from('lots')
+        .update({ storage_chamber_id: chamber.id, product_group: lotGroup })
+        .eq('id', selectedLot.id)
+      if (updErr) throw updErr
+
+      setMessage(`Partia ${selectedLot.lot_no} została przypisana do ${chamber.code}. Zapisano historię lokalizacji.`)
+      setMoveLotId('')
+      setTargetChamberId('')
+      setMoveReason('')
+      await loadFifoData()
+    } catch (err) {
+      setMessage(`Błąd przeniesienia partii: ${err.message}`)
     }
   }
 
@@ -676,7 +753,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v11 PRODUKCJA / PARTIE</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v12 MAGAZYN PARTII</div>
     </header>
 
     <section className="warning">
@@ -727,6 +804,45 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       </div>
     </section>
 
+
+    <section className="card">
+      <div className="section-title"><ArrowRightLeft/><div><h2>Magazyn partii</h2><p>Partie są osobne dla każdej dostawy. FIFO działa po dacie przyjęcia i partii. Komora może zawierać wiele partii, ale tylko jedną grupę asortymentową.</p></div></div>
+      <div className="actions"><button className="secondary" onClick={loadFifoData} disabled={loadingStock}><RefreshCcw size={16}/> {loadingStock ? 'Odświeżanie...' : 'Odśwież magazyn partii'}</button></div>
+      <div className="summary">
+        <span>Aktywne partie: <b>{activeLots.length}</b></span>
+        <span>Bez komory: <b>{activeLots.filter(l => !l.storage_chamber_id).length}</b></span>
+        <span>Grupy: <b>{Array.from(new Set(activeLots.map(l => l.product_group || l.products?.product_group).filter(Boolean))).length}</b></span>
+        <span>Pozostało kg: <b>{activeLots.reduce((s, l) => s + (Number(l.remaining_qty) || 0), 0).toLocaleString('pl-PL')}</b></span>
+      </div>
+      <div className="form-grid">
+        <label>Szukaj partii / produktu / komory
+          <input value={lotSearch} onChange={e => setLotSearch(e.target.value)} placeholder="np. M1/001 albo malina albo CP2-1" />
+        </label>
+        <label>Partia do przypisania/przeniesienia
+          <select value={moveLotId} onChange={e => setMoveLotId(e.target.value)}>
+            <option value="">Wybierz partię</option>
+            {visibleWarehouseLots.map(l => <option key={l.id} value={l.id}>{l.lot_no} · {l.products?.name} · {Number(l.remaining_qty || 0).toLocaleString('pl-PL')} kg · {l.chamber?.code || 'bez komory'}</option>)}
+          </select>
+        </label>
+        <label>Komora docelowa
+          <select value={targetChamberId} onChange={e => setTargetChamberId(e.target.value)}>
+            <option value="">Wybierz komorę</option>
+            {chamberRows.map(c => <option key={c.id} value={c.id}>{c.code} · {c.name} · {c.groups?.length ? `grupa: ${c.groups.join(', ')}` : 'pusta'}</option>)}
+          </select>
+        </label>
+        <label>Powód przypisania/przeniesienia
+          <input value={moveReason} onChange={e => setMoveReason(e.target.value)} placeholder="np. przyjęcie PZ, korekta lokalizacji, przeniesienie" />
+        </label>
+      </div>
+      <div className="actions"><button className="secondary" onClick={moveLotToChamber}>Przypisz / przenieś partię</button></div>
+      <p className="hint">System zablokuje przeniesienie, jeśli w wybranej komorze znajduje się inna grupa asortymentowa, np. wiśnia zamiast maliny.</p>
+      {visibleWarehouseLots.length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Partia</th><th>Produkt</th><th>Grupa</th><th>Komora</th><th>Data przyjęcia</th><th>Pozostało kg</th><th>Status</th></tr></thead>
+        <tbody>{visibleWarehouseLots.map(l => <tr key={l.id}>
+          <td><b>{l.lot_no}</b></td><td>{l.products?.name}</td><td>{l.product_group || l.products?.product_group}</td><td>{l.chamber?.code || <span className="danger-text">bez komory</span>}</td><td>{l.production_date}</td><td>{Number(l.remaining_qty || 0).toLocaleString('pl-PL')}</td><td><span className="pill">{l.status}</span></td>
+        </tr>)}</tbody>
+      </table></div>}
+    </section>
 
     <section className="card">
       <div className="section-title"><Package/><div><h2>Produkcja / Przerób</h2><p>Ręczna decyzja, czy dana partia surowca idzie do przerobu na pulpę lub produkt gotowy. FIFO dalej zostaje po dacie przyjęcia i partii.</p></div></div>
