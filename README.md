@@ -1,8 +1,11 @@
-# AGRO-MAR HACCP v18
+# AGRO-MAR HACCP/FIFO v19
 
-Zmiany:
-- Identyfikowalność partii / karta partii.
-- K01/K02/K04 – start dokumentów HACCP.
-- Pola P/N domyślnie ustawiane na P, z możliwością ręcznej zmiany.
-- Admin może awaryjnie wymusić mieszanie grup w komorze po ostrzeżeniu i podaniu powodu.
-- Magazynier nadal ma blokadę mieszania grup.
+Zakres:
+- K02 Magazyn surowca CP2
+- K04 Magazyn produktu gotowego CP3/CCP1
+- K07 Kontrola sita
+- historia komór i widok zajętości komór
+- domyślne wartości P/N = P z możliwością zmiany
+- admin override mieszania asortymentów z powodem
+
+Wgraj pliki do GitHub, poczekaj na Vercel Ready, następnie uruchom SQL z katalogu supabase.
