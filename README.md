@@ -1,7 +1,16 @@
-# AGRO-MAR HACCP/FIFO – v23.1
+# AGRO-MAR HACCP/FIFO v24
 
-Poprawka wdrożeniowa po błędzie Vercel `npm install ETIMEDOUT`.
+Stabilizacja wdrożenia Vercel po błędach npm `ETIMEDOUT`.
 
-Zmiana: usunięto `package-lock.json`, który wskazywał na wewnętrzny rejestr pakietów niedostępny dla Vercel. Vercel pobierze paczki z publicznego npm.
+Zmiany:
+- dodany `.npmrc` wymuszający oficjalny registry npm,
+- dodany `vercel.json` z jawnym install/build command,
+- zastąpiony błędny `package-lock.json` zawierający wewnętrzne adresy OpenAI,
+- zachowane funkcje v23: kartoteki miesięczne, druk, Excel, pracownicy, edycja wierszy.
 
-SQL: użyj tego samego pliku co v23: `supabase/2026-v23-kartoteki-miesieczne-excel.sql`.
+Instrukcja:
+1. Rozpakuj ZIP.
+2. Wgraj całą zawartość do GitHub.
+3. Upewnij się, że w repozytorium został nadpisany stary `package-lock.json`.
+4. Wdróż w Vercel.
+5. SQL: użyj skryptu v23 tylko jeśli nie był jeszcze uruchomiony.
