@@ -1,9 +1,11 @@
-# AGRO-MAR HACCP/FIFO v22.2
+# AGRO-MAR HACCP/FIFO v22.3
 
 Poprawki:
-- K01 odwzorowany w układzie zgodnym z oryginalną kartą tabelaryczną.
-- Poprawiony druk/PDF z modala.
-- Możliwość edycji pojedynczych zapisów/pól K01, z potwierdzeniem i historią zmian.
-- Pola P/N pozostają domyślnie jako P, możliwa zmiana na N z obowiązkową uwagą.
+- lista pracowników do pola „Podpis przyjmującego”,
+- dodawanie i usuwanie pracowników w Ustawieniach,
+- wybór pracownika w K01,
+- krótsze dane dostawcy w kartotekach: nazwa + nr PZ,
+- poprawione drukowanie K01 przez osobne okno wydruku.
 
-SQL v22.2 jest kontrolny i nie zmienia struktury bazy.
+Po wgraniu do GitHub/Vercel uruchom w Supabase:
+`supabase/2026-v22-3-pracownicy-druk-k01.sql`
