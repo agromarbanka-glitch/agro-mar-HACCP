@@ -544,7 +544,7 @@ function App() {
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
     const rows = docs.map((doc, i) => `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '')}</td><td>${escapeHtml(doc.chamber_code || group.chamber || '')}</td><td style="text-align:left">${escapeHtml(doc.product_name || '')}<br><small>${escapeHtml(doc.lot_no || '')}</small></td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${escapeHtml(doc.data?.temperatura || '')}</td><td>${normalizePN(doc.data?.parametry_magazynowania || 'P')}</td><td>${escapeHtml(doc.data?.uwagi || '')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '')}</td></tr>`).join('')
     const blanks = Array.from({ length: Math.max(0, 14 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td>P</td><td></td><td></td></tr>`).join('')
-    return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.chamber || '')} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców (CCP1)</b></td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt / partia</th><th>Ilość</th><th>Temperatura</th><th>Ocena (P/N)</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Temperaturę i uwagi można uzupełniać ręcznie.</div><script>window.onload=function(){setTimeout(function(){window.print()},150)}</script></body></html>`
+    return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.chamber || '')} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców</b></td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt / partia</th><th>Ilość</th><th>Temperatura</th><th>Ocena (P/N)</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Temperaturę i uwagi można uzupełniać ręcznie.</div><script>window.onload=function(){setTimeout(function(){window.print()},150)}</script></body></html>`
   }
 
   function printHaccpGroup(group) {
@@ -1384,7 +1384,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v23 KARTOTEKI MIESIĘCZNE/EXCEL</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.2 K01 MIESIĘCZNE</div>
     </header>
 
     <section className="warning">
@@ -1627,7 +1627,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v23: kartoteki miesięczne/zakresowe 1:1, edycja pojedynczych wpisów, podpis z listy, druk/PDF i Excel.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.2: K01 miesięczne/zakresowe, podpis z listy pracowników, edycja pojedynczych wierszy, druk/PDF i Excel.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
@@ -1651,13 +1651,15 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <thead><tr><th>Kartoteka</th><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th><th>Akcje</th></tr></thead>
         <tbody>{haccpMonthlyGroups.map(g => <tr key={g.key}><td><b>{g.type}</b></td><td>{periodLabel(g)}</td><td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td><td>{g.docs.length}</td><td>{g.docs.filter(d => d.status === 'N').length}</td><td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Podgląd</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td></tr>)}</tbody>
       </table></div>}
-      <h3>Pojedyncze zapisy kartoteki</h3>
-      {haccpDocsForFilter.length === 0 && <p className="hint">Brak dokumentów {docsFilter} dla aktualnych filtrów. Dla K04/K07 pojawią się po utworzeniu partii produktu gotowego lub pracy w CP3/CCP1.</p>}
+      <h3>Wpisy w wybranej kartotece – edycja pojedynczych wierszy</h3>
+      <p className="hint">Podgląd, druk/PDF i Excel wykonuj z sekcji „Kartoteki zbiorcze”. Poniżej edytujesz pojedyncze wiersze, żeby nie tworzyć osobnej kartki dla każdej dostawy.</p>
+      {haccpDocsForFilter.length === 0 && <p className="hint">Brak wpisów {docsFilter} dla aktualnych filtrów. Dla K04/K07 pojawią się po utworzeniu partii produktu gotowego lub pracy w CP3/CCP1.</p>}
       {haccpDocsForFilter.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr><th>Partia</th><th>Produkt</th><th>Dostawca</th><th>PZ/WZ</th><th>Data</th><th>Komora</th><th>Status</th><th>Akcje</th></tr></thead>
+        <thead><tr><th>Partia</th><th>Produkt</th><th>Dostawca / PZ</th><th>Data</th><th>Komora</th><th>Status</th><th>Podpis</th><th>Akcje</th></tr></thead>
         <tbody>{haccpDocsForFilter.slice(0, 300).map(d => <tr key={d.id}>
-          <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{shortSupplier(d.supplier_name, d.document_no) || '-'}</td><td>{d.document_no || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
-          <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Podgląd</button><button className="mini secondary" onClick={() => printHaccpDoc(d)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
+          <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{shortSupplier(d.supplier_name, d.document_no) || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
+          <td><select className="mini-select" value={d.signed_by_operator || d.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployee(d,e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
+          <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Edytuj wiersz</button><button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
         </tr>)}</tbody>
       </table></div>}
     </section>

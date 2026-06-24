@@ -1,16 +1,16 @@
-# AGRO-MAR HACCP/FIFO v24
+# AGRO-MAR HACCP v24.2
 
-Stabilizacja wdrożenia Vercel po błędach npm `ETIMEDOUT`.
+Zakres wersji:
+- K01 jako kartoteka zbiorcza miesięczna / tygodniowa / zakres dat.
+- Układ K01 zgodny z oryginalnym formularzem.
+- Dane dostawcy skrócone: nazwa + numer PZ.
+- Podpis przyjmującego wybierany z listy pracowników.
+- Edycja pojedynczych pól w pojedynczym wierszu.
+- Druk / PDF z widoku kartoteki zbiorczej.
+- Eksport kartoteki do Excel.
 
-Zmiany:
-- dodany `.npmrc` wymuszający oficjalny registry npm,
-- dodany `vercel.json` z jawnym install/build command,
-- zastąpiony błędny `package-lock.json` zawierający wewnętrzne adresy OpenAI,
-- zachowane funkcje v23: kartoteki miesięczne, druk, Excel, pracownicy, edycja wierszy.
-
-Instrukcja:
-1. Rozpakuj ZIP.
-2. Wgraj całą zawartość do GitHub.
-3. Upewnij się, że w repozytorium został nadpisany stary `package-lock.json`.
-4. Wdróż w Vercel.
-5. SQL: użyj skryptu v23 tylko jeśli nie był jeszcze uruchomiony.
+Wdrożenie:
+1. Rozpakuj paczkę.
+2. Wgraj całą zawartość do GitHub, zastępując pliki.
+3. Poczekaj na Ready w Vercel.
+4. Uruchom SQL v24.2 w Supabase tylko jeśli nie ma tabeli pracowników lub podpisów.
