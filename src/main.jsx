@@ -294,31 +294,161 @@ function App() {
     }
   }
 
+  function normalizePN(value) {
+    return value === 'N' ? 'N' : 'P'
+  }
+
+  async function editHaccpDataField(doc, field, label, currentValue, options = {}) {
+    if (!supabase || !doc) return
+    let nextValue
+    if (options.pn) {
+      const current = normalizePN(currentValue)
+      nextValue = window.prompt(`${label}: wpisz P albo N`, current)
+      if (nextValue === null) return
+      nextValue = String(nextValue).trim().toUpperCase()
+      if (!['P', 'N'].includes(nextValue)) {
+        setMessage('Nie zapisano: wpisz tylko P albo N.')
+        return
+      }
+      if (nextValue === 'N') {
+        const reason = window.prompt('Przy wartości N wpisz uwagę / opis niezgodności:') || ''
+        if (!reason.trim()) {
+          setMessage('Nie zapisano: przy N uwaga jest obowiązkowa.')
+          return
+        }
+        const nextData = { ...(doc.data || {}), [field]: nextValue, uwagi: reason }
+        await updateHaccpDocumentField(doc, field, label, currentValue, nextValue, nextData, reason)
+        return
+      }
+    } else {
+      nextValue = window.prompt(`Edytuj pole: ${label}`, currentValue || '')
+      if (nextValue === null) return
+    }
+    const reason = window.prompt('Powód zmiany / korekty:', 'Korekta zapisu') || 'Korekta zapisu'
+    const nextData = { ...(doc.data || {}), [field]: nextValue }
+    await updateHaccpDocumentField(doc, field, label, currentValue, nextValue, nextData, reason)
+  }
+
+  async function updateHaccpDocumentField(doc, field, label, oldValue, newValue, nextData, reason) {
+    const confirmed = window.confirm(`Czy zapisać zmianę pola "${label}"?`)
+    if (!confirmed) return
+    try {
+      const newStatus = Object.values(nextData || {}).some(v => v === 'N') ? 'N' : 'P'
+      const { error } = await supabase
+        .from('haccp_documents')
+        .update({ data: nextData, status: newStatus, updated_at: new Date().toISOString() })
+        .eq('id', doc.id)
+      if (error) throw error
+      await supabase.from('haccp_document_history').insert({
+        document_id: doc.id,
+        action: 'edycja_pola',
+        field_name: field,
+        old_value: String(oldValue ?? ''),
+        new_value: String(newValue ?? ''),
+        reason,
+        changed_by: userRole
+      })
+      const updated = { ...doc, data: nextData, status: newStatus }
+      setSelectedHaccpDoc(updated)
+      await loadHaccpDocs()
+      setMessage(`Zapisano zmianę pola: ${label}.`)
+    } catch (err) {
+      setMessage(`Błąd edycji dokumentu: ${err.message}`)
+    }
+  }
+
+  function K01Value({ doc, field, label, children, pn=false }) {
+    const value = children ?? (pn ? normalizePN(doc.data?.[field]) : (doc.data?.[field] || ''))
+    return <span className="editable-cell">
+      {value || '-'}
+      <button className="mini edit no-print" onClick={() => editHaccpDataField(doc, field, label, value, { pn })}>Edytuj</button>
+    </span>
+  }
+
+  function renderK01OriginalLayout(doc) {
+    const pn = (field) => normalizePN(doc.data?.[field])
+    const blankRows = Array.from({ length: 8 })
+    return <>
+      <div className="k01-original">
+        <table className="k01-head">
+          <tbody>
+            <tr>
+              <td className="company" rowSpan="2"><b>AGRO-MAR MARIUSZ<br/>BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja {doc.document_version || 'I/2024'}</b></td>
+              <td className="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td>
+              <td className="meta" rowSpan="2"><b>Rok:</b> {(doc.document_date || '').slice(0,4)}<br/><b>Miesiąc:</b> {(doc.document_date || '').slice(5,7)}<br/><b>Strona:</b></td>
+            </tr>
+            <tr><td className="raw-name"><b>Nazwa surowca:</b> {doc.product_name || '........................'}</td></tr>
+          </tbody>
+        </table>
+        <table className="k01-table">
+          <thead>
+            <tr>
+              <th rowSpan="2">Lp.</th>
+              <th rowSpan="2">Data dostawy</th>
+              <th rowSpan="2">Dane dostawcy/<br/>nr faktury</th>
+              <th rowSpan="2">Stan higieniczny<br/>pojazdu<br/>(P/N)*</th>
+              <th rowSpan="2">Ilość</th>
+              <th colSpan="2">Ocena surowca (P/N)*</th>
+              <th rowSpan="2">Podpis przyjmującego</th>
+            </tr>
+            <tr>
+              <th>Wybarwienie/zapach/<br/>brak uszkodzeń<br/>mechanicznych</th>
+              <th>Brak zgnilizny/<br/>zapleśnienia/<br/>zagrzybienia</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1</td>
+              <td><K01Value doc={doc} field="data_dostawy" label="Data dostawy">{doc.document_date || ''}</K01Value></td>
+              <td><K01Value doc={doc} field="dane_dostawcy" label="Dane dostawcy / nr faktury">{`${doc.supplier_name || ''}${doc.document_no ? ' / ' + doc.document_no : ''}`}</K01Value></td>
+              <td className={pn('stan_higieniczny_pojazdu') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="stan_higieniczny_pojazdu" label="Stan higieniczny pojazdu" pn>{pn('stan_higieniczny_pojazdu')}</K01Value></td>
+              <td><K01Value doc={doc} field="ilosc" label="Ilość">{Number(doc.qty || 0).toLocaleString('pl-PL')}</K01Value></td>
+              <td className={pn('wybarwienie_zapach_brak_uszkodzen') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="wybarwienie_zapach_brak_uszkodzen" label="Wybarwienie/zapach/brak uszkodzeń mechanicznych" pn>{pn('wybarwienie_zapach_brak_uszkodzen')}</K01Value></td>
+              <td className={pn('brak_zgnilizny_zaplesnienia_zagrzybienia') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="brak_zgnilizny_zaplesnienia_zagrzybienia" label="Brak zgnilizny/zapleśnienia/zagrzybienia" pn>{pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</K01Value></td>
+              <td><K01Value doc={doc} field="podpis_przyjmujacego" label="Podpis przyjmującego">{doc.signed_by_operator || ''}</K01Value></td>
+            </tr>
+            {blankRows.map((_, i) => <tr key={i} className="blank-row"><td>{i+2}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>)}
+          </tbody>
+        </table>
+        <div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Uwagi: {doc.data?.uwagi || '........................................................................................................'}</div>
+      </div>
+      <div className="modal-actions no-print inline-actions">
+        <button className="secondary" onClick={() => editHaccpDataField(doc, 'uwagi', 'Uwagi', doc.data?.uwagi || '')}>Edytuj uwagi</button>
+        <button className="secondary" onClick={() => editHaccpDataField(doc, 'podpis_przyjmujacego', 'Podpis przyjmującego', doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '')}>Edytuj podpis</button>
+      </div>
+    </>
+  }
+
+  function renderGenericHaccpLayout(doc) {
+    const entries = Object.entries(doc.data || {})
+    return <>
+      <div className="paper-head">
+        <div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div>
+        <div><b>{doc.document_type}</b><br/>Wersja: {doc.document_version || 'I/2024'}<br/>Data: {doc.document_date || '-'}</div>
+      </div>
+      <h2>{HACCPCARDS.find(c => c[0] === doc.document_type)?.[1] || doc.document_type}</h2>
+      <div className="paper-grid">
+        <span><b>Nr partii:</b> {doc.lot_no || '-'}</span>
+        <span><b>Produkt:</b> {doc.product_name || '-'}</span>
+        <span><b>Dostawca:</b> {doc.supplier_name || '-'}</span>
+        <span><b>Dokument:</b> {doc.document_no || '-'}</span>
+        <span><b>Komora:</b> {doc.chamber_code || '-'}</span>
+        <span><b>Ilość:</b> {Number(doc.qty || 0).toLocaleString('pl-PL')} kg</span>
+      </div>
+      <table className="paper-table"><tbody>
+        {entries.length === 0 && <tr><td>Kontrola P/N</td><td>P</td></tr>}
+        {entries.map(([k,v]) => <tr key={k}><td>{k}</td><td className={v === 'N' ? 'pn-n' : ''}>{String(v)} <button className="mini edit no-print" onClick={() => editHaccpDataField(doc, k, k, v, { pn: v === 'P' || v === 'N' })}>Edytuj</button></td></tr>)}
+      </tbody></table>
+      <div className="signature-row"><span>Podpis operatora: {doc.signed_by_operator || '....................'}</span><span>Podpis administratora: {doc.signed_by_admin || '....................'}</span></div>
+    </>
+  }
+
   function renderHaccpPreview(doc) {
     if (!doc) return null
-    const entries = Object.entries(doc.data || {})
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
       <div className="haccp-modal" onClick={e => e.stopPropagation()}>
-        <div className="haccp-paper">
-          <div className="paper-head">
-            <div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div>
-            <div><b>{doc.document_type}</b><br/>Wersja: {doc.document_version || 'I/2024'}<br/>Data: {doc.document_date || '-'}</div>
-          </div>
-          <h2>{HACCPCARDS.find(c => c[0] === doc.document_type)?.[1] || doc.document_type}</h2>
-          <div className="paper-grid">
-            <span><b>Nr partii:</b> {doc.lot_no || '-'}</span>
-            <span><b>Produkt:</b> {doc.product_name || '-'}</span>
-            <span><b>Dostawca:</b> {doc.supplier_name || '-'}</span>
-            <span><b>Dokument:</b> {doc.document_no || '-'}</span>
-            <span><b>Komora:</b> {doc.chamber_code || '-'}</span>
-            <span><b>Ilość:</b> {Number(doc.qty || 0).toLocaleString('pl-PL')} kg</span>
-          </div>
-          <table className="paper-table"><tbody>
-            {entries.length === 0 && <tr><td>Kontrola P/N</td><td>P</td></tr>}
-            {entries.map(([k,v]) => <tr key={k}><td>{k}</td><td className={v === 'N' ? 'pn-n' : ''}>{String(v)}</td></tr>)}
-          </tbody></table>
-          <div className="signature-row"><span>Podpis operatora: {doc.signed_by_operator || '....................'}</span><span>Podpis administratora: {doc.signed_by_admin || '....................'}</span></div>
-          <p className="hint">Wydruk wygenerowany z systemu AGRO-MAR HACCP/FIFO. Zmiany dokumentu są zapisywane w historii.</p>
+        <div className={doc.document_type === 'K01' ? 'haccp-paper k01-print' : 'haccp-paper'}>
+          {doc.document_type === 'K01' ? renderK01OriginalLayout(doc) : renderGenericHaccpLayout(doc)}
         </div>
         <div className="modal-actions no-print">
           <button className="secondary" onClick={() => window.print()}><Printer size={16}/> Drukuj / PDF</button>
@@ -1013,7 +1143,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v21.1 MENU NAPRAWIONE</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v22.2 K01/DRUK/EDYCJA</div>
     </header>
 
     <section className="warning">
