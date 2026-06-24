@@ -67,3 +67,13 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 /* v22.3 - pracownicy i stabilny druk */
 .employee-signature-row{align-items:flex-end;justify-content:flex-start;flex-wrap:wrap}.employee-signature-row label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#23472b}.employee-signature-row select{min-width:240px;border:1px solid #d8d8d8;border-radius:12px;padding:10px;background:white}.employee-actions{display:flex;align-items:flex-end;margin-top:0}.ghost{background:#edf4ed;color:#23472b}
 @media print{.employee-signature-row{display:none!important}}
+.print-only { display:none; }
+.monthly-paper { background:white; padding:10px; }
+.haccp-modal.wide { max-width: 1180px; width: 96vw; }
+.mini-select { max-width: 160px; padding: 5px; border: 1px solid #b9c3b7; border-radius: 6px; background: #fff; }
+@media print {
+  .no-print, .top-tabs, header, .warning, .modal-actions { display:none !important; }
+  .print-only { display:inline; }
+  .haccp-modal, .haccp-paper, .modal-backdrop { position: static !important; inset: auto !important; box-shadow:none !important; background:white !important; width:100% !important; max-width:none !important; padding:0 !important; }
+  .monthly-paper { padding:0; }
+}

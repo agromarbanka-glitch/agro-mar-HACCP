@@ -1,11 +1,14 @@
-# AGRO-MAR HACCP/FIFO v22.3
+# AGRO-MAR HACCP/FIFO v23
 
-Poprawki:
-- lista pracowników do pola „Podpis przyjmującego”,
-- dodawanie i usuwanie pracowników w Ustawieniach,
-- wybór pracownika w K01,
-- krótsze dane dostawcy w kartotekach: nazwa + nr PZ,
-- poprawione drukowanie K01 przez osobne okno wydruku.
+Zmiany:
+- kartoteki zbiorcze: jedna kartoteka na miesiąc albo własny zakres dat,
+- K01 jako tabela miesięczna zgodna z oryginalnym układem,
+- K02 jako kartoteka zbiorcza magazynowania surowca,
+- edycja pojedynczych wpisów/wierszy,
+- podpis przyjmującego wybierany z listy pracowników,
+- skrócone dane dostawcy: nazwa + nr PZ,
+- druk/PDF dla kartoteki zbiorczej,
+- pobranie kartoteki do Excel.
 
-Po wgraniu do GitHub/Vercel uruchom w Supabase:
-`supabase/2026-v22-3-pracownicy-druk-k01.sql`
+Po wdrożeniu uruchom w Supabase:
+`supabase/2026-v23-kartoteki-miesieczne-excel.sql`
