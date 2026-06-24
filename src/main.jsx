@@ -195,6 +195,9 @@ function App() {
   const [importPreview, setImportPreview] = useState([])
   const [haccpDocs, setHaccpDocs] = useState([])
   const [docsFilter, setDocsFilter] = useState('K01')
+  const [haccpSearch, setHaccpSearch] = useState('')
+  const [haccpStatusFilter, setHaccpStatusFilter] = useState('all')
+  const [selectedHaccpDoc, setSelectedHaccpDoc] = useState(null)
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -208,6 +211,122 @@ function App() {
       return normalizeText(`${l.lot_no} ${l.products?.name || ''} ${l.product_group || ''} ${l.chamber?.code || ''}`).includes(q)
     }).slice(0, 250)
   }, [activeLots, lotSearch])
+
+  const HACCPCARDS = [
+    ['K01', 'K01 – Przyjęcie surowca (CP1)', 'Dostawy PZ/MM, ocena surowca i pojazdu'],
+    ['K02', 'K02 – Magazynowanie surowca (CP2)', 'Komory surowca, temperatury i status P/N'],
+    ['K04', 'K04 – Magazynowanie produktu gotowego (CP3/CCP1)', 'Produkty gotowe, pulpy i komory/beczki'],
+    ['K07', 'K07 – Kontrola sita / identyfikowalność', 'Kontrola przed przerobem oraz śledzenie partii']
+  ]
+
+  const haccpDocsForFilter = useMemo(() => {
+    const q = normalizeText(haccpSearch)
+    return haccpDocs
+      .filter(d => d.document_type === docsFilter)
+      .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
+      .filter(d => {
+        if (!q) return true
+        return normalizeText(`${d.lot_no || ''} ${d.product_name || ''} ${d.supplier_name || ''} ${d.document_no || ''} ${d.chamber_code || ''}`).includes(q)
+      })
+  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter])
+
+  function haccpCount(type) {
+    return haccpDocs.filter(d => d.document_type === type).length
+  }
+
+  function haccpNonconformityCount(type) {
+    return haccpDocs.filter(d => d.document_type === type && d.status === 'N').length
+  }
+
+  function haccpPendingCount(type) {
+    return haccpDocs.filter(d => d.document_type === type && !d.signed_by_operator).length
+  }
+
+  function statusLabel(doc) {
+    if (doc?.status === 'N') return 'Niezgodność'
+    if (!doc?.signed_by_operator) return 'W trakcie'
+    return 'Prawidłowo'
+  }
+
+  function statusClass(doc) {
+    if (doc?.status === 'N') return 'status danger'
+    if (!doc?.signed_by_operator) return 'status wait'
+    return 'status ok'
+  }
+
+  function printHaccpDoc(doc) {
+    setSelectedHaccpDoc(doc)
+    setTimeout(() => window.print(), 250)
+  }
+
+  async function changeHaccpStatus(doc, newStatus) {
+    if (!supabase || !doc) return
+    let note = ''
+    if (newStatus === 'N') {
+      note = window.prompt('Wpisz opis niezgodności. Pole wymagane przy zmianie na N:') || ''
+      if (!note.trim()) {
+        setMessage('Nie zapisano: przy statusie N opis niezgodności jest wymagany.')
+        return
+      }
+    }
+    const confirmed = window.confirm(`Czy na pewno zmienić status dokumentu ${doc.document_type} / ${doc.lot_no || ''} na ${newStatus}?`)
+    if (!confirmed) return
+    const nextData = { ...(doc.data || {}), uwagi: newStatus === 'N' ? note : (doc.data?.uwagi || '') }
+    try {
+      const { error } = await supabase
+        .from('haccp_documents')
+        .update({ status: newStatus, data: nextData, updated_at: new Date().toISOString() })
+        .eq('id', doc.id)
+      if (error) throw error
+      await supabase.from('haccp_document_history').insert({
+        document_id: doc.id,
+        action: 'zmiana_statusu',
+        field_name: 'status',
+        old_value: doc.status || 'P',
+        new_value: newStatus,
+        reason: newStatus === 'N' ? note : 'Zmiana statusu na P',
+        changed_by: userRole
+      })
+      setMessage(`Zmieniono status dokumentu na ${newStatus}.`)
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`Błąd zmiany statusu: ${err.message}`)
+    }
+  }
+
+  function renderHaccpPreview(doc) {
+    if (!doc) return null
+    const entries = Object.entries(doc.data || {})
+    return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
+      <div className="haccp-modal" onClick={e => e.stopPropagation()}>
+        <div className="haccp-paper">
+          <div className="paper-head">
+            <div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div>
+            <div><b>{doc.document_type}</b><br/>Wersja: {doc.document_version || 'I/2024'}<br/>Data: {doc.document_date || '-'}</div>
+          </div>
+          <h2>{HACCPCARDS.find(c => c[0] === doc.document_type)?.[1] || doc.document_type}</h2>
+          <div className="paper-grid">
+            <span><b>Nr partii:</b> {doc.lot_no || '-'}</span>
+            <span><b>Produkt:</b> {doc.product_name || '-'}</span>
+            <span><b>Dostawca:</b> {doc.supplier_name || '-'}</span>
+            <span><b>Dokument:</b> {doc.document_no || '-'}</span>
+            <span><b>Komora:</b> {doc.chamber_code || '-'}</span>
+            <span><b>Ilość:</b> {Number(doc.qty || 0).toLocaleString('pl-PL')} kg</span>
+          </div>
+          <table className="paper-table"><tbody>
+            {entries.length === 0 && <tr><td>Kontrola P/N</td><td>P</td></tr>}
+            {entries.map(([k,v]) => <tr key={k}><td>{k}</td><td className={v === 'N' ? 'pn-n' : ''}>{String(v)}</td></tr>)}
+          </tbody></table>
+          <div className="signature-row"><span>Podpis operatora: {doc.signed_by_operator || '....................'}</span><span>Podpis administratora: {doc.signed_by_admin || '....................'}</span></div>
+          <p className="hint">Wydruk wygenerowany z systemu AGRO-MAR HACCP/FIFO. Zmiany dokumentu są zapisywane w historii.</p>
+        </div>
+        <div className="modal-actions no-print">
+          <button className="secondary" onClick={() => window.print()}><Printer size={16}/> Drukuj / PDF</button>
+          <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button>
+        </div>
+      </div>
+    </div>
+  }
 
   useEffect(() => {
     if (isSupabaseConfigured) {
@@ -1137,24 +1256,29 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>Wybierz kartę, podejrzyj dokumenty i pola P/N. Domyślnie system ustawia P, z możliwością ręcznej zmiany na N w kolejnym etapie edycji.</p></div></div>
-      <div className="haccp-tabs">
-        {[
-          ['K01','K01 – Karta kontroli przyjęcia surowców'],
-          ['K02','K02 – Magazynowanie surowców CP2'],
-          ['K04','K04 – Magazynowanie produktów gotowych CP3/CCP1'],
-          ['K07','K07 – Kontrola sita / identyfikowalność']
-        ].map(([code, label]) => <button key={code} className={docsFilter === code ? 'tab active' : 'tab'} onClick={() => setDocsFilter(code)}>{label}</button>)}
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v22: lista dokumentów, podgląd, druk/PDF, domyślne P/N oraz historia zmian. Kliknij kartę, aby zobaczyć dokumenty.</p></div></div>
+      <div className="haccp-card-grid">
+        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
+          <b>{title}</b><small>{desc}</small>
+          <span><b>{haccpCount(code)}</b> dokumentów · <b>{haccpNonconformityCount(code)}</b> N · <b>{haccpPendingCount(code)}</b> bez podpisu</span>
+        </button>)}
+      </div>
+      <div className="form-grid compact">
+        <label>Szukaj partii / produktu / PZ / dostawcy<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="np. Jab/067, PZ/..., dostawca" /></label>
+        <label>Status<select value={haccpStatusFilter} onChange={e => setHaccpStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="P">Prawidłowe P</option><option value="N">Niezgodność N</option></select></label>
       </div>
       <div className="actions"><button className="secondary" onClick={loadHaccpDocs}><RefreshCcw size={16}/> Odśwież kartoteki</button></div>
-      {haccpDocs.filter(d => d.document_type === docsFilter).length === 0 && <p className="hint">Brak dokumentów {docsFilter}. Dla K04/K07 pojawią się po utworzeniu partii produktu gotowego lub pracy w CP3/CCP1.</p>}
-      {haccpDocs.filter(d => d.document_type === docsFilter).length > 0 && <div className="table-wrap small"><table>
-        <thead><tr><th>Typ</th><th>Data</th><th>Partia</th><th>Produkt</th><th>Komora</th><th>Ilość</th><th>P/N</th></tr></thead>
-        <tbody>{haccpDocs.filter(d => d.document_type === docsFilter).slice(0, 200).map(d => <tr key={d.id}>
-          <td><b>{d.document_type}</b></td><td>{d.document_date}</td><td>{d.lot_no}</td><td>{d.product_name}</td><td>{d.chamber_code || '-'}</td><td>{Number(d.qty || 0).toLocaleString('pl-PL')}</td><td><span className="pill">{Object.entries(d.data || {}).filter(([k]) => !['uwagi','podpis'].includes(k)).map(([k,v]) => `${k}: ${v}`).slice(0,3).join(' | ')}</span></td>
+      <div className="doc-progress">{['K01','K02','K04','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
+      {haccpDocsForFilter.length === 0 && <p className="hint">Brak dokumentów {docsFilter} dla aktualnych filtrów. Dla K04/K07 pojawią się po utworzeniu partii produktu gotowego lub pracy w CP3/CCP1.</p>}
+      {haccpDocsForFilter.length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Partia</th><th>Produkt</th><th>Dostawca</th><th>PZ/WZ</th><th>Data</th><th>Komora</th><th>Status</th><th>Akcje</th></tr></thead>
+        <tbody>{haccpDocsForFilter.slice(0, 300).map(d => <tr key={d.id}>
+          <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{d.supplier_name || '-'}</td><td>{d.document_no || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
+          <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Podgląd</button><button className="mini secondary" onClick={() => printHaccpDoc(d)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
         </tr>)}</tbody>
       </table></div>}
     </section>
+    {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     </>}
 
     {activeTab === 'raporty' && <section className="card"><div className="section-title"><FileText/><div><h2>Raporty</h2><p>Tu będą raporty temperatur, FIFO, identyfikowalności i wydruki PDF.</p></div></div><p className="hint">Moduł raportów będzie rozbudowany w kolejnym etapie.</p></section>}
