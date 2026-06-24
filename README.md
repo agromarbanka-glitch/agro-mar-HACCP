@@ -1,14 +1,7 @@
-# AGRO-MAR HACCP/FIFO v23
+# AGRO-MAR HACCP/FIFO – v23.1
 
-Zmiany:
-- kartoteki zbiorcze: jedna kartoteka na miesiąc albo własny zakres dat,
-- K01 jako tabela miesięczna zgodna z oryginalnym układem,
-- K02 jako kartoteka zbiorcza magazynowania surowca,
-- edycja pojedynczych wpisów/wierszy,
-- podpis przyjmującego wybierany z listy pracowników,
-- skrócone dane dostawcy: nazwa + nr PZ,
-- druk/PDF dla kartoteki zbiorczej,
-- pobranie kartoteki do Excel.
+Poprawka wdrożeniowa po błędzie Vercel `npm install ETIMEDOUT`.
 
-Po wdrożeniu uruchom w Supabase:
-`supabase/2026-v23-kartoteki-miesieczne-excel.sql`
+Zmiana: usunięto `package-lock.json`, który wskazywał na wewnętrzny rejestr pakietów niedostępny dla Vercel. Vercel pobierze paczki z publicznego npm.
+
+SQL: użyj tego samego pliku co v23: `supabase/2026-v23-kartoteki-miesieczne-excel.sql`.
