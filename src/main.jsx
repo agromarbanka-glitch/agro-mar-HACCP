@@ -1256,7 +1256,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v22: lista dokumentów, podgląd, druk/PDF, domyślne P/N oraz historia zmian. Kliknij kartę, aby zobaczyć dokumenty.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v22.1: lista dokumentów, podgląd, druk/PDF, domyślne P/N oraz historia zmian. Kliknij kartę, aby zobaczyć dokumenty.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
