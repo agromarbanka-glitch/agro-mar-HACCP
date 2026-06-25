@@ -1,16 +1,13 @@
-# AGRO-MAR HACCP v24.2
+# AGRO-MAR HACCP/FIFO v24.3
 
-Zakres wersji:
-- K01 jako kartoteka zbiorcza miesięczna / tygodniowa / zakres dat.
-- Układ K01 zgodny z oryginalnym formularzem.
-- Dane dostawcy skrócone: nazwa + numer PZ.
-- Podpis przyjmującego wybierany z listy pracowników.
-- Edycja pojedynczych pól w pojedynczym wierszu.
-- Druk / PDF z widoku kartoteki zbiorczej.
-- Eksport kartoteki do Excel.
+Poprawka K01 po testach:
 
-Wdrożenie:
-1. Rozpakuj paczkę.
-2. Wgraj całą zawartość do GitHub, zastępując pliki.
-3. Poczekaj na Ready w Vercel.
-4. Uruchom SQL v24.2 w Supabase tylko jeśli nie ma tabeli pracowników lub podpisów.
+- K01 jest kartoteką zbiorczą dla wybranego miesiąca/zakresu, a nie jedną kartką na jedną dostawę.
+- Podpis przyjmującego jest w ostatniej kolumnie przy każdym wierszu.
+- Można wybrać pracownika osobno dla każdej operacji.
+- Dodano wybór pracownika na górze kartoteki i przycisk uzupełniający puste podpisy dla widocznych pozycji.
+- Usunięto przyciski „Edytuj” z pól wewnątrz kartoteki K01; P/N zmieniane jest listą P/N w danym wierszu.
+- Druk/PDF i Excel działają z kartoteki zbiorczej.
+- Pobieranie dokumentów HACCP zwiększone do 5000 rekordów.
+
+SQL: nie trzeba uruchamiać ponownie, jeśli SQL v24.2 był wykonany.

@@ -205,6 +205,7 @@ function App() {
   const [selectedHaccpDoc, setSelectedHaccpDoc] = useState(null)
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
+  const [defaultK01Employee, setDefaultK01Employee] = useState('')
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -255,9 +256,14 @@ function App() {
     const map = new Map()
     for (const doc of haccpPeriodDocs) {
       const period = String(doc.document_date || '').slice(0, 7) || haccpMonth || 'brak-daty'
-      const product = doc.product_name || 'Bez produktu'
+      let product = doc.product_name || 'Bez produktu'
       const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
-      const key = `${doc.document_type}|${period}|${product}|${chamber}`
+      // K01 ma być prawdziwą kartoteką zbiorczą, nie jedną kartką na dostawę.
+      // Dlatego grupujemy wszystkie wpisy K01 z danego miesiąca/zakresu w jednym formularzu.
+      if (doc.document_type === 'K01') product = 'wg pozycji z tabeli'
+      const key = doc.document_type === 'K01'
+        ? `${doc.document_type}|${period}`
+        : `${doc.document_type}|${period}|${product}|${chamber}`
       if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
@@ -373,7 +379,7 @@ function App() {
     let nextValue
     if (options.pn) {
       const current = normalizePN(currentValue)
-      nextValue = window.prompt(`${label}: wpisz P albo N`, current)
+      nextValue = options.directValue ? String(options.directValue).trim().toUpperCase() : window.prompt(`${label}: wpisz P albo N`, current)
       if (nextValue === null) return
       nextValue = String(nextValue).trim().toUpperCase()
       if (!['P', 'N'].includes(nextValue)) {
@@ -391,10 +397,10 @@ function App() {
         return
       }
     } else {
-      nextValue = window.prompt(`Edytuj pole: ${label}`, currentValue || '')
+      nextValue = options.directValue ?? window.prompt(`Edytuj pole: ${label}`, currentValue || '')
       if (nextValue === null) return
     }
-    const reason = window.prompt('Powód zmiany / korekty:', 'Korekta zapisu') || 'Korekta zapisu'
+    const reason = options.directValue ? 'Zmiana z poziomu kartoteki' : (window.prompt('Powód zmiany / korekty:', 'Korekta zapisu') || 'Korekta zapisu')
     const nextData = { ...(doc.data || {}), [field]: nextValue }
     await updateHaccpDocumentField(doc, field, label, currentValue, nextValue, nextData, reason)
   }
@@ -585,10 +591,82 @@ function App() {
     await setDocumentEmployee(doc, employeeName)
   }
 
+  async function setEmployeeForVisibleK01Group(group, employeeName, onlyEmpty = true) {
+    if (!supabase || !group || !employeeName) return
+    const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_przyjmujacego))
+    if (!docs.length) { setMessage('Nie ma pustych podpisów do uzupełnienia.'); return }
+    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} widocznych pozycji K01?`)
+    if (!confirmed) return
+    try {
+      for (const doc of docs) {
+        const nextData = { ...(doc.data || {}), podpis_przyjmujacego: employeeName }
+        const { error } = await supabase
+          .from('haccp_documents')
+          .update({ data: nextData, signed_by_operator: employeeName, updated_at: new Date().toISOString() })
+          .eq('id', doc.id)
+        if (error) throw error
+        await supabase.from('haccp_document_history').insert({
+          document_id: doc.id,
+          action: 'wybor_pracownika_zbiorczy',
+          field_name: 'signed_by_operator',
+          old_value: doc.signed_by_operator || '',
+          new_value: employeeName,
+          reason: 'Zbiorcze ustawienie podpisu przyjmującego w kartotece K01',
+          changed_by: userRole
+        })
+      }
+      await loadHaccpDocs()
+      setMessage(`Ustawiono podpis dla ${docs.length} pozycji K01.`)
+    } catch (err) {
+      setMessage(`Błąd zbiorczego ustawiania podpisu: ${err.message}`)
+    }
+  }
+
   function renderGroupPreviewTable(group) {
     const docs = group.docs || []
     if (group.type === 'K01') {
-      return <div className="monthly-paper k01-original"><table className="k01-head"><tbody><tr><td className="company" rowSpan="2"><b>AGRO-MAR MARIUSZ<br/>BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td><td className="meta" rowSpan="2"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr><tr><td className="raw-name"><b>Nazwa surowca:</b> {group.product}</td></tr></tbody></table><table className="k01-table"><thead><tr><th rowSpan="2">Lp.</th><th rowSpan="2">Data dostawy</th><th rowSpan="2">Dane dostawcy/<br/>nr faktury</th><th rowSpan="2">Stan higieniczny<br/>pojazdu<br/>(P/N)*</th><th rowSpan="2">Ilość</th><th colSpan="2">Ocena surowca (P/N)*</th><th rowSpan="2">Podpis przyjmującego</th></tr><tr><th>Wybarwienie/zapach/<br/>brak uszkodzeń<br/>mechanicznych</th><th>Brak zgnilizny/<br/>zapleśnienia/<br/>zagrzybienia</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{shortSupplier(doc.supplier_name, doc.document_no)}</td><td className={normalizePN(doc.data?.stan_higieniczny_pojazdu)==='N'?'pn-n':''}>{normalizePN(doc.data?.stan_higieniczny_pojazdu)} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'stan_higieniczny_pojazdu','Stan higieniczny pojazdu', normalizePN(doc.data?.stan_higieniczny_pojazdu), {pn:true})}>Edytuj</button></td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td className={normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen)==='N'?'pn-n':''}>{normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen)} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'wybarwienie_zapach_brak_uszkodzen','Wybarwienie/zapach/brak uszkodzeń', normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen), {pn:true})}>Edytuj</button></td><td className={normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia)==='N'?'pn-n':''}>{normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia)} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'brak_zgnilizny_zaplesnienia_zagrzybienia','Brak zgnilizny/zapleśnienia/zagrzybienia', normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia), {pn:true})}>Edytuj</button></td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Edycja dotyczy pojedynczego wiersza.</div></div>
+      const maxRows = Math.max(14, docs.length)
+      return <div className="monthly-paper k01-original">
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Ustaw podpis przyjmującego dla pustych pozycji
+            <select value={defaultK01Employee} onChange={e => setDefaultK01Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK01Group(group, defaultK01Employee, true)}>Uzupełnij puste podpisy</button>
+          <span className="hint">Każdy wiersz można później zmienić osobno w ostatniej kolumnie.</span>
+        </div>
+        <table className="k01-head"><tbody><tr><td className="company" rowSpan="2"><b>AGRO-MAR MARIUSZ<br/>BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td><td className="meta" rowSpan="2"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr><tr><td className="raw-name"><b>Nazwa surowca:</b> {group.product}</td></tr></tbody></table>
+        <table className="k01-table"><thead><tr><th rowSpan="2">Lp.</th><th rowSpan="2">Data dostawy</th><th rowSpan="2">Dane dostawcy/<br/>nr faktury</th><th rowSpan="2">Stan higieniczny<br/>pojazdu<br/>(P/N)*</th><th rowSpan="2">Ilość</th><th colSpan="2">Ocena surowca (P/N)*</th><th rowSpan="2">Podpis przyjmującego</th></tr><tr><th>Wybarwienie/zapach/<br/>brak uszkodzeń<br/>mechanicznych</th><th>Brak zgnilizny/<br/>zapleśnienia/<br/>zagrzybienia</th></tr></thead><tbody>
+          {Array.from({length: maxRows}).map((_,i) => {
+            const doc = docs[i]
+            if (!doc) return <tr className="blank-row" key={`blank-${i}`}><td>{i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const signed = doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''
+            return <tr key={doc.id}>
+              <td>{i+1}</td>
+              <td>{doc.document_date}</td>
+              <td style={{textAlign:'left'}}>{shortSupplier(doc.supplier_name, doc.document_no)}</td>
+              <td className={normalizePN(doc.data?.stan_higieniczny_pojazdu)==='N'?'pn-n':''}>
+                <select className="mini-select no-print" value={normalizePN(doc.data?.stan_higieniczny_pojazdu)} onChange={e=>editHaccpRowField(doc,'stan_higieniczny_pojazdu','Stan higieniczny pojazdu', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
+                <span className="print-only">{normalizePN(doc.data?.stan_higieniczny_pojazdu)}</span>
+              </td>
+              <td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td>
+              <td className={normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen)==='N'?'pn-n':''}>
+                <select className="mini-select no-print" value={normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen)} onChange={e=>editHaccpRowField(doc,'wybarwienie_zapach_brak_uszkodzen','Wybarwienie/zapach/brak uszkodzeń', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
+                <span className="print-only">{normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen)}</span>
+              </td>
+              <td className={normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia)==='N'?'pn-n':''}>
+                <select className="mini-select no-print" value={normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia)} onChange={e=>editHaccpRowField(doc,'brak_zgnilizny_zaplesnienia_zagrzybienia','Brak zgnilizny/zapleśnienia/zagrzybienia', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
+                <span className="print-only">{normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia)}</span>
+              </td>
+              <td>
+                <select className="mini-select no-print" value={signed} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                <span className="print-only">{signed}</span>
+              </td>
+            </tr>
+          })}
+        </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Podpis wybierany jest w ostatniej kolumnie dla każdej operacji.</div></div>
     }
     return <div className="monthly-paper"><div className="paper-head"><div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div><div><b>{group.type} – kartoteka miesięczna</b><br/>Okres: {periodLabel(group)}<br/>Komora: {group.chamber || '-'}</div></div><table className="paper-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt</th><th>Partia</th><th>Ilość</th><th>Temperatura</th><th>P/N</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td><td className={normalizePN(doc.data?.parametry_magazynowania)==='N'?'pn-n':''}>{normalizePN(doc.data?.parametry_magazynowania || 'P')} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'parametry_magazynowania','Ocena parametrów magazynowania', normalizePN(doc.data?.parametry_magazynowania || 'P'), {pn:true})}>Edytuj</button></td><td>{doc.data?.uwagi || ''}</td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table></div>
   }
@@ -1242,7 +1320,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         .from('haccp_documents')
         .select('id, document_type, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at')
         .order('document_date', { ascending: false })
-        .limit(500)
+        .limit(5000)
       if (error) throw error
       setHaccpDocs(data || [])
     } catch (err) {
@@ -1384,7 +1462,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.2 K01 MIESIĘCZNE</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.3 K01 ZBIORCZE</div>
     </header>
 
     <section className="warning">
@@ -1627,7 +1705,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.2: K01 miesięczne/zakresowe, podpis z listy pracowników, edycja pojedynczych wierszy, druk/PDF i Excel.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.3: K01 zbiorcze miesięczne/zakresowe, podpis pracownika w ostatniej kolumnie, zbiorcze ustawianie podpisu, druk/PDF i Excel.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
