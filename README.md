@@ -1,13 +1,12 @@
-# AGRO-MAR HACCP/FIFO v24.3
+# AGRO-MAR HACCP/FIFO v24.4
 
 Poprawka K01 po testach:
 
-- K01 jest kartoteką zbiorczą dla wybranego miesiąca/zakresu, a nie jedną kartką na jedną dostawę.
-- Podpis przyjmującego jest w ostatniej kolumnie przy każdym wierszu.
-- Można wybrać pracownika osobno dla każdej operacji.
-- Dodano wybór pracownika na górze kartoteki i przycisk uzupełniający puste podpisy dla widocznych pozycji.
-- Usunięto przyciski „Edytuj” z pól wewnątrz kartoteki K01; P/N zmieniane jest listą P/N w danym wierszu.
-- Druk/PDF i Excel działają z kartoteki zbiorczej.
-- Pobieranie dokumentów HACCP zwiększone do 5000 rekordów.
+- K01 zbiorcze miesięczne/zakresowe grupowane po surowcu; wyszukiwarka nie zawęża już formularza do jednej operacji.
+- Podpis przyjmującego w ostatniej kolumnie jest listą pracowników, bez przycisku „Edytuj”.
+- Na górze kartoteki można wybrać pracownika i uzupełnić puste podpisy dla wszystkich widocznych pozycji.
+- Każdy podpis nadal można zmienić osobno bez otwierania edycji.
+- Druk/PDF otwiera osobne okno z kartoteką zbiorczą i drukuje z opóźnieniem, żeby uniknąć pustej kartki.
+- Excel pobiera kartotekę zbiorczą.
 
 SQL: nie trzeba uruchamiać ponownie, jeśli SQL v24.2 był wykonany.
