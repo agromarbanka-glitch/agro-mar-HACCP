@@ -265,17 +265,23 @@ function App() {
       const period = String(doc.document_date || '').slice(0, 7) || haccpMonth || 'brak-daty'
       const product = doc.product_name || 'Bez produktu'
       const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
-      // K01 jest zbiorcze w obrębie miesiąca/zakresu i surowca, żeby zachować oryginalne pole "Nazwa surowca".
+      // K01 ma być JEDNĄ kartoteką zbiorczą dla całego miesiąca/zakresu, a nie osobną kartką na dostawę.
+      // Wiersze zawierają wszystkie dostawy z okresu; produkt pokazujemy przy wpisie, jeżeli w miesiącu jest ich więcej.
       const key = doc.document_type === 'K01'
-        ? `${doc.document_type}|${period}|${product}`
+        ? `${doc.document_type}|${period}`
         : `${doc.document_type}|${period}|${product}|${chamber}`
-      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
+      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K01' ? 'według wpisów w tabeli' : product, chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
-    return Array.from(map.values()).map(g => ({
-      ...g,
-      docs: g.docs.sort((a,b) => String(a.document_date || '').localeCompare(String(b.document_date || '')) || String(a.document_no || '').localeCompare(String(b.document_no || '')))
-    }))
+    return Array.from(map.values()).map(g => {
+      const docs = g.docs.sort((a,b) => String(a.document_date || '').localeCompare(String(b.document_date || '')) || String(a.document_no || '').localeCompare(String(b.document_no || '')))
+      const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
+      return {
+        ...g,
+        product: g.type === 'K01' ? (products.length === 1 ? products[0] : 'według wpisów w tabeli') : g.product,
+        docs
+      }
+    })
   }, [haccpDocs, docsFilter, haccpStatusFilter, haccpPeriodMode, haccpMonth, haccpFrom, haccpTo])
 
   function haccpCount(type) {
@@ -551,7 +557,7 @@ function App() {
     const rows = docs.map((doc, i) => {
       const pn = f => normalizePN(doc.data?.[f])
       const podpis = doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''
-      return `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td style="text-align:left">${escapeHtml(shortSupplier(doc.supplier_name, doc.document_no))}</td><td>${pn('stan_higieniczny_pojazdu')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${pn('wybarwienie_zapach_brak_uszkodzen')}</td><td>${pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</td><td>${escapeHtml(podpis)}</td></tr>`
+      return `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td style="text-align:left">${escapeHtml((group.product === 'według wpisów w tabeli' ? (doc.product_name + ' / ') : '') + shortSupplier(doc.supplier_name, doc.document_no))}</td><td>${pn('stan_higieniczny_pojazdu')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${pn('wybarwienie_zapach_brak_uszkodzen')}</td><td>${pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</td><td>${escapeHtml(podpis)}</td></tr>`
     }).join('')
     const blanks = Array.from({ length: Math.max(0, 14 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K01 ${escapeHtml(group.product)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.raw-name{height:34px}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr><tr><td class="raw-name"><b>Nazwa surowca:</b> ${escapeHtml(group.product || '')}</td></tr></tbody></table><table><thead><tr><th rowspan="2">Lp.</th><th rowspan="2">Data dostawy</th><th rowspan="2">Dane dostawcy/<br>nr faktury</th><th rowspan="2">Stan higieniczny<br>pojazdu<br>(P/N)*</th><th rowspan="2">Ilość</th><th colspan="2">Ocena surowca (P/N)*</th><th rowspan="2">Podpis przyjmującego</th></tr><tr><th>Wybarwienie/zapach/<br>brak uszkodzeń<br>mechanicznych</th><th>Brak zgnilizny/<br>zapleśnienia/<br>zagrzybienia</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. *T – Tak, N – Nie.</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
@@ -568,10 +574,12 @@ function App() {
 
   function printHaccpGroup(group) {
     if (!group) return
-    const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : buildK02MonthlyHtml(group)
-    const win = window.open('', '_blank', 'width=1200,height=800')
-    if (!win) { setMessage('Przeglądarka zablokowała okno drukowania. Zezwól na wyskakujące okna.'); return }
-    win.document.open(); win.document.write(html); win.document.close()
+    // Drukujemy aktualny widoczny formularz z modala. Poprzednie osobne okno w Chrome/Vercel czasem dawało pustą kartkę.
+    setSelectedHaccpDoc({ groupPreview: true, group })
+    setTimeout(() => {
+      try { window.focus(); window.print() }
+      catch (err) { setMessage('Nie udało się uruchomić drukowania. Spróbuj użyć Ctrl+P po otwarciu kartoteki.') }
+    }, 600)
   }
 
   function exportHaccpGroupExcel(group) {
@@ -659,7 +667,7 @@ function App() {
             return <tr key={doc.id}>
               <td>{i+1}</td>
               <td>{doc.document_date}</td>
-              <td style={{textAlign:'left'}}>{shortSupplier(doc.supplier_name, doc.document_no)}</td>
+              <td style={{textAlign:'left'}}>{group.product === 'według wpisów w tabeli' ? `${doc.product_name || ''} / ` : ''}{shortSupplier(doc.supplier_name, doc.document_no)}</td>
               <td className={normalizePN(doc.data?.stan_higieniczny_pojazdu)==='N'?'pn-n':''}>
                 <select className="mini-select no-print" value={normalizePN(doc.data?.stan_higieniczny_pojazdu)} onChange={e=>editHaccpRowField(doc,'stan_higieniczny_pojazdu','Stan higieniczny pojazdu', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
                 <span className="print-only">{normalizePN(doc.data?.stan_higieniczny_pojazdu)}</span>
@@ -1475,7 +1483,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.4 K01 MIESIĘCZNE NAPRAWIONE</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.5 K01 ZBIORCZE DRUK</div>
     </header>
 
     <section className="warning">
@@ -1718,7 +1726,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.4: K01 miesięczne/zakresowe; podpis pracownika bez przycisku Edytuj; druk/PDF i Excel z kartoteki zbiorczej.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.5: K01 zbiorcze dla całego miesiąca/zakresu; podpis wybierany w wierszu; druk z aktualnego formularza.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>

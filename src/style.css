@@ -77,3 +77,18 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   .haccp-modal, .haccp-paper, .modal-backdrop { position: static !important; inset: auto !important; box-shadow:none !important; background:white !important; width:100% !important; max-width:none !important; padding:0 !important; }
   .monthly-paper { padding:0; }
 }
+
+/* v24.5: stabilniejszy wydruk aktualnie otwartej kartoteki */
+@media print {
+  html, body { background:#fff !important; margin:0 !important; padding:0 !important; }
+  body * { visibility: hidden !important; }
+  .modal-backdrop, .modal-backdrop * { visibility: visible !important; }
+  .modal-backdrop { position: static !important; display:block !important; padding:0 !important; background:#fff !important; overflow:visible !important; }
+  .haccp-modal { width:100% !important; max-width:none !important; margin:0 !important; padding:0 !important; }
+  .haccp-paper { visibility:visible !important; display:block !important; position:static !important; left:auto !important; top:auto !important; width:100% !important; max-width:none !important; box-shadow:none !important; border-radius:0 !important; padding:0 !important; background:#fff !important; }
+  .monthly-paper, .k01-original { visibility: visible !important; display:block !important; width:100% !important; background:#fff !important; }
+  .no-print, .no-print * { display:none !important; visibility:hidden !important; }
+  .print-only { display:inline !important; visibility:visible !important; }
+  .k01-original table { page-break-inside:auto; }
+  .k01-original tr { page-break-inside:avoid; page-break-after:auto; }
+}
