@@ -9,8 +9,8 @@ const REQUIRED = {
   // Przy PZ/MM dostawcą NIE jest AGRO-MAR z kolumny „Odbiorca”.
   // Najpierw bierzemy faktycznego dostawcę z kolumn „Dostawca/Nadawca”,
   // a „Odbiorca” zostawiamy dla WZ/FV jako klienta/odbiorcę.
-  supplierName: ['Dostawca', 'Nadawca', 'Dane dostawcy', 'Nazwa dostawcy', 'Kontrahent'],
-  receiverName: ['Odbiorca', 'Nabywca', 'Dane odbiorcy', 'Nazwa odbiorcy', 'Kontrahent'],
+  supplierName: ['Dostawca', 'Nadawca', 'Dane dostawcy', 'Nazwa dostawcy', 'Sprzedawca', 'Producent', 'Rolnik', 'Wystawca', 'Kontrahent'],
+  receiverName: ['Odbiorca', 'Nabywca', 'Dane odbiorcy', 'Nazwa odbiorcy'],
   invoiceNo: ['Faktura', 'Nr faktury', 'Numer faktury'],
   notes: ['Uwagi', 'Opis']
 }
@@ -61,8 +61,11 @@ function pickContractorForRow(row, documentType, documentNo) {
   // Jeśli w Excelu kolumna „Odbiorca” zawiera AGRO-MAR, nie używamy jej jako dostawcy.
   if (text.includes('PZ') || text.includes('MM')) {
     if (supplier && !isAgromarName(supplier)) return supplier
+    // W PZ/MM kolumna Odbiorca bardzo często oznacza AGRO-MAR, czyli odbiorcę dostawy, a nie dostawcę.
+    // Nie wpisujemy AGRO-MAR jako dostawcy; jeśli faktycznego dostawcy nie ma w eksporcie, zostawiamy puste
+    // i można go uzupełnić w K01 przy konkretnym PZ.
     if (receiver && !isAgromarName(receiver)) return receiver
-    return supplier || receiver || ''
+    return ''
   }
 
   // WZ/FV/FS = rozchód, więc kontrahentem jest odbiorca/klient.

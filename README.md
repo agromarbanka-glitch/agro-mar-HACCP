@@ -1,10 +1,9 @@
-# AGRO-MAR HACCP/FIFO v24.9
+# AGRO-MAR HACCP/FIFO v24.10
 
 Poprawki K01:
-- wybór pracownika u góry kartoteki i zastosowanie do wszystkich pozycji,
-- możliwość uzupełnienia tylko pustych podpisów,
-- nadal możliwość zmiany pracownika pojedynczo w ostatniej kolumnie,
-- importer PZ/MM pobiera faktycznego dostawcę z kolumn Dostawca/Nadawca, a nie AGRO-MAR z kolumny Odbiorca,
-- K01 nadal grupowane jako asortyment + miesiąc.
+- zbiorcza zmiana pracownika widoczna od razu bez odświeżania strony,
+- dostawca w K01 nie pokazuje AGRO-MAR jako dostawcy,
+- możliwość ręcznego uzupełnienia faktycznego dostawcy przy wierszu K01,
+- importer lepiej rozpoznaje kolumny Dostawca/Sprzedawca/Producent/Rolnik/Wystawca.
 
 SQL nie jest wymagany.

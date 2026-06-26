@@ -342,18 +342,37 @@ function App() {
     return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]))
   }
 
-  function shortSupplier(name, docNo) {
-    let supplier = String(name || '').trim()
+  function isAgromarDisplayName(value) {
+    return /agro[-\s]?mar|mariusz\s+bańka|mariusz\s+banka/i.test(String(value || ''))
+  }
+
+  function cleanSupplierName(value) {
+    let supplier = String(value || '').trim()
     supplier = supplier.replace(/,?\s*NIP\s*[:\-]?\s*\d+.*/i, '')
     supplier = supplier.split(/,\s*(ul\.|kolonia|\d{2}-\d{3}|polska)/i)[0]
     supplier = supplier.replace(/\s+/g, ' ').trim()
-    return [supplier, docNo].filter(Boolean).join(' / ')
+    if (isAgromarDisplayName(supplier)) return ''
+    return supplier
+  }
+
+  function getK01SupplierName(doc) {
+    const manual = cleanSupplierName(doc?.data?.faktyczny_dostawca || doc?.data?.dostawca_rzeczywisty || doc?.data?.dostawca || '')
+    if (manual) return manual
+    return cleanSupplierName(doc?.supplier_name || '')
+  }
+
+  function shortSupplier(nameOrDoc, docNo) {
+    const isDoc = nameOrDoc && typeof nameOrDoc === 'object'
+    const doc = isDoc ? nameOrDoc : null
+    const supplier = doc ? getK01SupplierName(doc) : cleanSupplierName(nameOrDoc)
+    const no = doc ? doc.document_no : docNo
+    return [supplier || 'Brak dostawcy', no].filter(Boolean).join(' / ')
   }
 
   function buildK01PrintHtml(doc) {
     const pn = (field) => normalizePN(doc.data?.[field])
     const dataDostawy = doc.document_date || ''
-    const dostawca = shortSupplier(doc.supplier_name, doc.document_no)
+    const dostawca = shortSupplier(doc)
     const ilosc = Number(doc.qty || 0).toLocaleString('pl-PL')
     const podpis = doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''
     const blankRows = Array.from({ length: 8 }, (_, i) => `<tr class="blank-row"><td>${i + 2}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
@@ -520,7 +539,7 @@ function App() {
             <tr>
               <td>1</td>
               <td><K01Value doc={doc} field="data_dostawy" label="Data dostawy">{doc.document_date || ''}</K01Value></td>
-              <td><K01Value doc={doc} field="dane_dostawcy" label="Dane dostawcy / nr faktury">{shortSupplier(doc.supplier_name, doc.document_no)}</K01Value></td>
+              <td><K01Value doc={doc} field="dane_dostawcy" label="Dane dostawcy / nr faktury">{shortSupplier(doc)}</K01Value><button type="button" className="mini secondary no-print" onClick={()=>promptK01Supplier(doc)}>Zmień dostawcę</button></td>
               <td className={pn('stan_higieniczny_pojazdu') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="stan_higieniczny_pojazdu" label="Stan higieniczny pojazdu" pn>{pn('stan_higieniczny_pojazdu')}</K01Value></td>
               <td><K01Value doc={doc} field="ilosc" label="Ilość">{Number(doc.qty || 0).toLocaleString('pl-PL')}</K01Value></td>
               <td className={pn('wybarwienie_zapach_brak_uszkodzen') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="wybarwienie_zapach_brak_uszkodzen" label="Wybarwienie/zapach/brak uszkodzeń mechanicznych" pn>{pn('wybarwienie_zapach_brak_uszkodzen')}</K01Value></td>
@@ -587,7 +606,7 @@ function App() {
     const rows = docs.map((doc, i) => {
       const pn = f => normalizePN(doc.data?.[f])
       const podpis = doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''
-      return `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td style="text-align:left">${escapeHtml(shortSupplier(doc.supplier_name, doc.document_no))}</td><td>${pn('stan_higieniczny_pojazdu')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${pn('wybarwienie_zapach_brak_uszkodzen')}</td><td>${pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</td><td>${escapeHtml(podpis)}</td></tr>`
+      return `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td style="text-align:left">${escapeHtml(shortSupplier(doc))}</td><td>${pn('stan_higieniczny_pojazdu')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${pn('wybarwienie_zapach_brak_uszkodzen')}</td><td>${pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</td><td>${escapeHtml(podpis)}</td></tr>`
     }).join('')
     const blanks = Array.from({ length: Math.max(0, 14 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K01 ${escapeHtml(group.product)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.raw-name{height:34px}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr><tr><td class="raw-name"><b>Nazwa surowca:</b> ${escapeHtml(group.product || '')}</td></tr></tbody></table><table><thead><tr><th rowspan="2">Lp.</th><th rowspan="2">Data dostawy</th><th rowspan="2">Dane dostawcy/<br>nr faktury</th><th rowspan="2">Stan higieniczny<br>pojazdu<br>(P/N)*</th><th rowspan="2">Ilość</th><th colspan="2">Ocena surowca (P/N)*</th><th rowspan="2">Podpis przyjmującego</th></tr><tr><th>Wybarwienie/zapach/<br>brak uszkodzeń<br>mechanicznych</th><th>Brak zgnilizny/<br>zapleśnienia/<br>zagrzybienia</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Liczba wpisów w kartotece: ${docs.length}</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
@@ -631,7 +650,7 @@ function App() {
       rows.push(['Karta K01 – Karta kontroli przyjęcia surowców (CP1)', '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
       rows.push(['Nazwa surowca:', group.product])
       rows.push(['Lp.', 'Data dostawy', 'Dane dostawcy / nr faktury', 'Stan higieniczny pojazdu (P/N)', 'Ilość', 'Wybarwienie/zapach/brak uszkodzeń (P/N)', 'Brak zgnilizny/zapleśnienia/zagrzybienia (P/N)', 'Podpis przyjmującego'])
-      docs.forEach((doc, i) => rows.push([i+1, doc.document_date || '', shortSupplier(doc.supplier_name, doc.document_no), normalizePN(doc.data?.stan_higieniczny_pojazdu), Number(doc.qty || 0), normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen), normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia), doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '']))
+      docs.forEach((doc, i) => rows.push([i+1, doc.document_date || '', shortSupplier(doc), normalizePN(doc.data?.stan_higieniczny_pojazdu), Number(doc.qty || 0), normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen), normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia), doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '']))
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -677,7 +696,15 @@ function App() {
           changed_by: userRole
         })
       }
-      await loadHaccpDocs()
+      const ids = new Set(docs.map(d => d.id))
+      setHaccpDocs(prev => prev.map(d => ids.has(d.id) ? { ...d, data: { ...(d.data || {}), podpis_przyjmujacego: employeeName }, signed_by_operator: employeeName } : d))
+      setSelectedHaccpDoc(prev => {
+        if (!prev) return prev
+        if (prev.groupPreview && prev.group?.docs) {
+          return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => ids.has(d.id) ? { ...d, data: { ...(d.data || {}), podpis_przyjmujacego: employeeName }, signed_by_operator: employeeName } : d) } }
+        }
+        return prev
+      })
       setMessage(`Ustawiono podpis dla ${docs.length} pozycji K01.`)
     } catch (err) {
       setMessage(`Błąd zbiorczego ustawiania podpisu: ${err.message}`)
@@ -709,7 +736,7 @@ function App() {
             return <tr key={doc.id}>
               <td>{i+1}</td>
               <td>{doc.document_date}</td>
-              <td style={{textAlign:'left'}}>{shortSupplier(doc.supplier_name, doc.document_no)}</td>
+              <td style={{textAlign:'left'}}><span>{shortSupplier(doc)}</span><button type="button" className="mini secondary no-print" onClick={()=>promptK01Supplier(doc)}>Zmień dostawcę</button></td>
               <td className={normalizePN(doc.data?.stan_higieniczny_pojazdu)==='N'?'pn-n':''}>
                 <select className="mini-select no-print" value={normalizePN(doc.data?.stan_higieniczny_pojazdu)} onChange={e=>editHaccpRowField(doc,'stan_higieniczny_pojazdu','Stan higieniczny pojazdu', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
                 <span className="print-only">{normalizePN(doc.data?.stan_higieniczny_pojazdu)}</span>
@@ -1380,6 +1407,49 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
     }
   }
 
+
+  async function setK01Supplier(doc, supplierName) {
+    if (!supabase || !doc) return
+    const clean = cleanSupplierName(supplierName)
+    if (!clean) { setMessage('Wpisz faktyczne imię i nazwisko / nazwę dostawcy.'); return }
+    const nextData = { ...(doc.data || {}), faktyczny_dostawca: clean }
+    try {
+      const { error } = await supabase
+        .from('haccp_documents')
+        .update({ data: nextData, updated_at: new Date().toISOString() })
+        .eq('id', doc.id)
+      if (error) throw error
+      await supabase.from('haccp_document_history').insert({
+        document_id: doc.id,
+        action: 'zmiana_dostawcy_k01',
+        field_name: 'faktyczny_dostawca',
+        old_value: getK01SupplierName(doc) || '',
+        new_value: clean,
+        reason: 'Ręczne uzupełnienie faktycznego dostawcy K01',
+        changed_by: userRole
+      })
+      const updated = { ...doc, data: nextData }
+      setHaccpDocs(prev => prev.map(d => d.id === doc.id ? updated : d))
+      setSelectedHaccpDoc(prev => {
+        if (!prev) return prev
+        if (prev.groupPreview && prev.group?.docs) {
+          return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => d.id === doc.id ? updated : d) } }
+        }
+        if (prev.id === doc.id) return updated
+        return prev
+      })
+      setMessage('Zapisano faktycznego dostawcę dla wpisu K01.')
+    } catch (err) {
+      setMessage(`Błąd zapisu dostawcy: ${err.message}`)
+    }
+  }
+
+  function promptK01Supplier(doc) {
+    const current = getK01SupplierName(doc)
+    const next = window.prompt('Podaj faktycznego dostawcę dla tego PZ (np. Sałasiński Edward):', current || '')
+    if (next !== null) setK01Supplier(doc, next)
+  }
+
   async function loadHaccpDocs() {
     if (!supabase) return
     try {
@@ -1529,7 +1599,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.9 K01 PODPIS + DOSTAWCA</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.10 K01 PODPIS+DOSTAWCA FIX</div>
     </header>
 
     <section className="warning">
@@ -1802,7 +1872,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       {haccpDocsForFilter.length > 0 && <div className="table-wrap small"><table>
         <thead><tr><th>Partia</th><th>Produkt</th><th>Dostawca / PZ</th><th>Data</th><th>Komora</th><th>Status</th><th>Podpis</th><th>Akcje</th></tr></thead>
         <tbody>{haccpDocsForFilter.slice(0, 300).map(d => <tr key={d.id}>
-          <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{shortSupplier(d.supplier_name, d.document_no) || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
+          <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{shortSupplier(d) || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
           <td><select className="mini-select" value={d.signed_by_operator || d.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployee(d,e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
           <td className="row-actions">{d.document_type === 'K01' ? <button className="mini secondary" onClick={() => { const g = findMonthlyGroupForDoc(d); if (g) { setHaccpPeriodMode('month'); setHaccpMonth(g.period); setSelectedHaccpDoc({ groupPreview: true, group: g }); } else { setMessage('Nie znaleziono kartoteki miesiąca dla tego wpisu.'); } }}><Eye size={14}/> Kartoteka miesiąca</button> : <button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Szczegóły</button>}<button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
         </tr>)}</tbody>
