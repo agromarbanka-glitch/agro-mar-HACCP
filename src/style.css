@@ -92,3 +92,17 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   .k01-original table { page-break-inside:auto; }
   .k01-original tr { page-break-inside:avoid; page-break-after:auto; }
 }
+
+/* v24.6: pewny druk kartoteki, bez pustej strony */
+@media print {
+  html, body { background:#fff !important; margin:0 !important; padding:0 !important; }
+  body * { visibility:hidden !important; }
+  .modal-backdrop, .modal-backdrop *, .haccp-paper, .haccp-paper *, .monthly-paper, .monthly-paper * { visibility:visible !important; }
+  .modal-backdrop { position:static !important; display:block !important; background:#fff !important; padding:0 !important; margin:0 !important; overflow:visible !important; }
+  .haccp-modal, .haccp-modal.wide { width:100% !important; max-width:none !important; margin:0 !important; padding:0 !important; }
+  .haccp-paper { position:static !important; width:100% !important; max-width:none !important; box-shadow:none !important; border-radius:0 !important; padding:0 !important; margin:0 !important; }
+  .no-print, .no-print * { display:none !important; visibility:hidden !important; }
+  .print-only { display:inline !important; visibility:visible !important; }
+  .k01-original, .monthly-paper { page-break-inside:auto; }
+  .k01-table tr { page-break-inside:avoid; page-break-after:auto; }
+}
