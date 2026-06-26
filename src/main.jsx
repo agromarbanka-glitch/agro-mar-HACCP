@@ -284,11 +284,30 @@ function App() {
     })
   }, [haccpDocs, docsFilter, haccpStatusFilter, haccpPeriodMode, haccpMonth, haccpFrom, haccpTo])
 
+  function buildK01MonthlyGroupForPeriod(period) {
+    const docs = haccpDocs
+      .filter(d => d.document_type === 'K01')
+      .filter(d => String(d.document_date || '').slice(0, 7) === period)
+      .sort((a,b) => String(a.document_date || '').localeCompare(String(b.document_date || '')) || String(a.document_no || '').localeCompare(String(b.document_no || '')))
+    if (!docs.length) return null
+    const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
+    return {
+      key: `K01|${period}|forced`,
+      type: 'K01',
+      period,
+      product: products.length === 1 ? products[0] : 'według wpisów w tabeli',
+      chamber: '',
+      docs
+    }
+  }
+
   function findMonthlyGroupForDoc(doc) {
     if (!doc) return null
     const period = String(doc.document_date || '').slice(0, 7)
     if (doc.document_type === 'K01') {
-      return haccpMonthlyGroups.find(g => g.type === 'K01' && g.period === period) || haccpMonthlyGroups.find(g => g.type === 'K01') || null
+      // Nie opieramy się na aktualnie wybranym miesiącu/filtrach, bo wtedy kliknięcie
+      // w wierszu z października nie działa, jeśli u góry wybrany jest inny miesiąc.
+      return haccpMonthlyGroups.find(g => g.type === 'K01' && g.period === period) || buildK01MonthlyGroupForPeriod(period)
     }
     const product = doc.product_name || 'Bez produktu'
     const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
@@ -583,18 +602,40 @@ function App() {
     return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.chamber || '')} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców</b></td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt / partia</th><th>Ilość</th><th>Temperatura</th><th>Ocena (P/N)</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Temperaturę i uwagi można uzupełniać ręcznie.</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
 
+  function printHtmlInIframe(html) {
+    const iframe = document.createElement('iframe')
+    iframe.style.position = 'fixed'
+    iframe.style.right = '0'
+    iframe.style.bottom = '0'
+    iframe.style.width = '1px'
+    iframe.style.height = '1px'
+    iframe.style.opacity = '0'
+    iframe.style.border = '0'
+    document.body.appendChild(iframe)
+    const frameDoc = iframe.contentWindow?.document
+    if (!frameDoc) {
+      setMessage('Nie udało się przygotować wydruku. Otwórz kartotekę i użyj Ctrl+P.')
+      return
+    }
+    frameDoc.open()
+    frameDoc.write(html)
+    frameDoc.close()
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus()
+        iframe.contentWindow?.print()
+      } catch (err) {
+        setMessage('Nie udało się uruchomić drukowania. Otwórz kartotekę i użyj Ctrl+P.')
+      }
+      setTimeout(() => iframe.remove(), 2000)
+    }, 600)
+  }
+
   function printHaccpGroup(group) {
     if (!group) return
     const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : buildK02MonthlyHtml(group)
-    const win = window.open('', '_blank', 'width=1200,height=800')
-    if (!win) {
-      setMessage('Przeglądarka zablokowała okno drukowania. Zezwól na wyskakujące okna albo użyj Ctrl+P po otwarciu kartoteki.')
-      setSelectedHaccpDoc({ groupPreview: true, group })
-      return
-    }
-    win.document.open()
-    win.document.write(html)
-    win.document.close()
+    // Drukujemy zawartość przez ukryty iframe, a nie przez puste okno. To naprawia białą kartkę w podglądzie druku.
+    printHtmlInIframe(html)
   }
 
   function exportHaccpGroupExcel(group) {
@@ -1773,7 +1814,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <tbody>{haccpDocsForFilter.slice(0, 300).map(d => <tr key={d.id}>
           <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{shortSupplier(d.supplier_name, d.document_no) || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
           <td><select className="mini-select" value={d.signed_by_operator || d.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployee(d,e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
-          <td className="row-actions">{d.document_type === 'K01' ? <button className="mini secondary" onClick={() => { const g = findMonthlyGroupForDoc(d); if (g) setSelectedHaccpDoc({ groupPreview: true, group: g }); }}><Eye size={14}/> Kartoteka miesiąca</button> : <button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Szczegóły</button>}<button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
+          <td className="row-actions">{d.document_type === 'K01' ? <button className="mini secondary" onClick={() => { const g = findMonthlyGroupForDoc(d); if (g) { setHaccpPeriodMode('month'); setHaccpMonth(g.period); setSelectedHaccpDoc({ groupPreview: true, group: g }); } else { setMessage('Nie znaleziono kartoteki miesiąca dla tego wpisu.'); } }}><Eye size={14}/> Kartoteka miesiąca</button> : <button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Szczegóły</button>}<button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
         </tr>)}</tbody>
       </table></div>}
     </section>
