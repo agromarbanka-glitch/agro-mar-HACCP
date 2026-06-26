@@ -653,11 +653,11 @@ function App() {
     await setDocumentEmployee(doc, employeeName)
   }
 
-  async function setEmployeeForVisibleK01Group(group, employeeName, onlyEmpty = true) {
+  async function setEmployeeForVisibleK01Group(group, employeeName, onlyEmpty = false) {
     if (!supabase || !group || !employeeName) return
     const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_przyjmujacego))
-    if (!docs.length) { setMessage('Nie ma pustych podpisów do uzupełnienia.'); return }
-    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} widocznych pozycji K01?`)
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów do uzupełnienia.' : 'Brak pozycji do zmiany podpisu.'); return }
+    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} pozycji w tej kartotece K01? Poprzednie podpisy w tych wierszach zostaną zastąpione.`)
     if (!confirmed) return
     try {
       for (const doc of docs) {
@@ -690,14 +690,15 @@ function App() {
       const maxRows = Math.max(14, docs.length)
       return <div className="monthly-paper k01-original">
         <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
-          <label>Ustaw podpis przyjmującego dla pustych pozycji
+          <label>Podpis przyjmującego dla całej kartoteki
             <select value={defaultK01Employee} onChange={e => setDefaultK01Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK01Group(group, defaultK01Employee, true)}>Uzupełnij puste podpisy</button>
-          <span className="hint">Każdy wiersz można później zmienić osobno w ostatniej kolumnie.</span>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK01Group(group, defaultK01Employee, false)}>Zastosuj do wszystkich pozycji</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK01Group(group, defaultK01Employee, true)}>Uzupełnij tylko puste</button>
+          <span className="hint">Po zastosowaniu można nadal zmienić pojedynczy wiersz w ostatniej kolumnie.</span>
         </div>
         <table className="k01-head"><tbody><tr><td className="company" rowSpan="2"><b>AGRO-MAR MARIUSZ<br/>BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td><td className="meta" rowSpan="2"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr><tr><td className="raw-name"><b>Nazwa surowca:</b> {group.product}</td></tr></tbody></table>
         <table className="k01-table"><thead><tr><th rowSpan="2">Lp.</th><th rowSpan="2">Data dostawy</th><th rowSpan="2">Dane dostawcy/<br/>nr faktury</th><th rowSpan="2">Stan higieniczny<br/>pojazdu<br/>(P/N)*</th><th rowSpan="2">Ilość</th><th colSpan="2">Ocena surowca (P/N)*</th><th rowSpan="2">Podpis przyjmującego</th></tr><tr><th>Wybarwienie/zapach/<br/>brak uszkodzeń<br/>mechanicznych</th><th>Brak zgnilizny/<br/>zapleśnienia/<br/>zagrzybienia</th></tr></thead><tbody>
@@ -1528,7 +1529,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.6 K01 MIESIĄC CIĄGŁY</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.9 K01 PODPIS + DOSTAWCA</div>
     </header>
 
     <section className="warning">
@@ -1771,7 +1772,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.6: K01 jako ciągły zapis całego miesiąca; szczegóły pojedyncze wyłączone dla K01; podpis w wierszu; poprawiony druk.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.9: K01 miesięczne wg asortymentu; podpis zbiorczy i pojedynczy; poprawiony odczyt faktycznego dostawcy z Excela.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>

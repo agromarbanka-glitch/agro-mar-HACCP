@@ -6,7 +6,11 @@ const REQUIRED = {
   issueDate: ['Data wystawienia', 'Data', 'Data dokumentu'],
   qty: ['Ilość.1', 'Ilość', 'Ilosc', 'Qty'],
   productName: ['Produkt/usługa', 'Produkt', 'Towar', 'Nazwa produktu'],
-  contractorName: ['Odbiorca', 'Kontrahent', 'Dostawca'],
+  // Przy PZ/MM dostawcą NIE jest AGRO-MAR z kolumny „Odbiorca”.
+  // Najpierw bierzemy faktycznego dostawcę z kolumn „Dostawca/Nadawca”,
+  // a „Odbiorca” zostawiamy dla WZ/FV jako klienta/odbiorcę.
+  supplierName: ['Dostawca', 'Nadawca', 'Dane dostawcy', 'Nazwa dostawcy', 'Kontrahent'],
+  receiverName: ['Odbiorca', 'Nabywca', 'Dane odbiorcy', 'Nazwa odbiorcy', 'Kontrahent'],
   invoiceNo: ['Faktura', 'Nr faktury', 'Numer faktury'],
   notes: ['Uwagi', 'Opis']
 }
@@ -44,6 +48,29 @@ function parseQty(value) {
   return Number.isFinite(n) ? n : 0
 }
 
+function isAgromarName(value) {
+  return /agro[-\s]?mar|mariusz\s+bańka|mariusz\s+banka/i.test(String(value || ''))
+}
+
+function pickContractorForRow(row, documentType, documentNo) {
+  const text = `${documentType || ''} ${documentNo || ''}`.toUpperCase()
+  const supplier = String(pick(row, REQUIRED.supplierName) || '').trim()
+  const receiver = String(pick(row, REQUIRED.receiverName) || '').trim()
+
+  // PZ/MM = przyjęcie, więc kontrahent w systemie to faktyczny dostawca.
+  // Jeśli w Excelu kolumna „Odbiorca” zawiera AGRO-MAR, nie używamy jej jako dostawcy.
+  if (text.includes('PZ') || text.includes('MM')) {
+    if (supplier && !isAgromarName(supplier)) return supplier
+    if (receiver && !isAgromarName(receiver)) return receiver
+    return supplier || receiver || ''
+  }
+
+  // WZ/FV/FS = rozchód, więc kontrahentem jest odbiorca/klient.
+  if (receiver && !isAgromarName(receiver)) return receiver
+  if (supplier && !isAgromarName(supplier)) return supplier
+  return receiver || supplier || ''
+}
+
 export async function readAgromarExcel(file) {
   const buffer = await file.arrayBuffer()
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
@@ -51,17 +78,21 @@ export async function readAgromarExcel(file) {
   const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' })
 
   return rows
-    .map((row, index) => ({
-      rowNo: index + 2,
-      documentType: String(pick(row, REQUIRED.documentType)).trim(),
-      documentNo: String(pick(row, REQUIRED.documentNo)).trim(),
-      issueDate: parseExcelDate(pick(row, REQUIRED.issueDate)),
-      qty: parseQty(pick(row, REQUIRED.qty)),
-      productName: String(pick(row, REQUIRED.productName)).trim(),
-      contractorName: String(pick(row, REQUIRED.contractorName)).trim(),
-      invoiceNo: String(pick(row, REQUIRED.invoiceNo)).trim(),
-      notes: String(pick(row, REQUIRED.notes)).trim(),
-    }))
+    .map((row, index) => {
+      const documentType = String(pick(row, REQUIRED.documentType)).trim()
+      const documentNo = String(pick(row, REQUIRED.documentNo)).trim()
+      return {
+        rowNo: index + 2,
+        documentType,
+        documentNo,
+        issueDate: parseExcelDate(pick(row, REQUIRED.issueDate)),
+        qty: parseQty(pick(row, REQUIRED.qty)),
+        productName: String(pick(row, REQUIRED.productName)).trim(),
+        contractorName: pickContractorForRow(row, documentType, documentNo),
+        invoiceNo: String(pick(row, REQUIRED.invoiceNo)).trim(),
+        notes: String(pick(row, REQUIRED.notes)).trim(),
+      }
+    })
     .filter(row => row.documentNo || row.productName || row.qty)
 }
 

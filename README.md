@@ -1,9 +1,10 @@
-# AGRO-MAR HACCP v24.6 – K01 ciągły zapis miesiąca + druk
+# AGRO-MAR HACCP/FIFO v24.9
 
-Zmiany:
-- K01 otwierana z listy pojedynczych wpisów prowadzi teraz do kartoteki miesiąca, a nie do jednej operacji.
-- Sekcja „Kartoteki zbiorcze” jest głównym miejscem podglądu, druku i Excela.
-- Druk/PDF otwiera osobne okno z samym formularzem K01, żeby nie było pustej strony.
-- Podpis przyjmującego zostaje listą pracowników w ostatniej kolumnie.
+Poprawki K01:
+- wybór pracownika u góry kartoteki i zastosowanie do wszystkich pozycji,
+- możliwość uzupełnienia tylko pustych podpisów,
+- nadal możliwość zmiany pracownika pojedynczo w ostatniej kolumnie,
+- importer PZ/MM pobiera faktycznego dostawcę z kolumn Dostawca/Nadawca, a nie AGRO-MAR z kolumny Odbiorca,
+- K01 nadal grupowane jako asortyment + miesiąc.
 
-SQL nie uruchamiać ponownie.
+SQL nie jest wymagany.
