@@ -265,12 +265,12 @@ function App() {
       const period = String(doc.document_date || '').slice(0, 7) || haccpMonth || 'brak-daty'
       const product = doc.product_name || 'Bez produktu'
       const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
-      // K01 ma być JEDNĄ kartoteką zbiorczą dla całego miesiąca/zakresu, a nie osobną kartką na dostawę.
-      // Wiersze zawierają wszystkie dostawy z okresu; produkt pokazujemy przy wpisie, jeżeli w miesiącu jest ich więcej.
+      // K01: jedna kartoteka miesięczna/zakresowa DLA JEDNEGO ASORTYMENTU.
+      // Czyli np. Jabłko przemysłowe ma własną kartę, Wiśnia własną kartę itd.
       const key = doc.document_type === 'K01'
-        ? `${doc.document_type}|${period}`
+        ? `${doc.document_type}|${period}|${product}`
         : `${doc.document_type}|${period}|${product}|${chamber}`
-      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K01' ? 'według wpisów w tabeli' : product, chamber, docs: [] })
+      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
     return Array.from(map.values()).map(g => {
@@ -587,7 +587,7 @@ function App() {
     const rows = docs.map((doc, i) => {
       const pn = f => normalizePN(doc.data?.[f])
       const podpis = doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''
-      return `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td style="text-align:left">${escapeHtml((group.product === 'według wpisów w tabeli' ? (doc.product_name + ' / ') : '') + shortSupplier(doc.supplier_name, doc.document_no))}</td><td>${pn('stan_higieniczny_pojazdu')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${pn('wybarwienie_zapach_brak_uszkodzen')}</td><td>${pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</td><td>${escapeHtml(podpis)}</td></tr>`
+      return `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td style="text-align:left">${escapeHtml(shortSupplier(doc.supplier_name, doc.document_no))}</td><td>${pn('stan_higieniczny_pojazdu')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${pn('wybarwienie_zapach_brak_uszkodzen')}</td><td>${pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</td><td>${escapeHtml(podpis)}</td></tr>`
     }).join('')
     const blanks = Array.from({ length: Math.max(0, 14 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K01 ${escapeHtml(group.product)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.raw-name{height:34px}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K01 – Karta kontroli przyjęcia surowców (CP1)</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr><tr><td class="raw-name"><b>Nazwa surowca:</b> ${escapeHtml(group.product || '')}</td></tr></tbody></table><table><thead><tr><th rowspan="2">Lp.</th><th rowspan="2">Data dostawy</th><th rowspan="2">Dane dostawcy/<br>nr faktury</th><th rowspan="2">Stan higieniczny<br>pojazdu<br>(P/N)*</th><th rowspan="2">Ilość</th><th colspan="2">Ocena surowca (P/N)*</th><th rowspan="2">Podpis przyjmującego</th></tr><tr><th>Wybarwienie/zapach/<br>brak uszkodzeń<br>mechanicznych</th><th>Brak zgnilizny/<br>zapleśnienia/<br>zagrzybienia</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Liczba wpisów w kartotece: ${docs.length}</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
@@ -603,32 +603,17 @@ function App() {
   }
 
   function printHtmlInIframe(html) {
-    const iframe = document.createElement('iframe')
-    iframe.style.position = 'fixed'
-    iframe.style.right = '0'
-    iframe.style.bottom = '0'
-    iframe.style.width = '1px'
-    iframe.style.height = '1px'
-    iframe.style.opacity = '0'
-    iframe.style.border = '0'
-    document.body.appendChild(iframe)
-    const frameDoc = iframe.contentWindow?.document
-    if (!frameDoc) {
-      setMessage('Nie udało się przygotować wydruku. Otwórz kartotekę i użyj Ctrl+P.')
+    const w = window.open('', '_blank', 'width=1200,height=800')
+    if (!w) {
+      setMessage('Przeglądarka zablokowała okno wydruku. Zezwól na wyskakujące okna albo użyj Ctrl+P w podglądzie kartoteki.')
       return
     }
-    frameDoc.open()
-    frameDoc.write(html)
-    frameDoc.close()
+    w.document.open()
+    w.document.write(html)
+    w.document.close()
     setTimeout(() => {
-      try {
-        iframe.contentWindow?.focus()
-        iframe.contentWindow?.print()
-      } catch (err) {
-        setMessage('Nie udało się uruchomić drukowania. Otwórz kartotekę i użyj Ctrl+P.')
-      }
-      setTimeout(() => iframe.remove(), 2000)
-    }, 600)
+      try { w.focus(); w.print() } catch (e) { console.error(e) }
+    }, 900)
   }
 
   function printHaccpGroup(group) {
@@ -723,7 +708,7 @@ function App() {
             return <tr key={doc.id}>
               <td>{i+1}</td>
               <td>{doc.document_date}</td>
-              <td style={{textAlign:'left'}}>{group.product === 'według wpisów w tabeli' ? `${doc.product_name || ''} / ` : ''}{shortSupplier(doc.supplier_name, doc.document_no)}</td>
+              <td style={{textAlign:'left'}}>{shortSupplier(doc.supplier_name, doc.document_no)}</td>
               <td className={normalizePN(doc.data?.stan_higieniczny_pojazdu)==='N'?'pn-n':''}>
                 <select className="mini-select no-print" value={normalizePN(doc.data?.stan_higieniczny_pojazdu)} onChange={e=>editHaccpRowField(doc,'stan_higieniczny_pojazdu','Stan higieniczny pojazdu', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
                 <span className="print-only">{normalizePN(doc.data?.stan_higieniczny_pojazdu)}</span>
@@ -1362,29 +1347,33 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
   async function setDocumentEmployee(doc, employeeName) {
     if (!supabase || !doc) return
-    if (!employeeName) return
-    const confirmed = window.confirm(`Ustawić podpis przyjmującego na: ${employeeName}?`)
-    if (!confirmed) return
-    const nextData = { ...(doc.data || {}), podpis_przyjmujacego: employeeName }
+    const nextData = { ...(doc.data || {}), podpis_przyjmujacego: employeeName || '' }
     try {
       const { error } = await supabase
         .from('haccp_documents')
-        .update({ data: nextData, signed_by_operator: employeeName, updated_at: new Date().toISOString() })
+        .update({ data: nextData, signed_by_operator: employeeName || null, updated_at: new Date().toISOString() })
         .eq('id', doc.id)
       if (error) throw error
       await supabase.from('haccp_document_history').insert({
         document_id: doc.id,
         action: 'wybor_pracownika',
-        field_name: 'signed_by_operator',
-        old_value: doc.signed_by_operator || '',
-        new_value: employeeName,
+        field_name: 'podpis_przyjmujacego',
+        old_value: doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '',
+        new_value: employeeName || '',
         reason: 'Wybór podpisu przyjmującego z listy pracowników',
         changed_by: userRole
       })
-      const updated = { ...doc, data: nextData, signed_by_operator: employeeName }
-      setSelectedHaccpDoc(updated)
-      await loadHaccpDocs()
-      setMessage('Zapisano podpis przyjmującego.')
+      const updated = { ...doc, data: nextData, signed_by_operator: employeeName || '' }
+      setHaccpDocs(prev => prev.map(d => d.id === doc.id ? updated : d))
+      setSelectedHaccpDoc(prev => {
+        if (!prev) return prev
+        if (prev.groupPreview && prev.group?.docs) {
+          return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => d.id === doc.id ? updated : d) } }
+        }
+        if (prev.id === doc.id) return updated
+        return prev
+      })
+      setMessage('Podpis przyjmującego zapisany.')
     } catch (err) {
       setMessage(`Błąd zapisu podpisu: ${err.message}`)
     }

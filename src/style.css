@@ -106,3 +106,19 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   .k01-original, .monthly-paper { page-break-inside:auto; }
   .k01-table tr { page-break-inside:avoid; page-break-after:auto; }
 }
+
+/* v24.8: wygodne przewijanie długiej kartoteki */
+.haccp-modal.wide{
+  max-height:92vh;
+  overflow:auto;
+}
+.haccp-modal.wide .modal-actions{
+  position:sticky;
+  bottom:0;
+  background:rgba(255,255,255,.96);
+  padding:10px 0;
+  border-top:1px solid #e5e7eb;
+}
+.k01-table select.mini-select{
+  max-width: 160px;
+}
