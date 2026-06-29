@@ -614,23 +614,10 @@ function App() {
     const docs = group.docs || []
     const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-    const rows = docs.map((doc, i) => `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '')}</td><td>${escapeHtml(doc.chamber_code || group.chamber || '')}</td><td style="text-align:left">${escapeHtml(doc.product_name || '')}<br><small>${escapeHtml(doc.lot_no || '')}</small></td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${escapeHtml(doc.data?.temperatura || '')}</td><td>${normalizePN(doc.data?.parametry_magazynowania || 'P')}</td><td>${escapeHtml(doc.data?.uwagi || '')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '')}</td></tr>`).join('')
-    const blanks = Array.from({ length: Math.max(0, 14 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td>P</td><td></td><td></td></tr>`).join('')
-    return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.chamber || '')} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.blank-row td{height:28px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców</b></td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt / partia</th><th>Ilość</th><th>Temperatura</th><th>Ocena (P/N)</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Temperaturę i uwagi można uzupełniać ręcznie.</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
-  }
-
-  function printHtmlInIframe(html) {
-    const w = window.open('', '_blank', 'width=1200,height=800')
-    if (!w) {
-      setMessage('Przeglądarka zablokowała okno wydruku. Zezwól na wyskakujące okna albo użyj Ctrl+P w podglądzie kartoteki.')
-      return
-    }
-    w.document.open()
-    w.document.write(html)
-    w.document.close()
-    setTimeout(() => {
-      try { w.focus(); w.print() } catch (e) { console.error(e) }
-    }, 900)
+    const chamber = group.chamber || docs[0]?.chamber_code || ''
+    const rows = docs.map((doc, i) => `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '')}</td><td>${escapeHtml(chamber)}</td><td style="text-align:left">${escapeHtml(doc.product_name || '')}<br>${escapeHtml(doc.lot_no || '')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${escapeHtml(doc.data?.temperatura || '')}</td><td>${normalizePN(doc.data?.parametry_magazynowania || doc.status || 'P')}</td><td>${escapeHtml(doc.data?.uwagi || '')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '')}</td></tr>`).join('')
+    const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td>${escapeHtml(chamber)}</td><td></td><td></td><td></td><td>P</td><td></td><td></td></tr>`).join('')
+    return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(chamber)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.sub{height:30px}.blank-row td{height:25px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców (CP2)</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr><tr><td class="sub"><b>Komora:</b> ${escapeHtml(chamber)} &nbsp;&nbsp; <b>Zakres:</b> ${escapeHtml(periodLabel(group))}</td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Surowiec / partia</th><th>Ilość</th><th>Temperatura</th><th>Parametry magazynowania (P/N)*</th><th>Uwagi</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Kartoteka miesięczna dla jednej komory/asortymentu.</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
 
   function printHaccpGroup(group) {
@@ -755,6 +742,19 @@ function App() {
             </tr>
           })}
         </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Podpis wybierany jest w ostatniej kolumnie dla każdej operacji.</div></div>
+    }
+    if (group.type === 'K02') {
+      return <div className="monthly-paper k02-paper">
+        <table className="k01-head"><tbody><tr><td className="company" rowSpan="2"><b>AGRO-MAR MARIUSZ<br/>BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców (CP2)</b></td><td className="meta" rowSpan="2"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr><tr><td className="raw-name"><b>Komora:</b> {group.chamber || '-'} &nbsp;&nbsp; <b>Asortyment:</b> {group.product}</td></tr></tbody></table>
+        <table className="k01-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Surowiec / partia</th><th>Ilość</th><th>Temperatura</th><th>Parametry magazynowania (P/N)*</th><th>Uwagi</th><th>Podpis kontrolującego</th></tr></thead><tbody>
+          {docs.map((doc,i)=><tr key={doc.id}>
+            <td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code || group.chamber || ''}</td><td style={{textAlign:'left'}}>{doc.product_name}<br/><small>{doc.lot_no}</small></td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td>
+            <td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td>
+            <td className={normalizePN(doc.data?.parametry_magazynowania || doc.status)==='N'?'pn-n':''}><select className="mini-select no-print" value={normalizePN(doc.data?.parametry_magazynowania || doc.status || 'P')} onChange={e=>editHaccpRowField(doc,'parametry_magazynowania','Parametry magazynowania', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(doc.data?.parametry_magazynowania || doc.status || 'P')}</span></td>
+            <td>{doc.data?.uwagi || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'uwagi','Uwagi',doc.data?.uwagi||'')}>Edytuj</button></td>
+            <td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td>
+          </tr>)}
+        </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. K02 jest kartoteką miesięczną dla komory/asortymentu.</div></div>
     }
     return <div className="monthly-paper"><div className="paper-head"><div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div><div><b>{group.type} – kartoteka miesięczna</b><br/>Okres: {periodLabel(group)}<br/>Komora: {group.chamber || '-'}</div></div><table className="paper-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt</th><th>Partia</th><th>Ilość</th><th>Temperatura</th><th>P/N</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td><td className={normalizePN(doc.data?.parametry_magazynowania)==='N'?'pn-n':''}>{normalizePN(doc.data?.parametry_magazynowania || 'P')} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'parametry_magazynowania','Ocena parametrów magazynowania', normalizePN(doc.data?.parametry_magazynowania || 'P'), {pn:true})}>Edytuj</button></td><td>{doc.data?.uwagi || ''}</td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table></div>
   }
@@ -1597,7 +1597,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.10 K01 PODPIS+DOSTAWCA FIX</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.15 K02 MIESIECZNE</div>
     </header>
 
     <section className="warning">
@@ -1840,7 +1840,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.14: poprawka widoku K01 — góra i dół pokazują tylko kartoteki zbiorcze, bez listy pojedynczych dostaw na stronie głównej.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.15: K01 zamknięte roboczo, dodany pierwszy poprawiony wzór K02 jako kartoteka miesięczna do podglądu, edycji, druku i Excela.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
