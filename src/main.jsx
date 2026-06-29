@@ -206,6 +206,12 @@ function App() {
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
+  const [auxRows, setAuxRows] = useState([])
+  const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
+  const [auxHalf, setAuxHalf] = useState(new Date().getMonth() < 6 ? '1' : '2')
+  const [auxForm, setAuxForm] = useState({ delivery_date: new Date().toISOString().slice(0,10), item_name: '', supplier_invoice: '', vehicle_hygiene: 'P', qty: '', lot_no: '', notes: '', signed_by: '' })
+  const [selectedAuxCard, setSelectedAuxCard] = useState(null)
+  const [auxPdfName, setAuxPdfName] = useState('')
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -222,6 +228,7 @@ function App() {
 
   const HACCPCARDS = [
     ['K01', 'K01 – Przyjęcie surowca (CP1)', 'Dostawy PZ/MM, ocena surowca i pojazdu'],
+    ['K01.1', 'K01.1 – Przyjęcie materiałów pomocniczych', 'Faktury zakupowe, opakowania i materiały pomocnicze'],
     ['K02', 'K02 – Magazynowanie surowca (CP2)', 'Komory surowca, temperatury i status P/N'],
     ['K04', 'K04 – Magazynowanie produktu gotowego (CP3/CCP1)', 'Produkty gotowe, pulpy i komory/beczki'],
     ['K07', 'K07 – Kontrola sita / identyfikowalność', 'Kontrola przed przerobem oraz śledzenie partii']
@@ -759,6 +766,165 @@ function App() {
     return <div className="monthly-paper"><div className="paper-head"><div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div><div><b>{group.type} – kartoteka miesięczna</b><br/>Okres: {periodLabel(group)}<br/>Komora: {group.chamber || '-'}</div></div><table className="paper-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt</th><th>Partia</th><th>Ilość</th><th>Temperatura</th><th>P/N</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td><td className={normalizePN(doc.data?.parametry_magazynowania)==='N'?'pn-n':''}>{normalizePN(doc.data?.parametry_magazynowania || 'P')} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'parametry_magazynowania','Ocena parametrów magazynowania', normalizePN(doc.data?.parametry_magazynowania || 'P'), {pn:true})}>Edytuj</button></td><td>{doc.data?.uwagi || ''}</td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table></div>
   }
 
+
+
+  function auxHalfFromDate(dateValue) {
+    const d = String(dateValue || '').slice(0, 10)
+    const year = d.slice(0, 4) || auxYear
+    const month = Number(d.slice(5, 7) || 1)
+    return { year, half: month <= 6 ? '1' : '2', label: `${year} / ${month <= 6 ? 'I półrocze' : 'II półrocze'}` }
+  }
+
+  const auxVisibleRows = useMemo(() => {
+    return auxRows.filter(r => {
+      const h = auxHalfFromDate(r.delivery_date)
+      return h.year === auxYear && h.half === auxHalf
+    }).sort((a,b) => String(a.delivery_date || '').localeCompare(String(b.delivery_date || '')) || String(a.created_at || '').localeCompare(String(b.created_at || '')))
+  }, [auxRows, auxYear, auxHalf])
+
+  async function loadAuxMaterials() {
+    if (!supabase) return
+    try {
+      const { data, error } = await supabase
+        .from('haccp_aux_materials')
+        .select('*')
+        .order('delivery_date', { ascending: true })
+        .limit(2000)
+      if (error) throw error
+      setAuxRows(data || [])
+    } catch (err) {
+      setAuxRows([])
+    }
+  }
+
+  function resetAuxForm() {
+    setAuxForm({ delivery_date: new Date().toISOString().slice(0,10), item_name: '', supplier_invoice: '', vehicle_hygiene: 'P', qty: '', lot_no: '', notes: '', signed_by: '' })
+    setAuxPdfName('')
+  }
+
+  async function saveAuxMaterial() {
+    if (!supabase) return
+    if (!auxForm.delivery_date || !auxForm.item_name || !auxForm.supplier_invoice) {
+      setMessage('K01.1: uzupełnij datę, nazwę towaru i dostawcę/nr faktury.')
+      return
+    }
+    const payload = {
+      delivery_date: auxForm.delivery_date,
+      item_name: auxForm.item_name,
+      supplier_invoice: auxForm.supplier_invoice,
+      vehicle_hygiene: auxForm.vehicle_hygiene || 'P',
+      qty: auxForm.qty || null,
+      lot_no: auxForm.lot_no || null,
+      notes: auxForm.notes || null,
+      signed_by: auxForm.signed_by || null,
+      source_filename: auxPdfName || null
+    }
+    try {
+      if (auxForm.id) {
+        const { error } = await supabase.from('haccp_aux_materials').update(payload).eq('id', auxForm.id)
+        if (error) throw error
+        setMessage('K01.1: zapisano zmiany pozycji.')
+      } else {
+        const { error } = await supabase.from('haccp_aux_materials').insert(payload)
+        if (error) throw error
+        setMessage('K01.1: dodano pozycję do kartoteki półrocznej.')
+      }
+      resetAuxForm()
+      await loadAuxMaterials()
+    } catch (err) {
+      setMessage(`Błąd zapisu K01.1: ${err.message}`)
+    }
+  }
+
+  function editAuxMaterial(row) {
+    setAuxForm({
+      id: row.id,
+      delivery_date: row.delivery_date || '',
+      item_name: row.item_name || '',
+      supplier_invoice: row.supplier_invoice || '',
+      vehicle_hygiene: normalizePN(row.vehicle_hygiene || 'P'),
+      qty: row.qty || '',
+      lot_no: row.lot_no || '',
+      notes: row.notes || '',
+      signed_by: row.signed_by || ''
+    })
+    setAuxPdfName(row.source_filename || '')
+  }
+
+  async function deleteAuxMaterial(row) {
+    if (!supabase || !row) return
+    if (!window.confirm(`Usunąć pozycję K01.1: ${row.item_name || ''}?`)) return
+    if (!window.confirm('Potwierdź drugi raz usunięcie pozycji z kartoteki K01.1.')) return
+    try {
+      const { error } = await supabase.from('haccp_aux_materials').delete().eq('id', row.id)
+      if (error) throw error
+      await loadAuxMaterials()
+      setMessage('K01.1: usunięto pozycję.')
+    } catch (err) {
+      setMessage(`Błąd usuwania K01.1: ${err.message}`)
+    }
+  }
+
+  function handleAuxPdfFile(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setAuxPdfName(file.name)
+    setMessage('K01.1: PDF został wskazany. W tej wersji uzupełnij odczytane dane ręcznie; automatyczne OCR będzie kolejnym etapem.')
+  }
+
+  function buildK011Html(rows) {
+    const label = `${auxYear} ${auxHalf === '1' ? 'I półrocze' : 'II półrocze'}`
+    const trs = rows.map((r, i) => `<tr><td>${i+1}</td><td>${escapeHtml(r.delivery_date || '')}</td><td style="text-align:left">${escapeHtml(r.item_name || '')}</td><td style="text-align:left">${escapeHtml(r.supplier_invoice || '')}</td><td>${escapeHtml(normalizePN(r.vehicle_hygiene || 'P'))}</td><td>${escapeHtml(r.qty || '')}</td><td>${escapeHtml(r.lot_no || '')}</td><td style="text-align:left">${escapeHtml(r.notes || '')}</td><td>${escapeHtml(r.signed_by || '')}</td></tr>`).join('')
+    const blanks = Array.from({length: Math.max(0, 10 - rows.length)}, (_, i) => `<tr><td>${rows.length+i+1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td></tr>`).join('')
+    return `<!doctype html><html><head><meta charset="utf-8"><title>K01.1 ${escapeHtml(label)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.blank td{height:28px}</style></head><body><table><tbody><tr><td class="company"><b>AGRO-MAR MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych</b></td><td class="meta"><b>Rok:</b> ${escapeHtml(auxYear)}<br><b>Okres:</b> ${escapeHtml(auxHalf === '1' ? 'I półrocze' : 'II półrocze')}<br><b>Strona:</b></td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data dostawy</th><th>Nazwa towaru/przeznaczenie</th><th>Dostawca/nr faktury</th><th>Stan higieniczny pojazdu (P/N)*</th><th>Ilość</th><th>Nadany numer partii<br>(w przypadku opakowań)</th><th>Uwagi</th><th>Podpis przyjmującego</th></tr></thead><tbody>${trs}${blanks}</tbody></table><p>* P – prawidłowo, N – nieprawidłowo. Kartoteka: ${escapeHtml(label)}</p><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  }
+
+  function printK011() { printHtmlInIframe(buildK011Html(auxVisibleRows)) }
+
+  function exportK011Excel() {
+    const rows = [
+      ['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'],
+      ['Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych', '', '', '', '', '', '', '', `${auxYear} ${auxHalf === '1' ? 'I półrocze' : 'II półrocze'}`],
+      ['Lp.', 'Data dostawy', 'Nazwa towaru/przeznaczenie', 'Dostawca/nr faktury', 'Stan higieniczny pojazdu (P/N)', 'Ilość', 'Nadany numer partii', 'Uwagi', 'Podpis przyjmującego'],
+      ...auxVisibleRows.map((r,i)=>[i+1, r.delivery_date || '', r.item_name || '', r.supplier_invoice || '', normalizePN(r.vehicle_hygiene || 'P'), r.qty || '', r.lot_no || '', r.notes || '', r.signed_by || ''])
+    ]
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.aoa_to_sheet(rows)
+    ws['!cols'] = [{wch:6},{wch:16},{wch:28},{wch:28},{wch:18},{wch:12},{wch:20},{wch:24},{wch:22}]
+    XLSX.utils.book_append_sheet(wb, ws, 'K01.1')
+    XLSX.writeFile(wb, `K01-1-materialy-pomocnicze-${auxYear}-H${auxHalf}.xlsx`)
+  }
+
+  function renderK011Section() {
+    return <>
+      <h3>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h3>
+      <p className="hint">Jedna kartoteka obejmuje pół roku. PDF z fakturą można wskazać przy pozycji; automatyczne OCR będzie dodane w następnym etapie. Teraz dane można wpisać i poprawiać ręcznie.</p>
+      <div className="form-grid compact">
+        <label>Rok<input value={auxYear} onChange={e=>setAuxYear(e.target.value)} /></label>
+        <label>Okres<select value={auxHalf} onChange={e=>setAuxHalf(e.target.value)}><option value="1">I półrocze</option><option value="2">II półrocze</option></select></label>
+      </div>
+      <div className="card inner-card">
+        <h3>{auxForm.id ? 'Edytuj pozycję K01.1' : 'Dodaj pozycję K01.1'}</h3>
+        <div className="form-grid compact">
+          <label>Faktura PDF<input type="file" accept="application/pdf" onChange={handleAuxPdfFile} /></label>
+          <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e=>setAuxForm({...auxForm, delivery_date:e.target.value})} /></label>
+          <label>Nazwa towaru / przeznaczenie<input value={auxForm.item_name} onChange={e=>setAuxForm({...auxForm, item_name:e.target.value})} placeholder="np. kartony, worki, etykiety" /></label>
+          <label>Dostawca / nr faktury<input value={auxForm.supplier_invoice} onChange={e=>setAuxForm({...auxForm, supplier_invoice:e.target.value})} placeholder="np. Firma X / FV/123/2026" /></label>
+          <label>Stan higieniczny pojazdu<select value={auxForm.vehicle_hygiene} onChange={e=>setAuxForm({...auxForm, vehicle_hygiene:e.target.value})}><option value="P">P</option><option value="N">N</option></select></label>
+          <label>Ilość<input value={auxForm.qty} onChange={e=>setAuxForm({...auxForm, qty:e.target.value})} placeholder="np. 500 szt." /></label>
+          <label>Nadany numer partii<input value={auxForm.lot_no} onChange={e=>setAuxForm({...auxForm, lot_no:e.target.value})} placeholder="jeśli dotyczy" /></label>
+          <label>Podpis przyjmującego<select value={auxForm.signed_by} onChange={e=>setAuxForm({...auxForm, signed_by:e.target.value})}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></label>
+          <label>Uwagi<input value={auxForm.notes} onChange={e=>setAuxForm({...auxForm, notes:e.target.value})} /></label>
+        </div>
+        {auxPdfName && <p className="hint">Wybrany PDF: <b>{auxPdfName}</b></p>}
+        <div className="actions"><button onClick={saveAuxMaterial}>{auxForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button><button className="secondary" onClick={resetAuxForm}>Wyczyść</button></div>
+      </div>
+      <div className="actions"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież K01.1</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
+      <div className="haccp-paper k01-print"><table className="k01-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych</b></td><td className="meta"><b>Rok:</b> {auxYear}<br/><b>Okres:</b> {auxHalf === '1' ? 'I półrocze' : 'II półrocze'}<br/><b>Strona:</b></td></tr></tbody></table>
+      <table className="k01-table"><thead><tr><th>Lp.</th><th>Data dostawy</th><th>Nazwa towaru/przeznaczenie</th><th>Dostawca/nr faktury</th><th>Stan higieniczny pojazdu (P/N)*</th><th>Ilość</th><th>Nadany numer partii<br/>(w przypadku opakowań)</th><th>Uwagi</th><th>Podpis przyjmującego</th><th className="no-print">Akcje</th></tr></thead><tbody>{auxVisibleRows.map((r,i)=><tr key={r.id}><td>{i+1}</td><td>{r.delivery_date}</td><td>{r.item_name}</td><td>{r.supplier_invoice}</td><td>{normalizePN(r.vehicle_hygiene || 'P')}</td><td>{r.qty}</td><td>{r.lot_no}</td><td>{r.notes}</td><td>{r.signed_by}</td><td className="no-print"><button className="mini secondary" onClick={()=>editAuxMaterial(r)}>Edytuj</button><button className="mini danger" onClick={()=>deleteAuxMaterial(r)}>Usuń</button></td></tr>)}{Array.from({length: Math.max(0, 10-auxVisibleRows.length)}, (_,i)=><tr key={`blank-${i}`}><td>{auxVisibleRows.length+i+1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td><td className="no-print"></td></tr>)}</tbody></table></div>
+    </>
+  }
+
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
@@ -784,6 +950,7 @@ function App() {
       loadImports()
       loadHaccpDocs()
       loadEmployees()
+      loadAuxMaterials()
     }
   }, [])
 
@@ -1344,6 +1511,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       if (error) throw error
       setNewEmployeeName('')
       await loadEmployees()
+      loadAuxMaterials()
       setMessage('Dodano pracownika do listy podpisów.')
     } catch (err) {
       setMessage(`Błąd dodawania pracownika: ${err.message}`)
@@ -1365,6 +1533,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         .eq('id', employee.id)
       if (error) throw error
       await loadEmployees()
+      loadAuxMaterials()
       setMessage('Pracownik został ukryty z listy podpisów.')
     } catch (err) {
       setMessage(`Błąd usuwania pracownika: ${err.message}`)
@@ -1840,7 +2009,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.15: K01 zamknięte roboczo, dodany pierwszy poprawiony wzór K02 jako kartoteka miesięczna do podglądu, edycji, druku i Excela.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.16: dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
@@ -1857,6 +2026,8 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         {haccpPeriodMode === 'range' && <><label>Od<input type="date" value={haccpFrom} onChange={e => setHaccpFrom(e.target.value)} /></label><label>Do<input type="date" value={haccpTo} onChange={e => setHaccpTo(e.target.value)} /></label></>}
       </div>
       <div className="actions"><button className="secondary" onClick={loadHaccpDocs}><RefreshCcw size={16}/> Odśwież kartoteki</button></div>
+      {docsFilter === 'K01.1' && renderK011Section()}
+      {docsFilter !== 'K01.1' && <>
       <div className="doc-progress">{['K01','K02','K04','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
       <h3>Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat</h3><p className="hint"><b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</p>
       {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek zbiorczych dla wybranego okresu i filtrów.</p>}
@@ -1878,6 +2049,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
           <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
         </tr>)}</tbody>
       </table></div>}
+      </>}
     </section>
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     </>}

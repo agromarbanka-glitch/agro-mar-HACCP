@@ -1,9 +1,13 @@
-# AGRO-MAR HACCP/FIFO v24.13
+# AGRO-MAR HACCP v24.16
 
-Zmiana tylko w widoku K01/Kartoteki HACCP:
-- u góry: kartoteki zbiorcze do podglądu, druku/PDF i Excela,
-- na dole: te same kartoteki zbiorcze, ale jako wejście do edycji,
-- usunięto z głównego widoku listę setek pojedynczych dostaw,
-- edycja podpisów, P/N i dostawcy/PZ odbywa się po wejściu w konkretną kartotekę.
+Zmiany:
+- K01.1 – Karta kontroli przyjęcia materiałów pomocniczych.
+- Kartoteka półroczna: I półrocze / II półrocze.
+- Ręczne dodawanie, edycja i usuwanie pozycji.
+- Możliwość wskazania faktury PDF przy pozycji.
+- Druk/PDF i eksport Excel.
 
-SQL nie jest wymagany.
+Po wgraniu plików uruchom SQL:
+`supabase/2026-v24-16-k011-materialy-pomocnicze.sql`
+
+OCR faktur PDF będzie kolejnym etapem.
