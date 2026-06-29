@@ -253,12 +253,10 @@ function App() {
   }, [haccpDocsForFilter, haccpPeriodMode, haccpMonth, haccpFrom, haccpTo])
 
   const haccpMonthlyGroups = useMemo(() => {
-    // Kartoteki zbiorcze NIE korzystają z pola wyszukiwania, bo wyszukiwarka zawężałaby
-    // formularz do jednej pozycji. K01 ma pokazywać cały miesiąc/zakres.
-    const source = haccpDocs
-      .filter(d => d.document_type === docsFilter)
-      .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
-      .filter(docInSelectedPeriod)
+    // Kartoteki zbiorcze korzystają z tych samych dokumentów co filtr okresu,
+    // ale grupują je do kartotek miesięcznych/asortymentowych.
+    // Na stronie głównej NIE pokazujemy pojedynczych dostaw jako osobnych kartotek.
+    const source = haccpPeriodDocs
 
     const map = new Map()
     for (const doc of source) {
@@ -282,7 +280,7 @@ function App() {
         docs
       }
     })
-  }, [haccpDocs, docsFilter, haccpStatusFilter, haccpPeriodMode, haccpMonth, haccpFrom, haccpTo])
+  }, [haccpPeriodDocs])
 
   function buildK01MonthlyGroupForPeriod(period) {
     const docs = haccpDocs
@@ -1842,7 +1840,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.9: K01 miesięczne wg asortymentu; podpis zbiorczy i pojedynczy; poprawiony odczyt faktycznego dostawcy z Excela.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.14: poprawka widoku K01 — góra i dół pokazują tylko kartoteki zbiorcze, bez listy pojedynczych dostaw na stronie głównej.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
@@ -1866,15 +1864,18 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <thead><tr><th>Kartoteka</th><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th><th>Akcje</th></tr></thead>
         <tbody>{haccpMonthlyGroups.map(g => <tr key={g.key}><td><b>{g.type}</b></td><td>{periodLabel(g)}</td><td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td><td>{g.docs.length}</td><td>{g.docs.filter(d => d.status === 'N').length}</td><td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td></tr>)}</tbody>
       </table></div>}
-      <h3>Wpisy w wybranej kartotece – edycja pojedynczych wierszy</h3>
-      <p className="hint">Podgląd, druk/PDF i Excel wykonuj z sekcji „Kartoteki zbiorcze”. Poniżej edytujesz pojedyncze wiersze, żeby nie tworzyć osobnej kartki dla każdej dostawy.</p>
-      {haccpDocsForFilter.length === 0 && <p className="hint">Brak wpisów {docsFilter} dla aktualnych filtrów. Dla K04/K07 pojawią się po utworzeniu partii produktu gotowego lub pracy w CP3/CCP1.</p>}
-      {haccpDocsForFilter.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr><th>Partia</th><th>Produkt</th><th>Dostawca / PZ</th><th>Data</th><th>Komora</th><th>Status</th><th>Podpis</th><th>Akcje</th></tr></thead>
-        <tbody>{haccpDocsForFilter.slice(0, 300).map(d => <tr key={d.id}>
-          <td><b>{d.lot_no || '-'}</b></td><td>{d.product_name || '-'}</td><td>{shortSupplier(d) || '-'}</td><td>{d.document_date || '-'}</td><td>{d.chamber_code || '-'}</td><td><span className={statusClass(d)}>{statusLabel(d)}</span></td>
-          <td><select className="mini-select" value={d.signed_by_operator || d.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployee(d,e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
-          <td className="row-actions">{d.document_type === 'K01' ? <button className="mini secondary" onClick={() => { const g = findMonthlyGroupForDoc(d); if (g) { setHaccpPeriodMode('month'); setHaccpMonth(g.period); setSelectedHaccpDoc({ groupPreview: true, group: g }); } else { setMessage('Nie znaleziono kartoteki miesiąca dla tego wpisu.'); } }}><Eye size={14}/> Kartoteka miesiąca</button> : <button className="mini secondary" onClick={() => setSelectedHaccpDoc(d)}><Eye size={14}/> Szczegóły</button>}<button className="mini secondary" onClick={() => changeHaccpStatus(d, d.status === 'N' ? 'P' : 'N')}>{d.status === 'N' ? 'Zmień na P' : 'Zmień na N'}</button></td>
+      <h3>Kartoteki do edycji – dokładnie te same pozycje co wyżej</h3>
+      <p className="hint"><b>Ta sekcja ma mieć taką samą liczbę pozycji jak sekcja u góry.</b> Kliknięcie „Edytuj kartotekę” otwiera całą miesięczną kartotekę asortymentu w trybie edycji: P/N, podpis pracownika i PZ.</p>
+      {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek do edycji dla wybranego okresu i filtrów.</p>}
+      {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Kartoteka</th><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th><th>Akcje</th></tr></thead>
+        <tbody>{haccpMonthlyGroups.map(g => <tr key={`edit-${g.key}`}>
+          <td><b>{g.type}</b></td>
+          <td>{periodLabel(g)}</td>
+          <td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td>
+          <td>{g.docs.length}</td>
+          <td>{g.docs.filter(d => d.status === 'N').length}</td>
+          <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
         </tr>)}</tbody>
       </table></div>}
     </section>
