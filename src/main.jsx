@@ -865,11 +865,111 @@ function App() {
     }
   }
 
-  function handleAuxPdfFile(e) {
+  function polishDateToIso(value) {
+    const text = String(value || '').trim()
+    const m = text.match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/)
+    if (!m) return ''
+    return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`
+  }
+
+  function firstUsefulLineAfter(text, labels) {
+    const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    for (let i = 0; i < lines.length; i++) {
+      const n = normalizeText(lines[i])
+      if (labels.some(label => n.includes(normalizeText(label)))) {
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const candidate = lines[j]
+          const cn = normalizeText(candidate)
+          if (!candidate || cn.includes('nip') || cn.includes('regon') || cn.includes('konto') || cn.includes('bank')) continue
+          if (/^[0-9\s,./-]+$/.test(candidate)) continue
+          return candidate.replace(/^(nazwa|firma|sprzedawca|dostawca)\s*[:\-]?\s*/i, '').trim()
+        }
+      }
+    }
+    return ''
+  }
+
+  function parseInvoiceTextForK011(text) {
+    const clean = String(text || '').replace(/\u0000/g, ' ').replace(/[ \t]+/g, ' ')
+    const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    const invoiceMatch = clean.match(/(?:faktura(?:\s+vat)?|nr\s*faktury|numer\s*faktury|fv)\s*(?:nr|numer)?\s*[:#-]?\s*([A-ZĄĆĘŁŃÓŚŹŻ0-9][A-ZĄĆĘŁŃÓŚŹŻ0-9/_.\-]{2,})/i)
+    const invoiceNo = invoiceMatch?.[1]?.replace(/[;,]$/, '') || ''
+
+    const dateLabelMatch = clean.match(/(?:data\s+wystawienia|data\s+dostawy|data\s+sprzedaży|data\s+sprzedazy)\s*[:\-]?\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})/i)
+    const anyDateMatch = clean.match(/(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})/)
+    const deliveryDate = polishDateToIso(dateLabelMatch?.[1] || anyDateMatch?.[1] || '')
+
+    const supplier = firstUsefulLineAfter(clean, ['Sprzedawca', 'Dostawca', 'Wystawca'])
+
+    let itemName = ''
+    let qty = ''
+    const materialKeywords = /(karton|worek|worki|skrzyn|beczk|etykiet|foli|opakowan|palet|taśm|tasma|wiadr|pojemnik|nakrętk|nakretk)/i
+    const qtyRegex = /(\d+(?:[\s ]?\d{3})*(?:[,.]\d+)?)\s*(szt\.?|kg|opak\.?|rol\.?|mb|m2|m²|kpl\.?|pcs)/i
+    const candidates = lines.filter(l => materialKeywords.test(l) || qtyRegex.test(l))
+    for (const line of candidates) {
+      const q = line.match(qtyRegex)
+      if (q && !qty) qty = `${q[1].replace(/\s/g, '')} ${q[2].replace('.', '')}`
+      if (materialKeywords.test(line) && !itemName) {
+        itemName = line
+          .replace(/\s+\d+(?:[\s ]?\d{3})*(?:[,.]\d+)?\s*(szt\.?|kg|opak\.?|rol\.?|mb|m2|m²|kpl\.?|pcs).*/i, '')
+          .replace(/^\d+\.?\s*/, '')
+          .trim()
+      }
+      if (itemName && qty) break
+    }
+    if (!itemName && candidates[0]) itemName = candidates[0].slice(0, 80)
+
+    const supplierInvoice = [supplier, invoiceNo].filter(Boolean).join(' / ')
+    return { deliveryDate, invoiceNo, supplier, itemName, qty, supplierInvoice }
+  }
+
+  async function extractPdfText(file) {
+    try {
+      const pdfjsLib = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.mjs')
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.mjs'
+      const data = await file.arrayBuffer()
+      const pdf = await pdfjsLib.getDocument({ data }).promise
+      const parts = []
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        const page = await pdf.getPage(pageNo)
+        const content = await page.getTextContent()
+        parts.push(content.items.map(item => item.str).join('\n'))
+      }
+      return parts.join('\n')
+    } catch (err) {
+      const buffer = await file.arrayBuffer()
+      const raw = new TextDecoder('latin1').decode(buffer)
+      return raw
+        .replace(/\(([^()]{1,120})\)\s*Tj/g, '\n$1\n')
+        .replace(/<([0-9A-Fa-f]{4,})>\s*Tj/g, '\n')
+        .replace(/[^\x09\x0A\x0D\x20-\x7EĄĆĘŁŃÓŚŹŻąćęłńóśźż]+/g, ' ')
+    }
+  }
+
+  async function handleAuxPdfFile(e) {
     const file = e.target.files?.[0]
     if (!file) return
     setAuxPdfName(file.name)
-    setMessage('K01.1: PDF został wskazany. W tej wersji uzupełnij odczytane dane ręcznie; automatyczne OCR będzie kolejnym etapem.')
+    setMessage('K01.1: odczytuję fakturę PDF...')
+    try {
+      const text = await extractPdfText(file)
+      const parsed = parseInvoiceTextForK011(text)
+      const updates = {}
+      if (parsed.deliveryDate) updates.delivery_date = parsed.deliveryDate
+      if (parsed.itemName) updates.item_name = parsed.itemName
+      if (parsed.supplierInvoice) updates.supplier_invoice = parsed.supplierInvoice
+      else if (parsed.invoiceNo) updates.supplier_invoice = parsed.invoiceNo
+      if (parsed.qty) updates.qty = parsed.qty
+      setAuxForm(prev => ({ ...prev, ...updates, notes: prev.notes || `PDF: ${file.name}` }))
+      const filled = Object.keys(updates).length
+      if (filled) {
+        setMessage(`K01.1: odczytano PDF i uzupełniono ${filled} pola. Sprawdź dane przed zapisem.`)
+      } else {
+        setMessage('K01.1: nie udało się automatycznie rozpoznać danych z PDF. Uzupełnij pola ręcznie i zapisz pozycję.')
+      }
+    } catch (err) {
+      setMessage(`K01.1: błąd odczytu PDF: ${err.message}. Uzupełnij dane ręcznie.`)
+    }
   }
 
   function buildK011Rows(rows, editable = false) {
@@ -963,7 +1063,7 @@ function App() {
     const rowsForPaper = auxVisibleRows.slice(0, 12)
     const blanks = Array.from({length: Math.max(0, 12-rowsForPaper.length)})
     return <>
-      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Lista półrocznych kartotek. Najpierw wybierz kartotekę, potem dodawaj lub edytuj jej pozycje. OCR faktur PDF będzie osobnym kolejnym etapem.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Lista półrocznych kartotek. Najpierw wybierz kartotekę, potem dodawaj lub edytuj jej pozycje. wgraj fakturę PDF, system spróbuje odczytać dane i uzupełnić formularz; dane możesz poprawić przed zapisem.</p></div></div>
       <div className="card inner-card no-print">
         <h3>Lista kartotek K01.1</h3>
         <table><thead><tr><th>Kartoteka</th><th>Okres</th><th>Wpisy</th><th>Akcje</th></tr></thead><tbody>
@@ -980,7 +1080,7 @@ function App() {
       <div className="card inner-card no-print">
         <h3>{auxForm.id ? 'Edytuj pozycję K01.1' : `Dodaj pozycję do K01.1 – ${auxYear}, ${periodLabel}`}</h3>
         <div className="form-grid compact">
-          <label>Faktura PDF<input type="file" accept="application/pdf" onChange={handleAuxPdfFile} /></label>
+          <label>Faktura PDF<input type="file" accept="application/pdf" onChange={handleAuxPdfFile} /><span className="hint">PDF tekstowy odczytuje się automatycznie; skan może wymagać ręcznej korekty.</span></label>
           <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e=>setAuxForm({...auxForm, delivery_date:e.target.value})} /></label>
           <label>Nazwa towaru / przeznaczenie<input value={auxForm.item_name} onChange={e=>setAuxForm({...auxForm, item_name:e.target.value})} placeholder="np. kartony, worki, etykiety" /></label>
           <label>Dostawca / nr faktury<input value={auxForm.supplier_invoice} onChange={e=>setAuxForm({...auxForm, supplier_invoice:e.target.value})} placeholder="np. Firma X / FV/123/2026" /></label>
@@ -2095,7 +2195,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v25: K01.1 – materiały pomocnicze, półroczne kartoteki, edycja, druk/PDF i Excel.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.16: dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>

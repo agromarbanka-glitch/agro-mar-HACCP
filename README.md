@@ -1,12 +1,9 @@
-# AGRO-MAR HACCP – v25 K01.1 Materiały pomocnicze
+# AGRO-MAR HACCP/FIFO – v25.1
 
-Zakres wersji:
-- K01.1 jako kartoteka półroczna: I półrocze / II półrocze.
-- Lista kartotek dla kolejnych lat tworzona na podstawie danych.
-- Ręczne dodawanie i edycja pozycji.
-- Podpis przyjmującego z listy pracowników.
-- Druk/PDF i eksport do Excel.
-- Faktura PDF może być dołączona jako plik/nazwa; automatyczny OCR faktur PDF będzie osobnym etapem.
+Zmiany:
+- K01.1: wgrywanie faktury PDF i próba automatycznego odczytu danych.
+- Odczytywane pola: data, nr faktury, dostawca, nazwa materiału, ilość.
+- Przed zapisem można ręcznie poprawić wszystkie pola.
+- PDF tekstowy jest obsługiwany najlepiej; skany mogą wymagać ręcznej korekty.
 
-Po wdrożeniu uruchom w Supabase:
-`supabase/2026-v25-k011-materialy-pomocnicze.sql`
+SQL: nie jest wymagany, jeśli v25 był już wdrożony.
