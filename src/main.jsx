@@ -217,6 +217,36 @@ function App() {
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
   const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
   const qtySum = filteredRows.reduce((s, r) => s + (Number(r.qty) || 0), 0)
+
+
+  function printHtmlInIframe(html) {
+    // v24.18: druk w osobnym oknie zamiast pustej strony/iframe.
+    const printWindow = window.open('', '_blank', 'width=1200,height=800')
+    if (printWindow) {
+      printWindow.document.open()
+      printWindow.document.write(html)
+      printWindow.document.close()
+      return
+    }
+    const iframe = document.createElement('iframe')
+    iframe.style.position = 'fixed'
+    iframe.style.right = '0'
+    iframe.style.bottom = '0'
+    iframe.style.width = '0'
+    iframe.style.height = '0'
+    iframe.style.border = '0'
+    document.body.appendChild(iframe)
+    const doc = iframe.contentWindow?.document
+    if (!doc) return
+    doc.open()
+    doc.write(html)
+    doc.close()
+    setTimeout(() => {
+      iframe.contentWindow?.focus()
+      iframe.contentWindow?.print()
+      setTimeout(() => iframe.remove(), 1000)
+    }, 500)
+  }
   const activeLots = useMemo(() => stockRows.filter(l => Number(l.remaining_qty || 0) > 0), [stockRows])
   const visibleWarehouseLots = useMemo(() => {
     const q = normalizeText(lotSearch)
@@ -872,38 +902,80 @@ function App() {
     setMessage('K01.1: PDF został wskazany. W tej wersji uzupełnij odczytane dane ręcznie; automatyczne OCR będzie kolejnym etapem.')
   }
 
+  function buildK011Rows(rows, editable = false) {
+    const visible = rows.slice(0, 12)
+    const blanksCount = Math.max(0, 12 - visible.length)
+    const rowHtml = visible.map((r, i) => `<tr>
+      <td class="lp">${i + 1}</td>
+      <td>${escapeHtml(r.delivery_date || '')}</td>
+      <td class="left">${escapeHtml(r.item_name || '')}</td>
+      <td class="left">${escapeHtml(r.supplier_invoice || '')}</td>
+      <td>${escapeHtml(normalizePN(r.vehicle_hygiene || 'P'))}</td>
+      <td>${escapeHtml(r.qty || '')}</td>
+      <td>${escapeHtml(r.lot_no || '')}</td>
+      <td class="left">${escapeHtml(r.notes || '')}</td>
+      <td>${escapeHtml(r.signed_by || '')}</td>
+    </tr>`).join('')
+    const blankHtml = Array.from({ length: blanksCount }, (_, i) => `<tr class="blank-row">
+      <td class="lp">${visible.length + i + 1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td>
+    </tr>`).join('')
+    return rowHtml + blankHtml
+  }
+
   function buildK011Html(rows) {
-    const label = `${auxYear} ${auxHalf === '1' ? 'I półrocze' : 'II półrocze'}`
-    const trs = rows.map((r, i) => `<tr><td>${i+1}</td><td>${escapeHtml(r.delivery_date || '')}</td><td style="text-align:left">${escapeHtml(r.item_name || '')}</td><td style="text-align:left">${escapeHtml(r.supplier_invoice || '')}</td><td>${escapeHtml(normalizePN(r.vehicle_hygiene || 'P'))}</td><td>${escapeHtml(r.qty || '')}</td><td>${escapeHtml(r.lot_no || '')}</td><td style="text-align:left">${escapeHtml(r.notes || '')}</td><td>${escapeHtml(r.signed_by || '')}</td></tr>`).join('')
-    const blanks = Array.from({length: Math.max(0, 10 - rows.length)}, (_, i) => `<tr><td>${rows.length+i+1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td></tr>`).join('')
-    return `<!doctype html><html><head><meta charset="utf-8"><title>K01.1 ${escapeHtml(label)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:5px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.blank td{height:28px}</style></head><body><table><tbody><tr><td class="company"><b>AGRO-MAR MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych</b></td><td class="meta"><b>Rok:</b> ${escapeHtml(auxYear)}<br><b>Okres:</b> ${escapeHtml(auxHalf === '1' ? 'I półrocze' : 'II półrocze')}<br><b>Strona:</b></td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data dostawy</th><th>Nazwa towaru/przeznaczenie</th><th>Dostawca/nr faktury</th><th>Stan higieniczny pojazdu (P/N)*</th><th>Ilość</th><th>Nadany numer partii<br>(w przypadku opakowań)</th><th>Uwagi</th><th>Podpis przyjmującego</th></tr></thead><tbody>${trs}${blanks}</tbody></table><p>* P – prawidłowo, N – nieprawidłowo. Kartoteka: ${escapeHtml(label)}</p><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    const period = auxHalf === '1' ? 'I półrocze' : 'II półrocze'
+    const trs = buildK011Rows(rows)
+    return `<!doctype html><html><head><meta charset="utf-8"><title>K01.1 ${escapeHtml(auxYear)} ${escapeHtml(period)}</title><style>
+      @page{size:A4 landscape;margin:7mm}
+      html,body{margin:0;padding:0;background:#fff;color:#111;font-family:"Times New Roman",serif}
+      .k011-sheet{width:100%;box-sizing:border-box}
+      table{width:100%;border-collapse:collapse;table-layout:fixed}
+      td,th{border:1px solid #111;text-align:center;vertical-align:middle;padding:4px 5px;font-size:10.5pt;line-height:1.08;font-weight:400}
+      th{font-weight:700}
+      .head-left{width:30%;font-size:11pt;font-weight:700;line-height:1.08}
+      .head-title{width:52%;font-size:12pt;font-weight:700}
+      .head-meta{width:18%;text-align:left;vertical-align:top;font-size:10.5pt;font-weight:700;line-height:1.25}
+      .lp{width:4%}.date{width:10%}.name{width:18%}.supplier{width:16%}.hygiene{width:10%}.qty{width:9%}.lot{width:12%}.notes{width:13%}.sign{width:14%}
+      .left{text-align:left}
+      tbody td{height:34px}
+      .blank-row td{height:34px}
+    </style></head><body><div class="k011-sheet">
+      <table><tbody><tr>
+        <td class="head-left">AGRO-MAR MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja I/2024</td>
+        <td class="head-title">Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych</td>
+        <td class="head-meta">Rok: ${escapeHtml(auxYear)}<br>Miesiąc:<br>Strona:</td>
+      </tr></tbody></table>
+      <table><thead><tr>
+        <th class="lp">Lp.</th><th class="date">Data<br>dostawy</th><th class="name">Nazwa<br>towaru/przeznaczenie</th><th class="supplier">Dostawca/nr faktury</th><th class="hygiene">Stan<br>higieniczny<br>pojazdu<br>(P/N)*</th><th class="qty">Ilość</th><th class="lot">Nadany numer<br>partii<br>(w przypadku<br>opakowań)</th><th class="notes">Uwagi</th><th class="sign">Podpis przyjmującego</th>
+      </tr></thead><tbody>${trs}</tbody></table></div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},500)}</script></body></html>`
   }
 
   function printK011() { printHtmlInIframe(buildK011Html(auxVisibleRows)) }
 
   function exportK011Excel() {
     const rows = [
-      ['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'],
-      ['Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych', '', '', '', '', '', '', '', `${auxYear} ${auxHalf === '1' ? 'I półrocze' : 'II półrocze'}`],
+      ['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.', '', '', 'Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych', '', '', '', 'Rok:', auxYear],
       ['Lp.', 'Data dostawy', 'Nazwa towaru/przeznaczenie', 'Dostawca/nr faktury', 'Stan higieniczny pojazdu (P/N)', 'Ilość', 'Nadany numer partii', 'Uwagi', 'Podpis przyjmującego'],
       ...auxVisibleRows.map((r,i)=>[i+1, r.delivery_date || '', r.item_name || '', r.supplier_invoice || '', normalizePN(r.vehicle_hygiene || 'P'), r.qty || '', r.lot_no || '', r.notes || '', r.signed_by || ''])
     ]
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.aoa_to_sheet(rows)
-    ws['!cols'] = [{wch:6},{wch:16},{wch:28},{wch:28},{wch:18},{wch:12},{wch:20},{wch:24},{wch:22}]
+    ws['!cols'] = [{wch:6},{wch:14},{wch:28},{wch:28},{wch:18},{wch:12},{wch:20},{wch:24},{wch:22}]
     XLSX.utils.book_append_sheet(wb, ws, 'K01.1')
     XLSX.writeFile(wb, `K01-1-materialy-pomocnicze-${auxYear}-H${auxHalf}.xlsx`)
   }
 
   function renderK011Section() {
+    const periodLabel = auxHalf === '1' ? 'I półrocze' : 'II półrocze'
+    const rowsForPaper = auxVisibleRows.slice(0, 12)
+    const blanks = Array.from({length: Math.max(0, 12-rowsForPaper.length)})
     return <>
-      <h3>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h3>
-      <p className="hint">Jedna kartoteka obejmuje pół roku. PDF z fakturą można wskazać przy pozycji; automatyczne OCR będzie dodane w następnym etapie. Teraz dane można wpisać i poprawiać ręcznie.</p>
-      <div className="form-grid compact">
+      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Jedna kartoteka na pół roku. Wzór K01/1 ma układ jak dokument Word: pełna tabela, ręczna edycja, druk/PDF i Excel.</p></div></div>
+      <div className="form-grid compact no-print">
         <label>Rok<input value={auxYear} onChange={e=>setAuxYear(e.target.value)} /></label>
         <label>Okres<select value={auxHalf} onChange={e=>setAuxHalf(e.target.value)}><option value="1">I półrocze</option><option value="2">II półrocze</option></select></label>
       </div>
-      <div className="card inner-card">
+      <div className="card inner-card no-print">
         <h3>{auxForm.id ? 'Edytuj pozycję K01.1' : 'Dodaj pozycję K01.1'}</h3>
         <div className="form-grid compact">
           <label>Faktura PDF<input type="file" accept="application/pdf" onChange={handleAuxPdfFile} /></label>
@@ -919,9 +991,20 @@ function App() {
         {auxPdfName && <p className="hint">Wybrany PDF: <b>{auxPdfName}</b></p>}
         <div className="actions"><button onClick={saveAuxMaterial}>{auxForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button><button className="secondary" onClick={resetAuxForm}>Wyczyść</button></div>
       </div>
-      <div className="actions"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież K01.1</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
-      <div className="haccp-paper k01-print"><table className="k01-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych</b></td><td className="meta"><b>Rok:</b> {auxYear}<br/><b>Okres:</b> {auxHalf === '1' ? 'I półrocze' : 'II półrocze'}<br/><b>Strona:</b></td></tr></tbody></table>
-      <table className="k01-table"><thead><tr><th>Lp.</th><th>Data dostawy</th><th>Nazwa towaru/przeznaczenie</th><th>Dostawca/nr faktury</th><th>Stan higieniczny pojazdu (P/N)*</th><th>Ilość</th><th>Nadany numer partii<br/>(w przypadku opakowań)</th><th>Uwagi</th><th>Podpis przyjmującego</th><th className="no-print">Akcje</th></tr></thead><tbody>{auxVisibleRows.map((r,i)=><tr key={r.id}><td>{i+1}</td><td>{r.delivery_date}</td><td>{r.item_name}</td><td>{r.supplier_invoice}</td><td>{normalizePN(r.vehicle_hygiene || 'P')}</td><td>{r.qty}</td><td>{r.lot_no}</td><td>{r.notes}</td><td>{r.signed_by}</td><td className="no-print"><button className="mini secondary" onClick={()=>editAuxMaterial(r)}>Edytuj</button><button className="mini danger" onClick={()=>deleteAuxMaterial(r)}>Usuń</button></td></tr>)}{Array.from({length: Math.max(0, 10-auxVisibleRows.length)}, (_,i)=><tr key={`blank-${i}`}><td>{auxVisibleRows.length+i+1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td><td className="no-print"></td></tr>)}</tbody></table></div>
+      <div className="actions no-print"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
+      <div className="k011-original haccp-paper">
+        <table className="k011-head"><tbody><tr>
+          <td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598<br/>Wersja I/2024</b></td>
+          <td className="k011-title"><b>Karta K01/1 – Karta kontroli przyjęcia materiałów pomocniczych</b></td>
+          <td className="k011-meta"><b>Rok:</b> {auxYear}<br/><b>Miesiąc:</b><br/><b>Strona:</b></td>
+        </tr></tbody></table>
+        <table className="k011-table"><thead><tr>
+          <th className="lp">Lp.</th><th className="date">Data<br/>dostawy</th><th className="name">Nazwa<br/>towaru/przeznaczenie</th><th className="supplier">Dostawca/nr faktury</th><th className="hygiene">Stan<br/>higieniczny<br/>pojazdu<br/>(P/N)*</th><th className="qty">Ilość</th><th className="lot">Nadany numer<br/>partii<br/>(w przypadku<br/>opakowań)</th><th className="notes">Uwagi</th><th className="sign">Podpis przyjmującego</th><th className="no-print actions-col">Akcje</th>
+        </tr></thead><tbody>
+          {rowsForPaper.map((r,i)=><tr key={r.id}><td>{i+1}</td><td>{r.delivery_date}</td><td className="left">{r.item_name}</td><td className="left">{r.supplier_invoice}</td><td>{normalizePN(r.vehicle_hygiene || 'P')}</td><td>{r.qty}</td><td>{r.lot_no}</td><td className="left">{r.notes}</td><td>{r.signed_by}</td><td className="no-print"><button className="mini secondary" onClick={()=>editAuxMaterial(r)}>Edytuj</button><button className="mini danger" onClick={()=>deleteAuxMaterial(r)}>Usuń</button></td></tr>)}
+          {blanks.map((_,i)=><tr key={`blank-${i}`} className="blank-row"><td>{rowsForPaper.length+i+1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td><td className="no-print"></td></tr>)}
+        </tbody></table>
+      </div>
     </>
   }
 
@@ -2009,7 +2092,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.16: dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.18: K01.1 odwzorowanie wzoru, druk i Excel; wcześniej dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>

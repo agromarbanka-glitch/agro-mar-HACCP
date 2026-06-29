@@ -122,3 +122,82 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k01-table select.mini-select{
   max-width: 160px;
 }
+
+/* v24.17 - K01.1 odwzorowanie wzoru papierowego */
+.k011-original{font-family:"Times New Roman",serif;color:#111;background:#fff;padding:14px;max-width:1220px;overflow:auto}
+.k011-original table{width:100%;border-collapse:collapse;table-layout:fixed;margin:0}
+.k011-original td,.k011-original th{border:1px solid #111;text-align:center;vertical-align:middle;padding:4px 5px;font-size:13px;line-height:1.08;font-weight:400;background:#fff;color:#111}
+.k011-original th{font-weight:700}
+.k011-company{width:30%;font-weight:700;font-size:14px;line-height:1.08}
+.k011-title{width:52%;font-weight:700;font-size:16px}
+.k011-meta{width:18%;text-align:left!important;vertical-align:top!important;font-weight:700;font-size:14px;line-height:1.25}
+.k011-table .lp{width:4%}.k011-table .date{width:10%}.k011-table .name{width:18%}.k011-table .supplier{width:16%}.k011-table .hygiene{width:10%}.k011-table .qty{width:9%}.k011-table .lot{width:12%}.k011-table .notes{width:13%}.k011-table .sign{width:14%}.k011-table .actions-col{width:90px}
+.k011-table tbody td{height:34px}.k011-table .blank-row td{height:34px}.k011-table .left{text-align:left}
+@media print{
+  @page{size:A4 landscape;margin:7mm}
+  .k011-original{padding:0;max-width:none;overflow:visible;box-shadow:none!important;border-radius:0!important}
+  .k011-original td,.k011-original th{font-size:10.5pt;padding:3px 4px}
+  .k011-company{font-size:10.5pt}.k011-title{font-size:12pt}.k011-meta{font-size:10.5pt}
+}
+
+
+/* v24.18 - K01/1 dokładniejsze odwzorowanie i działający wydruk */
+.k011-original.haccp-paper{
+  font-family:"Times New Roman", Times, serif !important;
+  background:#fff !important;
+  color:#111 !important;
+  padding:0 !important;
+  max-width:1240px !important;
+  margin:14px auto !important;
+  box-shadow:none !important;
+  border-radius:0 !important;
+  overflow:auto !important;
+}
+.k011-original .k011-head,
+.k011-original .k011-table{
+  border-collapse:collapse !important;
+  width:100% !important;
+  table-layout:fixed !important;
+  margin:0 !important;
+}
+.k011-original .k011-head td,
+.k011-original .k011-table th,
+.k011-original .k011-table td{
+  border:1.3px solid #111 !important;
+  background:#fff !important;
+  color:#111 !important;
+  text-align:center !important;
+  vertical-align:middle !important;
+  font-family:"Times New Roman", Times, serif !important;
+  font-size:14px !important;
+  line-height:1.05 !important;
+  padding:4px 5px !important;
+}
+.k011-original .k011-company{width:30% !important;font-weight:700 !important;font-size:15px !important;line-height:1.08 !important;}
+.k011-original .k011-title{width:52% !important;font-weight:700 !important;font-size:17px !important;}
+.k011-original .k011-meta{width:18% !important;text-align:left !important;vertical-align:top !important;font-weight:700 !important;font-size:14px !important;line-height:1.25 !important;}
+.k011-original .k011-table th{font-weight:700 !important;height:58px !important;}
+.k011-original .k011-table .lp{width:4% !important;}
+.k011-original .k011-table .date{width:10% !important;}
+.k011-original .k011-table .name{width:18% !important;}
+.k011-original .k011-table .supplier{width:16% !important;}
+.k011-original .k011-table .hygiene{width:10% !important;}
+.k011-original .k011-table .qty{width:8% !important;}
+.k011-original .k011-table .lot{width:12% !important;}
+.k011-original .k011-table .notes{width:12% !important;}
+.k011-original .k011-table .sign{width:13% !important;}
+.k011-original .k011-table tbody td{height:44px !important;}
+.k011-original .k011-table .blank-row td{height:44px !important;}
+.k011-original .left{text-align:left !important;}
+@media print{
+  @page{size:A4 landscape;margin:7mm;}
+  body{background:#fff !important;}
+  .k011-original.haccp-paper{display:block !important;max-width:none !important;width:100% !important;margin:0 !important;padding:0 !important;overflow:visible !important;}
+  .k011-original .k011-head td,
+  .k011-original .k011-table th,
+  .k011-original .k011-table td{font-size:10.5pt !important;padding:3px 4px !important;border:1px solid #111 !important;}
+  .k011-original .k011-company{font-size:10.5pt !important;}
+  .k011-original .k011-title{font-size:12pt !important;}
+  .k011-original .k011-meta{font-size:10.5pt !important;}
+  .k011-original .k011-table tbody td{height:31px !important;}
+}
