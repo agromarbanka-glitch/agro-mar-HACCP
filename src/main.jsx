@@ -963,7 +963,7 @@ function App() {
     const rowsForPaper = auxVisibleRows.slice(0, 12)
     const blanks = Array.from({length: Math.max(0, 12-rowsForPaper.length)})
     return <>
-      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Lista półrocznych kartotek. Najpierw wybierz kartotekę, potem dodawaj lub edytuj jej pozycje. OCR faktur PDF będzie następnym etapem.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Lista półrocznych kartotek. Najpierw wybierz kartotekę, potem dodawaj lub edytuj jej pozycje. OCR faktur PDF będzie osobnym kolejnym etapem.</p></div></div>
       <div className="card inner-card no-print">
         <h3>Lista kartotek K01.1</h3>
         <table><thead><tr><th>Kartoteka</th><th>Okres</th><th>Wpisy</th><th>Akcje</th></tr></thead><tbody>
@@ -2095,7 +2095,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.16: dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v25: K01.1 – materiały pomocnicze, półroczne kartoteki, edycja, druk/PDF i Excel.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
