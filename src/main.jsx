@@ -217,36 +217,6 @@ function App() {
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
   const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
   const qtySum = filteredRows.reduce((s, r) => s + (Number(r.qty) || 0), 0)
-
-
-  function printHtmlInIframe(html) {
-    // v24.18: druk w osobnym oknie zamiast pustej strony/iframe.
-    const printWindow = window.open('', '_blank', 'width=1200,height=800')
-    if (printWindow) {
-      printWindow.document.open()
-      printWindow.document.write(html)
-      printWindow.document.close()
-      return
-    }
-    const iframe = document.createElement('iframe')
-    iframe.style.position = 'fixed'
-    iframe.style.right = '0'
-    iframe.style.bottom = '0'
-    iframe.style.width = '0'
-    iframe.style.height = '0'
-    iframe.style.border = '0'
-    document.body.appendChild(iframe)
-    const doc = iframe.contentWindow?.document
-    if (!doc) return
-    doc.open()
-    doc.write(html)
-    doc.close()
-    setTimeout(() => {
-      iframe.contentWindow?.focus()
-      iframe.contentWindow?.print()
-      setTimeout(() => iframe.remove(), 1000)
-    }, 500)
-  }
   const activeLots = useMemo(() => stockRows.filter(l => Number(l.remaining_qty || 0) > 0), [stockRows])
   const visibleWarehouseLots = useMemo(() => {
     const q = normalizeText(lotSearch)
@@ -965,18 +935,50 @@ function App() {
     XLSX.writeFile(wb, `K01-1-materialy-pomocnicze-${auxYear}-H${auxHalf}.xlsx`)
   }
 
+
+  function auxHalfCounts() {
+    const years = new Set(auxRows.map(r => String((r.delivery_date || '').slice(0,4))).filter(Boolean))
+    years.add(auxYear)
+    const rows = []
+    Array.from(years).sort().forEach(year => {
+      for (const half of ['1','2']) {
+        const count = auxRows.filter(r => {
+          const h = auxHalfFromDate(r.delivery_date)
+          return h.year === year && h.half === half
+        }).length
+        rows.push({ year, half, count, label: half === '1' ? 'I półrocze' : 'II półrocze' })
+      }
+    })
+    return rows
+  }
+
+  function openAuxHalf(year, half) {
+    setAuxYear(String(year))
+    setAuxHalf(String(half))
+    resetAuxForm()
+  }
+
   function renderK011Section() {
     const periodLabel = auxHalf === '1' ? 'I półrocze' : 'II półrocze'
     const rowsForPaper = auxVisibleRows.slice(0, 12)
     const blanks = Array.from({length: Math.max(0, 12-rowsForPaper.length)})
     return <>
-      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Jedna kartoteka na pół roku. Wzór K01/1 ma układ jak dokument Word: pełna tabela, ręczna edycja, druk/PDF i Excel.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>K01.1 – Karta kontroli przyjęcia materiałów pomocniczych</h2><p>Lista półrocznych kartotek. Najpierw wybierz kartotekę, potem dodawaj lub edytuj jej pozycje. OCR faktur PDF będzie następnym etapem.</p></div></div>
+      <div className="card inner-card no-print">
+        <h3>Lista kartotek K01.1</h3>
+        <table><thead><tr><th>Kartoteka</th><th>Okres</th><th>Wpisy</th><th>Akcje</th></tr></thead><tbody>
+          {auxHalfCounts().map(row => <tr key={`${row.year}-${row.half}`}>
+            <td>K01.1</td><td>{row.year} – {row.label}</td><td>{row.count}</td>
+            <td className="row-actions"><button className="mini secondary" onClick={()=>openAuxHalf(row.year,row.half)}>Otwórz / Edytuj</button>{String(auxYear)===String(row.year)&&String(auxHalf)===String(row.half) ? <span className="status ok">otwarta</span> : null}</td>
+          </tr>)}
+        </tbody></table>
+      </div>
       <div className="form-grid compact no-print">
         <label>Rok<input value={auxYear} onChange={e=>setAuxYear(e.target.value)} /></label>
         <label>Okres<select value={auxHalf} onChange={e=>setAuxHalf(e.target.value)}><option value="1">I półrocze</option><option value="2">II półrocze</option></select></label>
       </div>
       <div className="card inner-card no-print">
-        <h3>{auxForm.id ? 'Edytuj pozycję K01.1' : 'Dodaj pozycję K01.1'}</h3>
+        <h3>{auxForm.id ? 'Edytuj pozycję K01.1' : `Dodaj pozycję do K01.1 – ${auxYear}, ${periodLabel}`}</h3>
         <div className="form-grid compact">
           <label>Faktura PDF<input type="file" accept="application/pdf" onChange={handleAuxPdfFile} /></label>
           <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e=>setAuxForm({...auxForm, delivery_date:e.target.value})} /></label>
@@ -992,6 +994,7 @@ function App() {
         <div className="actions"><button onClick={saveAuxMaterial}>{auxForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button><button className="secondary" onClick={resetAuxForm}>Wyczyść</button></div>
       </div>
       <div className="actions no-print"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
+      <h3 className="no-print">Podgląd otwartej kartoteki: K01.1 – {auxYear}, {periodLabel}</h3>
       <div className="k011-original haccp-paper">
         <table className="k011-head"><tbody><tr>
           <td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598<br/>Wersja I/2024</b></td>
@@ -2092,7 +2095,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.18: K01.1 odwzorowanie wzoru, druk i Excel; wcześniej dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.16: dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
           <b>{title}</b><small>{desc}</small>
