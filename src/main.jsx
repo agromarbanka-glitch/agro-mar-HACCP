@@ -234,6 +234,34 @@ function App() {
     ['K07', 'K07 – Kontrola sita / identyfikowalność', 'Kontrola przed przerobem oraz śledzenie partii']
   ]
 
+
+  const MODULE_STATUS = [
+    { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
+    { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna i ręczna edycja. OCR faktur odłożony na później.' },
+    { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
+    { code: 'K03', name: 'Identyfikacja partii produktu', status: 'do wykonania', note: 'Po K02, na bazie FIFO i historii partii.' },
+    { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'do wykonania', note: 'CP3/CCP1, po domknięciu K02/K03.' },
+    { code: 'K05', name: 'Towary wycofane', status: 'do wykonania', note: 'Po podstawowych kartach magazynowych.' },
+    { code: 'K06', name: 'Ocena jakości produktu', status: 'do wykonania', note: 'Po module produkcji/przerobu.' },
+    { code: 'Raporty', name: 'R00–R13', status: 'do wykonania', note: 'Po kartach K.' },
+    { code: 'Wykazy/Protokoły', name: 'W01–W10 / PR01–PR08', status: 'do wykonania', note: 'Po raportach podstawowych.' }
+  ]
+
+  const BACKLOG = [
+    { prio: 'A', title: 'K02 1:1 z oryginałem', desc: 'Miesięczne kartoteki, podpis, P/N, druk, PDF, Excel.' },
+    { prio: 'A', title: 'Stabilność importu/FIFO', desc: 'Pełne przeliczanie chronologiczne po imporcie starszych plików.' },
+    { prio: 'A', title: 'Formularze do pracy', desc: 'K03, K04, K06 oraz wydruki zgodne ze wzorami.' },
+    { prio: 'B', title: 'Graficzny podgląd komór', desc: 'CP2, CP3, CCP1 z zajętością i grupą asortymentową.' },
+    { prio: 'B', title: 'OCR faktur PDF', desc: 'Odczyt faktur do K01.1 z podglądem i ręczną korektą.' },
+    { prio: 'C', title: 'QR / aplikacja mobilna', desc: 'Po wersji produkcyjnej systemu.' }
+  ]
+
+  function statusClass(status) {
+    if (status === 'gotowe') return 'status-green'
+    if (status === 'robocze' || status === 'w realizacji') return 'status-yellow'
+    return 'status-gray'
+  }
+
   const haccpDocsForFilter = useMemo(() => {
     const q = normalizeText(haccpSearch)
     return haccpDocs
@@ -1952,7 +1980,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v24.15 K02 MIESIECZNE</div>
+      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v26 STATUS MODUŁÓW</div>
     </header>
 
     <section className="warning">
@@ -1972,6 +2000,26 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       <StatCard icon={Database} value={isSupabaseConfigured ? 'TAK' : 'NIE'} label="Supabase skonfigurowany" />
       <StatCard icon={Printer} value="PDF/druk" label="zaplanowane w kolejnym etapie" />
     </div>
+
+    <section className="card">
+      <div className="section-title"><ClipboardList/><div><h2>Status modułów HACCP/IFS</h2><p>Lista postępu projektu. Od teraz zamykamy jeden formularz/moduł do końca, zanim przejdziemy do kolejnego.</p></div></div>
+      <div className="module-status-grid">
+        {MODULE_STATUS.map(m => <div key={m.code} className="module-status-card">
+          <div className="module-status-head"><b>{m.code}</b><span className={statusClass(m.status)}>{m.status}</span></div>
+          <strong>{m.name}</strong>
+          <small>{m.note}</small>
+        </div>)}
+      </div>
+    </section>
+
+    <section className="card">
+      <div className="section-title"><LayoutDashboard/><div><h2>Priorytety wdrożenia</h2><p>A = niezbędne do uruchomienia, B = usprawnienia, C = rozwój po wdrożeniu.</p></div></div>
+      <div className="backlog-list">
+        {BACKLOG.map((b, idx) => <div key={idx} className={`backlog-item prio-${b.prio}`}>
+          <span>Priorytet {b.prio}</span><b>{b.title}</b><small>{b.desc}</small>
+        </div>)}
+      </div>
+    </section>
 
     <section className="card">
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Pobieramy tylko potrzebne pola: nr dokumentu/PZ, data wystawienia, ilość i produkt.</p></div></div>
