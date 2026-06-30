@@ -206,6 +206,7 @@ function App() {
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
+  const [k02Overrides, setK02Overrides] = useState({})
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
   const [auxHalf, setAuxHalf] = useState(new Date().getMonth() < 6 ? '1' : '2')
@@ -262,16 +263,72 @@ function App() {
     return 'status-gray'
   }
 
+  function k02TempForProducts(productNames = []) {
+    const names = productNames.map(n => normalizeText(n)).join(' ')
+    if (names.includes('malina')) return '1'
+    return '2'
+  }
+
+  function buildSyntheticK02Docs(allDocs) {
+    const k01 = (allDocs || []).filter(d => d.document_type === 'K01' && d.document_date)
+    const byDay = new Map()
+    for (const d of k01) {
+      const day = String(d.document_date || '').slice(0, 10)
+      if (!day) continue
+      if (!byDay.has(day)) byDay.set(day, [])
+      byDay.get(day).push(d)
+    }
+    return Array.from(byDay.entries()).sort(([a],[b]) => a.localeCompare(b)).map(([day, docs]) => {
+      const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
+      const temp = k02TempForProducts(products)
+      const id = `K02-${day}`
+      const ov = k02Overrides[id] || {}
+      return {
+        id,
+        synthetic: true,
+        document_type: 'K02',
+        document_date: day,
+        product_name: 'CP2 – magazyn surowca',
+        lot_no: '',
+        supplier_name: '',
+        document_no: `K02/${day}`,
+        chamber_code: 'CP2',
+        qty: docs.reduce((sum, d) => sum + (Number(d.qty) || 0), 0),
+        status: ov.status || 'P',
+        data: {
+          godzina: ov.godzina || '09:15',
+          temperatura_chlodnia_1: ov.temperatura_chlodnia_1 || temp,
+          temperatura_chlodnia_2: ov.temperatura_chlodnia_2 || temp,
+          podpis_kontrolujacego: ov.podpis_kontrolujacego || '',
+          uwagi: ov.uwagi || 'P',
+          produkty: products.join(', '),
+        },
+        signed_by_operator: ov.podpis_kontrolujacego || '',
+        signed_by_admin: '',
+        document_version: 'I/2024',
+        created_at: day,
+      }
+    })
+  }
+
+  function setK02Override(doc, field, value) {
+    setK02Overrides(prev => ({
+      ...prev,
+      [doc.id]: { ...(prev[doc.id] || {}), [field]: value, status: field === 'uwagi' ? normalizePN(value) : (prev[doc.id]?.status || 'P') }
+    }))
+  }
+
   const haccpDocsForFilter = useMemo(() => {
     const q = normalizeText(haccpSearch)
-    return haccpDocs
+    const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs) : haccpDocs
+    return sourceDocs
       .filter(d => d.document_type === docsFilter)
       .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
       .filter(d => {
         if (!q) return true
         return normalizeText(`${d.lot_no || ''} ${d.product_name || ''} ${d.supplier_name || ''} ${d.document_no || ''} ${d.chamber_code || ''}`).includes(q)
       })
-  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter])
+  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides])
 
 
   function docInSelectedPeriod(doc) {
@@ -649,10 +706,9 @@ function App() {
     const docs = group.docs || []
     const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-    const chamber = group.chamber || docs[0]?.chamber_code || ''
-    const rows = docs.map((doc, i) => `<tr><td>${i+1}</td><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '')}</td><td>${escapeHtml(chamber)}</td><td style="text-align:left">${escapeHtml(doc.product_name || '')}<br>${escapeHtml(doc.lot_no || '')}</td><td>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td><td>${escapeHtml(doc.data?.temperatura || '')}</td><td>${normalizePN(doc.data?.parametry_magazynowania || doc.status || 'P')}</td><td>${escapeHtml(doc.data?.uwagi || '')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '')}</td></tr>`).join('')
-    const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, (_, i) => `<tr class="blank-row"><td>${docs.length+i+1}</td><td></td><td></td><td>${escapeHtml(chamber)}</td><td></td><td></td><td></td><td>P</td><td></td><td></td></tr>`).join('')
-    return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(chamber)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:30%;font-size:10.5pt}.title{width:55%;font-size:12pt}.meta{width:15%;text-align:left;vertical-align:top}.sub{height:30px}.blank-row td{height:25px}.foot{margin-top:8px;font-size:10pt;text-align:left}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2"><b>AGRO-MAR MARIUSZ<br>BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</b><br><b>Wersja I/2024</b></td><td class="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców (CP2)</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1</td></tr><tr><td class="sub"><b>Komora:</b> ${escapeHtml(chamber)} &nbsp;&nbsp; <b>Zakres:</b> ${escapeHtml(periodLabel(group))}</td></tr></tbody></table><table><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Surowiec / partia</th><th>Ilość</th><th>Temperatura</th><th>Parametry magazynowania (P/N)*</th><th>Uwagi</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}${blanks}</tbody></table><div class="foot">* P – prawidłowo, N – nieprawidłowo. Kartoteka miesięczna dla jednej komory/asortymentu.</div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    const rows = docs.map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '09:15')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_1 || '2')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_2 || '2')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')}</td><td>${normalizePN(doc.data?.uwagi || doc.status || 'P')}</td></tr>`).join('')
+    const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+    return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-size:15pt;font-weight:bold;line-height:1.12}.title{width:44%;font-size:15pt;font-weight:bold;line-height:1.5}.meta{width:25%;font-size:13pt;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:12pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}.date{width:15%}.hour{width:15%}.temp{width:13%}.sign{width:18%}.notes{width:21%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K02 - Karta kontroli parametrów<br>magazynowania surowców (CP2)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}</td></tr><tr><td class="temp-note">- Temp. w chłodniach docelowo:<br>2-3°C (±1°C). – GRUPA I i II (jabłka, gruszki,<br>truskawki, wiśnie, porzeczki czarne i czerwone, aronie)<br>0-1°C – GRUPA III (maliny, porzeczki czarne<br>i czerwone)</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th class="date">Data</th><th class="hour">Godzina</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 1 [°C]</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 2 [°C]</th><th class="sign">Podpis osoby<br>kontrolującej</th><th class="notes">Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
 
   function printHaccpGroup(group) {
@@ -671,6 +727,11 @@ function App() {
       rows.push(['Nazwa surowca:', group.product])
       rows.push(['Lp.', 'Data dostawy', 'Dane dostawcy / nr faktury', 'Stan higieniczny pojazdu (P/N)', 'Ilość', 'Wybarwienie/zapach/brak uszkodzeń (P/N)', 'Brak zgnilizny/zapleśnienia/zagrzybienia (P/N)', 'Podpis przyjmującego'])
       docs.forEach((doc, i) => rows.push([i+1, doc.document_date || '', shortSupplier(doc), normalizePN(doc.data?.stan_higieniczny_pojazdu), Number(doc.qty || 0), normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen), normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia), doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '']))
+    } else if (group.type === 'K02') {
+      rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
+      rows.push(['Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', '', '', `Okres: ${periodLabel(group)}`])
+      rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
+      docs.forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina || '09:15', doc.data?.temperatura_chlodnia_1 || '2', doc.data?.temperatura_chlodnia_2 || '2', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -779,17 +840,36 @@ function App() {
         </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Podpis wybierany jest w ostatniej kolumnie dla każdej operacji.</div></div>
     }
     if (group.type === 'K02') {
-      return <div className="monthly-paper k02-paper">
-        <table className="k01-head"><tbody><tr><td className="company" rowSpan="2"><b>AGRO-MAR MARIUSZ<br/>BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/><b>Wersja I/2024</b></td><td className="title"><b>Karta K02 – Karta kontroli parametrów magazynowania surowców (CP2)</b></td><td className="meta" rowSpan="2"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr><tr><td className="raw-name"><b>Komora:</b> {group.chamber || '-'} &nbsp;&nbsp; <b>Asortyment:</b> {group.product}</td></tr></tbody></table>
-        <table className="k01-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Surowiec / partia</th><th>Ilość</th><th>Temperatura</th><th>Parametry magazynowania (P/N)*</th><th>Uwagi</th><th>Podpis kontrolującego</th></tr></thead><tbody>
-          {docs.map((doc,i)=><tr key={doc.id}>
-            <td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code || group.chamber || ''}</td><td style={{textAlign:'left'}}>{doc.product_name}<br/><small>{doc.lot_no}</small></td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td>
-            <td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td>
-            <td className={normalizePN(doc.data?.parametry_magazynowania || doc.status)==='N'?'pn-n':''}><select className="mini-select no-print" value={normalizePN(doc.data?.parametry_magazynowania || doc.status || 'P')} onChange={e=>editHaccpRowField(doc,'parametry_magazynowania','Parametry magazynowania', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(doc.data?.parametry_magazynowania || doc.status || 'P')}</span></td>
-            <td>{doc.data?.uwagi || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'uwagi','Uwagi',doc.data?.uwagi||'')}>Edytuj</button></td>
-            <td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td>
-          </tr>)}
-        </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. K02 jest kartoteką miesięczną dla komory/asortymentu.</div></div>
+      const maxRows = Math.max(16, docs.length)
+      return <div className="monthly-paper k02-original">
+        <table className="k02-head"><tbody>
+          <tr>
+            <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+            <td className="k02-title"><b>Karta K02 - Karta kontroli parametrów<br/>magazynowania surowców (CP2)</b></td>
+            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}</td>
+          </tr>
+          <tr>
+            <td className="k02-note">- Temp. w chłodniach docelowo:<br/>2-3°C (±1°C). – GRUPA I i II (jabłka, gruszki,<br/>truskawki, wiśnie, porzeczki czarne i czerwone, aronie)<br/>0-1°C – GRUPA III (maliny, porzeczki czarne<br/>i czerwone)</td>
+            <td className="k02-version">Wersja I/2024</td>
+          </tr>
+        </tbody></table>
+        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
+          {Array.from({length: maxRows}).map((_,i) => {
+            const doc = docs[i]
+            if (!doc) return <tr className="blank-row" key={`k02-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const signed = doc.signed_by_operator || doc.data?.podpis_kontrolujacego || ''
+            return <tr key={doc.id}>
+              <td>{doc.document_date}</td>
+              <td><input className="cell-input no-print" value={doc.data?.godzina || '09:15'} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{doc.data?.godzina || '09:15'}</span></td>
+              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_1 || '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_1 || '2'}</span></td>
+              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_2 || '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_2 || '2'}</span></td>
+              <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
+              <td className={normalizePN(doc.data?.uwagi || doc.status)==='N'?'pn-n':''}><select className="mini-select no-print" value={normalizePN(doc.data?.uwagi || doc.status || 'P')} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(doc.data?.uwagi || doc.status || 'P')}</span></td>
+            </tr>
+          })}
+        </tbody></table>
+        <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C. Pola można zmienić ręcznie przed drukiem/Excel.</p>
+      </div>
     }
     return <div className="monthly-paper"><div className="paper-head"><div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div><div><b>{group.type} – kartoteka miesięczna</b><br/>Okres: {periodLabel(group)}<br/>Komora: {group.chamber || '-'}</div></div><table className="paper-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt</th><th>Partia</th><th>Ilość</th><th>Temperatura</th><th>P/N</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td><td className={normalizePN(doc.data?.parametry_magazynowania)==='N'?'pn-n':''}>{normalizePN(doc.data?.parametry_magazynowania || 'P')} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'parametry_magazynowania','Ocena parametrów magazynowania', normalizePN(doc.data?.parametry_magazynowania || 'P'), {pn:true})}>Edytuj</button></td><td>{doc.data?.uwagi || ''}</td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table></div>
   }

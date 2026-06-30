@@ -1,16 +1,11 @@
-# AGRO-MAR HACCP/FIFO – v26 Status modułów i plan wdrożenia
+# AGRO-MAR HACCP/FIFO – v26.1 K02 temperatura CP2
 
-Ta wersja porządkuje projekt po serii poprawek. Dodano widoczny panel statusów modułów i priorytety wdrożenia, żeby kolejne prace były prowadzone moduł po module.
+Zmiany:
+- Dodano K02 jako kartotekę miesięczną w układzie zgodnym ze zdjęciem wzoru.
+- K02 generuje 1 pomiar dziennie na podstawie dni z przyjęciami surowca.
+- Godzina domyślna: 9:15.
+- Temperatura domyślna: 2°C dla jabłka, truskawki, wiśni, porzeczek, aronii; 1°C dla maliny.
+- Kolumny: Data, Godzina, Temperatura chłodni nr 1, Temperatura chłodni nr 2, Podpis osoby kontrolującej, Uwagi P/N.
+- Druk/PDF i Excel dla K02.
 
-## Co dodano
-- Status modułów: K01, K01.1, K02, K03, K04, K05, K06, raporty, wykazy/protokoły.
-- Priorytety wdrożenia A/B/C.
-- Czytelny dashboard startowy.
-
-## Sposób pracy od tej wersji
-1. Zamykamy jeden formularz/moduł do końca.
-2. Dopiero po akceptacji przechodzimy do następnego.
-3. K01 jest bazą. Następny priorytet: K02 w układzie 1:1 z oryginałem.
-
-## Wdrożenie
-Wgraj rozpakowaną zawartość ZIP do GitHub. SQL nie jest wymagany.
+SQL nie jest wymagany.
