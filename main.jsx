@@ -312,65 +312,61 @@ function App() {
     })
   }
 
-  function patchSelectedK02Doc(docId, patch) {
+  function patchK02DocWithOverride(doc, override) {
+    const nextData = { ...(doc.data || {}), ...(override || {}) }
+    const signed = nextData.podpis_kontrolujacego || doc.signed_by_operator || ''
+    return {
+      ...doc,
+      data: nextData,
+      signed_by_operator: signed,
+      status: normalizePN(nextData.uwagi || override?.status || doc.status || 'P')
+    }
+  }
+
+  function updateSelectedK02Doc(docId, override) {
     setSelectedHaccpDoc(prev => {
-      if (!prev?.groupPreview || prev.group?.type !== 'K02') return prev
-      return {
-        ...prev,
-        group: {
-          ...prev.group,
-          docs: (prev.group.docs || []).map(d => {
-            if (d.id !== docId) return d
-            const nextData = { ...(d.data || {}), ...patch }
-            const nextStatus = patch.uwagi ? normalizePN(patch.uwagi) : (patch.status || d.status || 'P')
-            return {
-              ...d,
-              data: nextData,
-              status: nextStatus,
-              signed_by_operator: patch.podpis_kontrolujacego ?? d.signed_by_operator,
-            }
-          })
-        }
-      }
+      if (!prev?.groupPreview || !prev.group?.docs) return prev
+      const docs = prev.group.docs.map(d => d.id === docId ? patchK02DocWithOverride(d, override) : d)
+      return { ...prev, group: { ...prev.group, docs } }
     })
   }
 
   function setK02Override(doc, field, value) {
-    const patch = { [field]: value }
-    const nextStatus = field === 'uwagi' ? normalizePN(value) : (k02Overrides[doc.id]?.status || doc.status || 'P')
-    setK02Overrides(prev => ({
-      ...prev,
-      [doc.id]: { ...(prev[doc.id] || {}), [field]: value, status: nextStatus }
-    }))
-    patchSelectedK02Doc(doc.id, { ...patch, status: nextStatus })
+    if (!doc?.id) return
+    setK02Overrides(prev => {
+      const nextOverride = {
+        ...(prev[doc.id] || {}),
+        [field]: value,
+        status: field === 'uwagi' ? normalizePN(value) : (prev[doc.id]?.status || doc.status || 'P')
+      }
+      updateSelectedK02Doc(doc.id, nextOverride)
+      return { ...prev, [doc.id]: nextOverride }
+    })
   }
 
-  function applyEmployeeToK02Group(group, employeeName, onlyEmpty = false) {
-    if (!group || group.type !== 'K02' || !employeeName) return
+  function setK02EmployeeForGroup(group, employeeName, onlyEmpty = false) {
+    if (!group || !employeeName) return
     const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_kontrolujacego))
-    if (!docs.length) return
+    if (!docs.length) {
+      setMessage(onlyEmpty ? 'Nie ma pustych podpisów do uzupełnienia w K02.' : 'Brak pozycji K02 do zmiany podpisu.')
+      return
+    }
+    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} pozycji w kartotece K02?`)
+    if (!confirmed) return
     setK02Overrides(prev => {
       const next = { ...prev }
-      docs.forEach(d => {
+      for (const d of docs) {
         next[d.id] = { ...(next[d.id] || {}), podpis_kontrolujacego: employeeName, status: next[d.id]?.status || d.status || 'P' }
+      }
+      setSelectedHaccpDoc(current => {
+        if (!current?.groupPreview || !current.group?.docs) return current
+        const ids = new Set(docs.map(d => d.id))
+        const updatedDocs = current.group.docs.map(d => ids.has(d.id) ? patchK02DocWithOverride(d, next[d.id]) : d)
+        return { ...current, group: { ...current.group, docs: updatedDocs } }
       })
       return next
     })
-    setSelectedHaccpDoc(prev => {
-      if (!prev?.groupPreview || prev.group?.type !== 'K02') return prev
-      const ids = new Set(docs.map(d => d.id))
-      return {
-        ...prev,
-        group: {
-          ...prev.group,
-          docs: (prev.group.docs || []).map(d => ids.has(d.id) ? {
-            ...d,
-            signed_by_operator: employeeName,
-            data: { ...(d.data || {}), podpis_kontrolujacego: employeeName }
-          } : d)
-        }
-      }
-    })
+    setMessage(`Ustawiono podpis dla ${docs.length} pozycji K02.`)
   }
 
   const haccpDocsForFilter = useMemo(() => {
@@ -897,15 +893,16 @@ function App() {
     if (group.type === 'K02') {
       const maxRows = Math.max(16, docs.length)
       return <div className="monthly-paper k02-original">
-        <div className="k02-edit-tools no-print">
-          <label>Pracownik dla całej kartoteki
-            <select value={defaultK02Employee} onChange={e=>setDefaultK02Employee(e.target.value)}>
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis osoby kontrolującej dla całej kartoteki
+            <select value={defaultK02Employee} onChange={e => setDefaultK02Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
-              {employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button className="secondary" type="button" onClick={() => applyEmployeeToK02Group(group, defaultK02Employee, false)}>Zastosuj do wszystkich pozycji</button>
-          <button className="secondary" type="button" onClick={() => applyEmployeeToK02Group(group, defaultK02Employee, true)}>Uzupełnij tylko puste</button>
+          <button className="secondary" type="button" onClick={() => setK02EmployeeForGroup(group, defaultK02Employee, false)}>Zastosuj do wszystkich pozycji</button>
+          <button className="secondary" type="button" onClick={() => setK02EmployeeForGroup(group, defaultK02Employee, true)}>Uzupełnij tylko puste</button>
+          <span className="hint">Zmiany godziny, temperatur i podpisów są widoczne od razu w tej kartotece.</span>
         </div>
         <table className="k02-head"><tbody>
           <tr>
