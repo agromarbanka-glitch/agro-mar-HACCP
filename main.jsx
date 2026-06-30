@@ -269,6 +269,14 @@ function App() {
     return '2'
   }
 
+  function getK02Value(doc, field, fallback = '') {
+    const override = k02Overrides?.[doc?.id]?.[field]
+    if (override !== undefined && override !== null) return override
+    const dataValue = doc?.data?.[field]
+    if (dataValue !== undefined && dataValue !== null) return dataValue
+    return fallback
+  }
+
   function buildSyntheticK02Docs(allDocs) {
     const k01 = (allDocs || []).filter(d => d.document_type === 'K01' && d.document_date)
     const byDay = new Map()
@@ -283,7 +291,6 @@ function App() {
       const temp = k02TempForProducts(products)
       const id = `K02-${day}`
       const ov = k02Overrides[id] || {}
-      const hasOv = (name) => Object.prototype.hasOwnProperty.call(ov, name)
       return {
         id,
         synthetic: true,
@@ -295,16 +302,16 @@ function App() {
         document_no: `K02/${day}`,
         chamber_code: 'CP2',
         qty: docs.reduce((sum, d) => sum + (Number(d.qty) || 0), 0),
-        status: hasOv('status') ? ov.status : 'P',
+        status: ov.status || 'P',
         data: {
-          godzina: hasOv('godzina') ? ov.godzina : '09:15',
-          temperatura_chlodnia_1: hasOv('temperatura_chlodnia_1') ? ov.temperatura_chlodnia_1 : temp,
-          temperatura_chlodnia_2: hasOv('temperatura_chlodnia_2') ? ov.temperatura_chlodnia_2 : temp,
-          podpis_kontrolujacego: hasOv('podpis_kontrolujacego') ? ov.podpis_kontrolujacego : '',
-          uwagi: hasOv('uwagi') ? ov.uwagi : 'P',
+          godzina: ov.godzina ?? '09:15',
+          temperatura_chlodnia_1: ov.temperatura_chlodnia_1 ?? temp,
+          temperatura_chlodnia_2: ov.temperatura_chlodnia_2 ?? temp,
+          podpis_kontrolujacego: ov.podpis_kontrolujacego ?? '',
+          uwagi: ov.uwagi ?? 'P',
           produkty: products.join(', '),
         },
-        signed_by_operator: hasOv('podpis_kontrolujacego') ? ov.podpis_kontrolujacego : '',
+        signed_by_operator: ov.podpis_kontrolujacego ?? '',
         signed_by_admin: '',
         document_version: 'I/2024',
         created_at: day,
@@ -313,83 +320,19 @@ function App() {
   }
 
   function setK02Override(doc, field, value) {
-    const nextValue = value ?? ''
+    if (!doc?.id) return
     setK02Overrides(prev => {
-      const previousForDoc = prev[doc.id] || {}
+      const current = prev[doc.id] || {}
       return {
         ...prev,
         [doc.id]: {
-          ...previousForDoc,
-          [field]: nextValue,
-          status: field === 'uwagi' ? normalizePN(nextValue) : (Object.prototype.hasOwnProperty.call(previousForDoc, 'status') ? previousForDoc.status : (doc.status || 'P'))
-        }
-      }
-    })
-
-    // K02 jest dokumentem syntetycznym (nie zapisanym w tabeli haccp_documents),
-    // więc podczas edycji trzeba odświeżyć także aktualnie otwartą kartotekę w modalu.
-    // Bez tego wpisy były widoczne dopiero po zamknięciu i ponownym otwarciu formularza.
-    setSelectedHaccpDoc(prev => {
-      if (!prev?.groupPreview || !prev.group?.docs) return prev
-      return {
-        ...prev,
-        group: {
-          ...prev.group,
-          docs: prev.group.docs.map(d => {
-            if (d.id !== doc.id) return d
-            const nextData = { ...(d.data || {}), [field]: nextValue }
-            const nextStatus = field === 'uwagi' ? normalizePN(nextValue) : (d.status || 'P')
-            return {
-              ...d,
-              data: nextData,
-              status: nextStatus,
-              signed_by_operator: field === 'podpis_kontrolujacego' ? nextValue : d.signed_by_operator
-            }
-          })
+          ...current,
+          [field]: value,
+          status: field === 'uwagi' ? normalizePN(value || 'P') : (current.status ?? doc.status ?? 'P')
         }
       }
     })
   }
-
-  function k02FieldValue(doc, field, fallback = '') {
-    const ov = k02Overrides?.[doc?.id]
-    if (ov && Object.prototype.hasOwnProperty.call(ov, field)) return ov[field] ?? ''
-    const val = doc?.data?.[field]
-    return val ?? fallback
-  }
-
-  function k02SignedValue(doc) {
-    const ov = k02Overrides?.[doc?.id]
-    if (ov && Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego')) return ov.podpis_kontrolujacego ?? ''
-    return doc?.signed_by_operator || doc?.data?.podpis_kontrolujacego || ''
-  }
-
-  function k02PnValue(doc) {
-    const ov = k02Overrides?.[doc?.id]
-    if (ov && Object.prototype.hasOwnProperty.call(ov, 'uwagi')) return normalizePN(ov.uwagi || 'P')
-    return normalizePN(doc?.data?.uwagi || doc?.status || 'P')
-  }
-
-  function k02GroupWithLiveValues(group) {
-    if (!group || group.type !== 'K02') return group
-    return {
-      ...group,
-      docs: (group.docs || []).map(d => ({
-        ...d,
-        data: {
-          ...(d.data || {}),
-          godzina: k02FieldValue(d, 'godzina', d.data?.godzina ?? '09:15'),
-          temperatura_chlodnia_1: k02FieldValue(d, 'temperatura_chlodnia_1', d.data?.temperatura_chlodnia_1 ?? '2'),
-          temperatura_chlodnia_2: k02FieldValue(d, 'temperatura_chlodnia_2', d.data?.temperatura_chlodnia_2 ?? '2'),
-          podpis_kontrolujacego: k02SignedValue(d),
-          uwagi: k02PnValue(d),
-        },
-        signed_by_operator: k02SignedValue(d),
-        status: k02PnValue(d)
-      }))
-    }
-  }
-
 
   const haccpDocsForFilter = useMemo(() => {
     const q = normalizeText(haccpSearch)
@@ -779,21 +722,19 @@ function App() {
     const docs = group.docs || []
     const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-    const rows = docs.map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina ?? '09:15')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_1 ?? '2')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_2 ?? '2')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')}</td><td>${normalizePN(doc.data?.uwagi || doc.status || 'P')}</td></tr>`).join('')
+    const rows = docs.map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(getK02Value(doc, 'godzina', '09:15'))}</td><td>${escapeHtml(getK02Value(doc, 'temperatura_chlodnia_1', '2'))}</td><td>${escapeHtml(getK02Value(doc, 'temperatura_chlodnia_2', '2'))}</td><td>${escapeHtml(getK02Value(doc, 'podpis_kontrolujacego', doc.signed_by_operator || ''))}</td><td>${normalizePN(getK02Value(doc, 'uwagi', doc.status || 'P') || 'P')}</td></tr>`).join('')
     const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-size:15pt;font-weight:bold;line-height:1.12}.title{width:44%;font-size:15pt;font-weight:bold;line-height:1.5}.meta{width:25%;font-size:13pt;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:12pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}.date{width:15%}.hour{width:15%}.temp{width:13%}.sign{width:18%}.notes{width:21%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K02 - Karta kontroli parametrów<br>magazynowania surowców (CP2)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}</td></tr><tr><td class="temp-note">- Temp. w chłodniach docelowo:<br>2-3°C (±1°C). – GRUPA I i II (jabłka, gruszki,<br>truskawki, wiśnie, porzeczki czarne i czerwone, aronie)<br>0-1°C – GRUPA III (maliny, porzeczki czarne<br>i czerwone)</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th class="date">Data</th><th class="hour">Godzina</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 1 [°C]</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 2 [°C]</th><th class="sign">Podpis osoby<br>kontrolującej</th><th class="notes">Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
 
   function printHaccpGroup(group) {
     if (!group) return
-    const printableGroup = group.type === 'K02' ? k02GroupWithLiveValues(group) : group
-    const html = printableGroup.type === 'K01' ? buildK01MonthlyHtml(printableGroup) : buildK02MonthlyHtml(printableGroup)
+    const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : buildK02MonthlyHtml(group)
     // Drukujemy zawartość przez ukryty iframe, a nie przez puste okno. To naprawia białą kartkę w podglądzie druku.
     printHtmlInIframe(html)
   }
 
   function exportHaccpGroupExcel(group) {
-    group = group.type === 'K02' ? k02GroupWithLiveValues(group) : group
     const docs = group.docs || []
     const rows = []
     if (group.type === 'K01') {
@@ -806,7 +747,7 @@ function App() {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push(['Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', '', '', `Okres: ${periodLabel(group)}`])
       rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
-      docs.forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina ?? '09:15', doc.data?.temperatura_chlodnia_1 ?? '2', doc.data?.temperatura_chlodnia_2 ?? '2', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
+      docs.forEach(doc => rows.push([doc.document_date || '', getK02Value(doc, 'godzina', '09:15'), getK02Value(doc, 'temperatura_chlodnia_1', '2'), getK02Value(doc, 'temperatura_chlodnia_2', '2'), getK02Value(doc, 'podpis_kontrolujacego', doc.signed_by_operator || ''), normalizePN(getK02Value(doc, 'uwagi', 'P') || 'P')]))
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -932,18 +873,19 @@ function App() {
           {Array.from({length: maxRows}).map((_,i) => {
             const doc = docs[i]
             if (!doc) return <tr className="blank-row" key={`k02-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            const signed = k02SignedValue(doc)
-            const godzina = k02FieldValue(doc, 'godzina', '09:15')
-            const temp1 = k02FieldValue(doc, 'temperatura_chlodnia_1', '2')
-            const temp2 = k02FieldValue(doc, 'temperatura_chlodnia_2', '2')
-            const pn = k02PnValue(doc)
+            const defaultTemp = k02TempForProducts(String(doc.data?.produkty || doc.product_name || '').split(','))
+            const godzina = getK02Value(doc, 'godzina', '09:15')
+            const temp1 = getK02Value(doc, 'temperatura_chlodnia_1', defaultTemp)
+            const temp2 = getK02Value(doc, 'temperatura_chlodnia_2', defaultTemp)
+            const signed = getK02Value(doc, 'podpis_kontrolujacego', doc.signed_by_operator || '')
+            const uwagi = normalizePN(getK02Value(doc, 'uwagi', doc.status || 'P') || 'P')
             return <tr key={doc.id}>
               <td>{doc.document_date}</td>
-              <td><input type="text" inputMode="numeric" className="cell-input no-print" value={godzina} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
-              <td><input type="text" inputMode="decimal" className="cell-input no-print" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
-              <td><input type="text" inputMode="decimal" className="cell-input no-print" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
+              <td><input className="cell-input no-print" value={godzina} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
+              <td><input className="cell-input no-print" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
+              <td><input className="cell-input no-print" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
               <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-              <td className={pn==='N'?'pn-n':''}><select className="mini-select no-print" value={pn} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{pn}</span></td>
+              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
             </tr>
           })}
         </tbody></table>
@@ -1301,7 +1243,7 @@ function App() {
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
-      const group = haccpMonthlyGroups.find(g => g.key === doc.group?.key) || doc.group
+      const group = doc.group
       return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print"><button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
