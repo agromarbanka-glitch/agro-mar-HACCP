@@ -311,45 +311,45 @@ function App() {
     })
   }
 
-  function applyK02OverrideToDoc(doc, override) {
+  function applyK02ValueToDoc(doc, field, value) {
     if (!doc) return doc
-    const data = { ...(doc.data || {}) }
-    if (Object.prototype.hasOwnProperty.call(override, 'godzina')) data.godzina = override.godzina
-    if (Object.prototype.hasOwnProperty.call(override, 'temperatura_chlodnia_1')) data.temperatura_chlodnia_1 = override.temperatura_chlodnia_1
-    if (Object.prototype.hasOwnProperty.call(override, 'temperatura_chlodnia_2')) data.temperatura_chlodnia_2 = override.temperatura_chlodnia_2
-    if (Object.prototype.hasOwnProperty.call(override, 'podpis_kontrolujacego')) data.podpis_kontrolujacego = override.podpis_kontrolujacego
-    if (Object.prototype.hasOwnProperty.call(override, 'uwagi')) data.uwagi = normalizePN(override.uwagi)
+    const nextData = { ...(doc.data || {}), [field]: value }
+    const nextStatus = field === 'uwagi' ? normalizePN(value) : (doc.status || 'P')
+    const nextSigned = field === 'podpis_kontrolujacego' ? value : doc.signed_by_operator
     return {
       ...doc,
-      data,
-      status: Object.prototype.hasOwnProperty.call(override, 'uwagi') ? normalizePN(override.uwagi) : (doc.status || 'P'),
-      signed_by_operator: Object.prototype.hasOwnProperty.call(override, 'podpis_kontrolujacego') ? (override.podpis_kontrolujacego || '') : (doc.signed_by_operator || '')
+      data: nextData,
+      status: nextStatus,
+      signed_by_operator: nextSigned
     }
   }
 
   function setK02Override(doc, field, value) {
     if (!doc?.id) return
-    const normalizedValue = field === 'uwagi' ? normalizePN(value) : value
 
-    setK02Overrides(prev => {
-      const nextForDoc = {
+    setK02Overrides(prev => ({
+      ...prev,
+      [doc.id]: {
         ...(prev[doc.id] || {}),
-        [field]: normalizedValue,
-        status: field === 'uwagi' ? normalizedValue : (prev[doc.id]?.status || doc.status || 'P')
+        [field]: value,
+        status: field === 'uwagi' ? normalizePN(value) : (prev[doc.id]?.status || doc.status || 'P')
       }
-      return { ...prev, [doc.id]: nextForDoc }
-    })
+    }))
 
-    // K02 jest dokumentem syntetycznym. Otwarta kartoteka przechowywała starą kopię
-    // danych, dlatego inputy/selecty wyglądały, jakby nie reagowały. Aktualizujemy
-    // również aktualnie otwarty podgląd/edycję, żeby zmiana była widoczna natychmiast.
+    // K02 jest generowane syntetycznie. Po otwarciu kartoteki w modalu
+    // trzymamy kopię group.docs, więc sama zmiana k02Overrides nie odświeżała
+    // wartości widocznych w otwartym formularzu. Aktualizujemy tę kopię od razu,
+    // żeby inputy, temperatura, godzina i podpis reagowały natychmiast.
     setSelectedHaccpDoc(prev => {
       if (!prev?.groupPreview || !prev.group?.docs) return prev
-      const nextDocs = prev.group.docs.map(d => {
-        if (d.id !== doc.id) return d
-        return applyK02OverrideToDoc(d, { [field]: normalizedValue, status: field === 'uwagi' ? normalizedValue : (d.status || 'P') })
-      })
-      return { ...prev, group: { ...prev.group, docs: nextDocs } }
+      if (prev.group.type !== 'K02') return prev
+      return {
+        ...prev,
+        group: {
+          ...prev.group,
+          docs: prev.group.docs.map(d => d.id === doc.id ? applyK02ValueToDoc(d, field, value) : d)
+        }
+      }
     })
   }
 
