@@ -206,6 +206,7 @@ function App() {
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
+  const [defaultK02Employee, setDefaultK02Employee] = useState('')
   const [k02Overrides, setK02Overrides] = useState({})
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
@@ -269,12 +270,33 @@ function App() {
     return '2'
   }
 
-  function getK02Value(doc, field, fallback = '') {
-    const override = k02Overrides?.[doc?.id]?.[field]
-    if (override !== undefined && override !== null) return override
-    const dataValue = doc?.data?.[field]
-    if (dataValue !== undefined && dataValue !== null) return dataValue
+  function readK02Override(doc, field, fallback = '') {
+    const ov = k02Overrides[doc?.id] || {}
+    if (Object.prototype.hasOwnProperty.call(ov, field)) return ov[field]
+    if (Object.prototype.hasOwnProperty.call(doc?.data || {}, field)) return doc.data[field]
+    if (field === 'podpis_kontrolujacego') return doc?.signed_by_operator || fallback
+    if (field === 'uwagi') return normalizePN(doc?.status || fallback || 'P')
     return fallback
+  }
+
+  function k02DocWithOverride(doc) {
+    if (!doc) return doc
+    const tempFallback = doc.data?.default_temp || k02TempForProducts(String(doc.data?.produkty || '').split(',').map(x => x.trim()))
+    const podpis = readK02Override(doc, 'podpis_kontrolujacego', '')
+    const uwagi = normalizePN(readK02Override(doc, 'uwagi', 'P'))
+    return {
+      ...doc,
+      status: uwagi,
+      signed_by_operator: podpis,
+      data: {
+        ...(doc.data || {}),
+        godzina: readK02Override(doc, 'godzina', '09:15'),
+        temperatura_chlodnia_1: readK02Override(doc, 'temperatura_chlodnia_1', tempFallback),
+        temperatura_chlodnia_2: readK02Override(doc, 'temperatura_chlodnia_2', tempFallback),
+        podpis_kontrolujacego: podpis,
+        uwagi,
+      }
+    }
   }
 
   function buildSyntheticK02Docs(allDocs) {
@@ -290,8 +312,7 @@ function App() {
       const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
       const temp = k02TempForProducts(products)
       const id = `K02-${day}`
-      const ov = k02Overrides[id] || {}
-      return {
+      const baseDoc = {
         id,
         synthetic: true,
         document_type: 'K02',
@@ -302,36 +323,46 @@ function App() {
         document_no: `K02/${day}`,
         chamber_code: 'CP2',
         qty: docs.reduce((sum, d) => sum + (Number(d.qty) || 0), 0),
-        status: ov.status || 'P',
+        status: 'P',
         data: {
-          godzina: ov.godzina ?? '09:15',
-          temperatura_chlodnia_1: ov.temperatura_chlodnia_1 ?? temp,
-          temperatura_chlodnia_2: ov.temperatura_chlodnia_2 ?? temp,
-          podpis_kontrolujacego: ov.podpis_kontrolujacego ?? '',
-          uwagi: ov.uwagi ?? 'P',
+          godzina: '09:15',
+          temperatura_chlodnia_1: temp,
+          temperatura_chlodnia_2: temp,
+          default_temp: temp,
+          podpis_kontrolujacego: '',
+          uwagi: 'P',
           produkty: products.join(', '),
         },
-        signed_by_operator: ov.podpis_kontrolujacego ?? '',
+        signed_by_operator: '',
         signed_by_admin: '',
         document_version: 'I/2024',
         created_at: day,
       }
+      return k02DocWithOverride(baseDoc)
     })
   }
 
   function setK02Override(doc, field, value) {
     if (!doc?.id) return
     setK02Overrides(prev => {
-      const current = prev[doc.id] || {}
-      return {
-        ...prev,
-        [doc.id]: {
-          ...current,
-          [field]: value,
-          status: field === 'uwagi' ? normalizePN(value || 'P') : (current.status ?? doc.status ?? 'P')
-        }
+      const nextForDoc = {
+        ...(prev[doc.id] || {}),
+        [field]: value,
       }
+      if (field === 'uwagi') nextForDoc.status = normalizePN(value)
+      return { ...prev, [doc.id]: nextForDoc }
     })
+  }
+
+  function applyEmployeeToK02Group(group, employeeName) {
+    if (!employeeName) {
+      setMessage('Najpierw wybierz pracownika.')
+      return
+    }
+    for (const doc of group?.docs || []) {
+      setK02Override(doc, 'podpis_kontrolujacego', employeeName)
+    }
+    setMessage(`Ustawiono podpis dla ${(group?.docs || []).length} pozycji K02.`)
   }
 
   const haccpDocsForFilter = useMemo(() => {
@@ -472,7 +503,7 @@ function App() {
     const doc = isDoc ? nameOrDoc : null
     const supplier = doc ? getK01SupplierName(doc) : cleanSupplierName(nameOrDoc)
     const no = doc ? doc.document_no : docNo
-    return [supplier || 'Brak dostawcy', no].filter(Boolean).join(' / ')
+    return [supplier, no].filter(Boolean).join(' / ')
   }
 
   function buildK01PrintHtml(doc) {
@@ -722,7 +753,7 @@ function App() {
     const docs = group.docs || []
     const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-    const rows = docs.map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(getK02Value(doc, 'godzina', '09:15'))}</td><td>${escapeHtml(getK02Value(doc, 'temperatura_chlodnia_1', '2'))}</td><td>${escapeHtml(getK02Value(doc, 'temperatura_chlodnia_2', '2'))}</td><td>${escapeHtml(getK02Value(doc, 'podpis_kontrolujacego', doc.signed_by_operator || ''))}</td><td>${normalizePN(getK02Value(doc, 'uwagi', doc.status || 'P') || 'P')}</td></tr>`).join('')
+    const rows = docs.map(k02DocWithOverride).map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina ?? '')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_1 ?? '')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_2 ?? '')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')}</td><td>${normalizePN(doc.data?.uwagi || doc.status || 'P')}</td></tr>`).join('')
     const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-size:15pt;font-weight:bold;line-height:1.12}.title{width:44%;font-size:15pt;font-weight:bold;line-height:1.5}.meta{width:25%;font-size:13pt;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:12pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}.date{width:15%}.hour{width:15%}.temp{width:13%}.sign{width:18%}.notes{width:21%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K02 - Karta kontroli parametrów<br>magazynowania surowców (CP2)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}</td></tr><tr><td class="temp-note">- Temp. w chłodniach docelowo:<br>2-3°C (±1°C). – GRUPA I i II (jabłka, gruszki,<br>truskawki, wiśnie, porzeczki czarne i czerwone, aronie)<br>0-1°C – GRUPA III (maliny, porzeczki czarne<br>i czerwone)</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th class="date">Data</th><th class="hour">Godzina</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 1 [°C]</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 2 [°C]</th><th class="sign">Podpis osoby<br>kontrolującej</th><th class="notes">Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
@@ -747,7 +778,7 @@ function App() {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push(['Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', '', '', `Okres: ${periodLabel(group)}`])
       rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
-      docs.forEach(doc => rows.push([doc.document_date || '', getK02Value(doc, 'godzina', '09:15'), getK02Value(doc, 'temperatura_chlodnia_1', '2'), getK02Value(doc, 'temperatura_chlodnia_2', '2'), getK02Value(doc, 'podpis_kontrolujacego', doc.signed_by_operator || ''), normalizePN(getK02Value(doc, 'uwagi', 'P') || 'P')]))
+      docs.map(k02DocWithOverride).forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina ?? '', doc.data?.temperatura_chlodnia_1 ?? '', doc.data?.temperatura_chlodnia_2 ?? '', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -856,8 +887,19 @@ function App() {
         </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Podpis wybierany jest w ostatniej kolumnie dla każdej operacji.</div></div>
     }
     if (group.type === 'K02') {
-      const maxRows = Math.max(16, docs.length)
+      const docsForK02 = docs.map(k02DocWithOverride)
+      const maxRows = Math.max(16, docsForK02.length)
       return <div className="monthly-paper k02-original">
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis osoby kontrolującej dla całej kartoteki
+            <select value={defaultK02Employee} onChange={e => setDefaultK02Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" type="button" onClick={() => applyEmployeeToK02Group(group, defaultK02Employee)}>Zastosuj do wszystkich pozycji</button>
+          <span className="hint">Pojedynczy wiersz nadal można zmienić osobno w kolumnie podpisu.</span>
+        </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -871,25 +913,24 @@ function App() {
         </tbody></table>
         <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
-            const doc = docs[i]
+            const doc = docsForK02[i]
             if (!doc) return <tr className="blank-row" key={`k02-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            const defaultTemp = k02TempForProducts(String(doc.data?.produkty || doc.product_name || '').split(','))
-            const godzina = getK02Value(doc, 'godzina', '09:15')
-            const temp1 = getK02Value(doc, 'temperatura_chlodnia_1', defaultTemp)
-            const temp2 = getK02Value(doc, 'temperatura_chlodnia_2', defaultTemp)
-            const signed = getK02Value(doc, 'podpis_kontrolujacego', doc.signed_by_operator || '')
-            const uwagi = normalizePN(getK02Value(doc, 'uwagi', doc.status || 'P') || 'P')
+            const godzina = doc.data?.godzina ?? ''
+            const temp1 = doc.data?.temperatura_chlodnia_1 ?? ''
+            const temp2 = doc.data?.temperatura_chlodnia_2 ?? ''
+            const signed = doc.data?.podpis_kontrolujacego ?? ''
+            const pn = normalizePN(doc.data?.uwagi || doc.status || 'P')
             return <tr key={doc.id}>
               <td>{doc.document_date}</td>
               <td><input className="cell-input no-print" value={godzina} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
-              <td><input className="cell-input no-print" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
-              <td><input className="cell-input no-print" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
+              <td><input className="cell-input no-print" inputMode="decimal" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
+              <td><input className="cell-input no-print" inputMode="decimal" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
               <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+              <td className={pn==='N'?'pn-n':''}><select className="mini-select no-print" value={pn} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{pn}</span></td>
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C. Pola można zmienić ręcznie przed drukiem/Excel.</p>
+        <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C. Pola można skasować lub zmienić ręcznie bez zamykania kartoteki.</p>
       </div>
     }
     return <div className="monthly-paper"><div className="paper-head"><div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div><div><b>{group.type} – kartoteka miesięczna</b><br/>Okres: {periodLabel(group)}<br/>Komora: {group.chamber || '-'}</div></div><table className="paper-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt</th><th>Partia</th><th>Ilość</th><th>Temperatura</th><th>P/N</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td><td className={normalizePN(doc.data?.parametry_magazynowania)==='N'?'pn-n':''}>{normalizePN(doc.data?.parametry_magazynowania || 'P')} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'parametry_magazynowania','Ocena parametrów magazynowania', normalizePN(doc.data?.parametry_magazynowania || 'P'), {pn:true})}>Edytuj</button></td><td>{doc.data?.uwagi || ''}</td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table></div>
