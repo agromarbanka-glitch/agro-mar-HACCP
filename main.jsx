@@ -296,11 +296,11 @@ function App() {
         qty: docs.reduce((sum, d) => sum + (Number(d.qty) || 0), 0),
         status: ov.status || 'P',
         data: {
-          godzina: ov.godzina || '09:15',
-          temperatura_chlodnia_1: ov.temperatura_chlodnia_1 || temp,
-          temperatura_chlodnia_2: ov.temperatura_chlodnia_2 || temp,
-          podpis_kontrolujacego: ov.podpis_kontrolujacego || '',
-          uwagi: ov.uwagi || 'P',
+          godzina: ov.godzina ?? '09:15',
+          temperatura_chlodnia_1: ov.temperatura_chlodnia_1 ?? temp,
+          temperatura_chlodnia_2: ov.temperatura_chlodnia_2 ?? temp,
+          podpis_kontrolujacego: ov.podpis_kontrolujacego ?? '',
+          uwagi: ov.uwagi ?? 'P',
           produkty: products.join(', '),
         },
         signed_by_operator: ov.podpis_kontrolujacego || '',
@@ -311,45 +311,35 @@ function App() {
     })
   }
 
-  function applyK02ValueToDoc(doc, field, value) {
-    if (!doc) return doc
+  function applyK02PatchToDoc(doc, field, value) {
+    if (!doc || doc.document_type !== 'K02') return doc
     const nextData = { ...(doc.data || {}), [field]: value }
     const nextStatus = field === 'uwagi' ? normalizePN(value) : (doc.status || 'P')
-    const nextSigned = field === 'podpis_kontrolujacego' ? value : doc.signed_by_operator
-    return {
-      ...doc,
-      data: nextData,
-      status: nextStatus,
-      signed_by_operator: nextSigned
-    }
+    const signed = field === 'podpis_kontrolujacego' ? value : (doc.signed_by_operator || nextData.podpis_kontrolujacego || '')
+    return { ...doc, data: nextData, status: nextStatus, signed_by_operator: signed }
   }
 
   function setK02Override(doc, field, value) {
-    if (!doc?.id) return
-
+    const nextValue = value ?? ''
     setK02Overrides(prev => ({
       ...prev,
-      [doc.id]: {
-        ...(prev[doc.id] || {}),
-        [field]: value,
-        status: field === 'uwagi' ? normalizePN(value) : (prev[doc.id]?.status || doc.status || 'P')
-      }
+      [doc.id]: { ...(prev[doc.id] || {}), [field]: nextValue, status: field === 'uwagi' ? normalizePN(nextValue) : (prev[doc.id]?.status || doc.status || 'P') }
     }))
-
-    // K02 jest generowane syntetycznie. Po otwarciu kartoteki w modalu
-    // trzymamy kopię group.docs, więc sama zmiana k02Overrides nie odświeżała
-    // wartości widocznych w otwartym formularzu. Aktualizujemy tę kopię od razu,
-    // żeby inputy, temperatura, godzina i podpis reagowały natychmiast.
+    // Najważniejsza poprawka: otwarte okno kartoteki też musi dostać nową wartość od razu.
+    // Wcześniej zmieniał się tylko stan bazowy, a modal pokazywał starą kopię grupy.
     setSelectedHaccpDoc(prev => {
-      if (!prev?.groupPreview || !prev.group?.docs) return prev
-      if (prev.group.type !== 'K02') return prev
-      return {
-        ...prev,
-        group: {
-          ...prev.group,
-          docs: prev.group.docs.map(d => d.id === doc.id ? applyK02ValueToDoc(d, field, value) : d)
+      if (!prev) return prev
+      if (prev.groupPreview && prev.group?.docs) {
+        return {
+          ...prev,
+          group: {
+            ...prev.group,
+            docs: prev.group.docs.map(d => d.id === doc.id ? applyK02PatchToDoc(d, field, nextValue) : d)
+          }
         }
       }
+      if (prev.id === doc.id) return applyK02PatchToDoc(prev, field, nextValue)
+      return prev
     })
   }
 
@@ -895,9 +885,9 @@ function App() {
             const signed = doc.signed_by_operator || doc.data?.podpis_kontrolujacego || ''
             return <tr key={doc.id}>
               <td>{doc.document_date}</td>
-              <td><input className="cell-input no-print" value={doc.data?.godzina || '09:15'} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{doc.data?.godzina || '09:15'}</span></td>
-              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_1 || '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_1 || '2'}</span></td>
-              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_2 || '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_2 || '2'}</span></td>
+              <td><input className="cell-input no-print" value={doc.data?.godzina ?? '09:15'} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{doc.data?.godzina ?? '09:15'}</span></td>
+              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_1 ?? '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_1 ?? '2'}</span></td>
+              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_2 ?? '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_2 ?? '2'}</span></td>
               <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
               <td className={normalizePN(doc.data?.uwagi || doc.status)==='N'?'pn-n':''}><select className="mini-select no-print" value={normalizePN(doc.data?.uwagi || doc.status || 'P')} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(doc.data?.uwagi || doc.status || 'P')}</span></td>
             </tr>
@@ -1257,7 +1247,9 @@ function App() {
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
-      const group = doc.group
+      // Jeżeli grupa istnieje w aktualnym stanie, bierzemy świeżą wersję.
+      // Dla K02 pozwala to widzieć edycję natychmiast, bez zamykania okna.
+      const group = haccpMonthlyGroups.find(g => g.key === doc.group?.key) || doc.group
       return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print"><button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
