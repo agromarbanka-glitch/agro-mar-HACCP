@@ -294,16 +294,16 @@ function App() {
         document_no: `K02/${day}`,
         chamber_code: 'CP2',
         qty: docs.reduce((sum, d) => sum + (Number(d.qty) || 0), 0),
-        status: ov.status || 'P',
+        status: ov.status ?? 'P',
         data: {
-          godzina: ov.godzina || '09:15',
-          temperatura_chlodnia_1: ov.temperatura_chlodnia_1 || temp,
-          temperatura_chlodnia_2: ov.temperatura_chlodnia_2 || temp,
-          podpis_kontrolujacego: ov.podpis_kontrolujacego || '',
-          uwagi: ov.uwagi || 'P',
+          godzina: Object.prototype.hasOwnProperty.call(ov, 'godzina') ? ov.godzina : '09:15',
+          temperatura_chlodnia_1: Object.prototype.hasOwnProperty.call(ov, 'temperatura_chlodnia_1') ? ov.temperatura_chlodnia_1 : temp,
+          temperatura_chlodnia_2: Object.prototype.hasOwnProperty.call(ov, 'temperatura_chlodnia_2') ? ov.temperatura_chlodnia_2 : temp,
+          podpis_kontrolujacego: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : '',
+          uwagi: Object.prototype.hasOwnProperty.call(ov, 'uwagi') ? ov.uwagi : 'P',
           produkty: products.join(', '),
         },
-        signed_by_operator: ov.podpis_kontrolujacego || '',
+        signed_by_operator: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : '',
         signed_by_admin: '',
         document_version: 'I/2024',
         created_at: day,
@@ -312,10 +312,42 @@ function App() {
   }
 
   function setK02Override(doc, field, value) {
-    setK02Overrides(prev => ({
-      ...prev,
-      [doc.id]: { ...(prev[doc.id] || {}), [field]: value, status: field === 'uwagi' ? normalizePN(value) : (prev[doc.id]?.status || 'P') }
-    }))
+    if (!doc?.id) return
+    setK02Overrides(prev => {
+      const current = prev[doc.id] || {}
+      return {
+        ...prev,
+        [doc.id]: {
+          ...current,
+          [field]: value,
+          status: field === 'uwagi' ? normalizePN(value) : (current.status ?? doc.status ?? 'P')
+        }
+      }
+    })
+  }
+
+  function k02FieldValue(doc, field, fallback = '') {
+    const override = k02Overrides?.[doc?.id]
+    if (override && Object.prototype.hasOwnProperty.call(override, field)) return override[field]
+    const data = doc?.data || {}
+    if (Object.prototype.hasOwnProperty.call(data, field)) return data[field]
+    return fallback
+  }
+
+  function getLiveK02Doc(doc) {
+    if (!doc?.id) return doc
+    const ov = k02Overrides?.[doc.id] || {}
+    const data = {
+      ...(doc.data || {}),
+      ...ov,
+      uwagi: Object.prototype.hasOwnProperty.call(ov, 'uwagi') ? ov.uwagi : (doc.data?.uwagi ?? doc.status ?? 'P')
+    }
+    return {
+      ...doc,
+      data,
+      status: Object.prototype.hasOwnProperty.call(ov, 'uwagi') ? normalizePN(ov.uwagi) : (ov.status ?? doc.status ?? 'P'),
+      signed_by_operator: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : (doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')
+    }
   }
 
   const haccpDocsForFilter = useMemo(() => {
@@ -855,16 +887,21 @@ function App() {
         </tbody></table>
         <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
-            const doc = docs[i]
-            if (!doc) return <tr className="blank-row" key={`k02-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            const signed = doc.signed_by_operator || doc.data?.podpis_kontrolujacego || ''
+            const baseDoc = docs[i]
+            if (!baseDoc) return <tr className="blank-row" key={`k02-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const doc = getLiveK02Doc(baseDoc)
+            const godzina = k02FieldValue(doc, 'godzina', '09:15')
+            const temp1 = k02FieldValue(doc, 'temperatura_chlodnia_1', '')
+            const temp2 = k02FieldValue(doc, 'temperatura_chlodnia_2', '')
+            const signed = k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || ''
+            const uwagi = normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
             return <tr key={doc.id}>
               <td>{doc.document_date}</td>
-              <td><input className="cell-input no-print" value={doc.data?.godzina || '09:15'} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{doc.data?.godzina || '09:15'}</span></td>
-              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_1 || '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_1 || '2'}</span></td>
-              <td><input className="cell-input no-print" value={doc.data?.temperatura_chlodnia_2 || '2'} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{doc.data?.temperatura_chlodnia_2 || '2'}</span></td>
+              <td><input className="cell-input no-print" value={godzina} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
+              <td><input className="cell-input no-print" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
+              <td><input className="cell-input no-print" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
               <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-              <td className={normalizePN(doc.data?.uwagi || doc.status)==='N'?'pn-n':''}><select className="mini-select no-print" value={normalizePN(doc.data?.uwagi || doc.status || 'P')} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(doc.data?.uwagi || doc.status || 'P')}</span></td>
+              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
             </tr>
           })}
         </tbody></table>
@@ -1222,7 +1259,7 @@ function App() {
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
-      const group = doc.group
+      const group = haccpMonthlyGroups.find(g => g.key === doc.group?.key) || doc.group
       return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print"><button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
