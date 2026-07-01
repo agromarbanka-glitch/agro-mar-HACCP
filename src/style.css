@@ -161,3 +161,16 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   .k02-original td,.k02-original th{font-size:11pt;padding:3px 4px}
   .k02-company{font-size:13pt!important}.k02-title{font-size:13pt!important}.k02-meta{font-size:11pt!important}.k02-note{font-size:10.5pt!important}.k02-version{font-size:11pt!important}
 }
+
+/* Pakiet K03-K07 */
+.k03-original,.k04-original,.manual-form,.k06-original,.k07-original{font-family:"Times New Roman",serif;color:#111;background:#fff;padding:12px;max-width:1220px;overflow:auto}
+.k03-original table,.k04-original table,.manual-form table,.k06-original table,.k07-original table{width:100%;border-collapse:collapse;table-layout:fixed;margin:0}
+.k03-original td,.k03-original th,.k04-original td,.k04-original th,.manual-form td,.manual-form th,.k06-original td,.k06-original th,.k07-original td,.k07-original th{border:1px solid #111;text-align:center;vertical-align:middle;padding:4px 5px;font-size:13px;line-height:1.1;background:#fff;color:#111}
+.k03-head .company,.k03-head .title,.k03-head .meta{font-weight:700}.k03-top td{text-align:left;font-size:14px}.k03-table th{font-weight:700}.sum{font-weight:700;text-align:left!important}.blank-row td{height:28px}
+.k04-table th{font-size:12px}.k04-table td{height:27px}
+.manual-form .paper-table td,.manual-form .paper-table th,.k06-original .paper-table td,.k06-original .paper-table th,.k07-original .paper-table td,.k07-original .paper-table th{height:28px}
+@media print{
+  @page{size:A4 landscape;margin:7mm}
+  .k03-original,.k04-original,.manual-form,.k06-original,.k07-original{padding:0;max-width:none;overflow:visible;box-shadow:none!important;border-radius:0!important}
+  .k03-original td,.k03-original th,.k04-original td,.k04-original th,.manual-form td,.manual-form th,.k06-original td,.k06-original th,.k07-original td,.k07-original th{font-size:10pt;padding:3px 4px}
+}

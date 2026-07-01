@@ -206,10 +206,7 @@ function App() {
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
-  const [defaultK02Employee, setDefaultK02Employee] = useState('')
-  const [k02Overrides, setK02Overrides] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('agromar_k02_overrides') || '{}') } catch { return {} }
-  })
+  const [k02Overrides, setK02Overrides] = useState({})
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
   const [auxHalf, setAuxHalf] = useState(new Date().getMonth() < 6 ? '1' : '2')
@@ -234,7 +231,11 @@ function App() {
     ['K01', 'K01 – Przyjęcie surowca (CP1)', 'Dostawy PZ/MM, ocena surowca i pojazdu'],
     ['K01.1', 'K01.1 – Przyjęcie materiałów pomocniczych', 'Faktury zakupowe, opakowania i materiały pomocnicze'],
     ['K02', 'K02 – Magazynowanie surowca (CP2)', 'Komory surowca, temperatury i status P/N'],
+    ['K03', 'K03 – Identyfikacja partii produktu', 'Powiązanie WZ z dostawami K01/FIFO'],
     ['K04', 'K04 – Magazynowanie produktu gotowego (CP3/CCP1)', 'Produkty gotowe, pulpy i komory/beczki'],
+    ['K04/1', 'K04/1 – Transport / magazynowanie w samochodzie', 'Parametry transportu – formularz ręczny'],
+    ['K05', 'K05 – Towary wycofane', 'Formularz ręczny wycofań'],
+    ['K06', 'K06 – Ocena jakości gotowego produktu', 'Miesięczna ocena partii produktu gotowego'],
     ['K07', 'K07 – Kontrola sita / identyfikowalność', 'Kontrola przed przerobem oraz śledzenie partii']
   ]
 
@@ -243,10 +244,12 @@ function App() {
     { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
     { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna i ręczna edycja. OCR faktur odłożony na później.' },
     { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
-    { code: 'K03', name: 'Identyfikacja partii produktu', status: 'do wykonania', note: 'Po K02, na bazie FIFO i historii partii.' },
-    { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'do wykonania', note: 'CP3/CCP1, po domknięciu K02/K03.' },
-    { code: 'K05', name: 'Towary wycofane', status: 'do wykonania', note: 'Po podstawowych kartach magazynowych.' },
-    { code: 'K06', name: 'Ocena jakości produktu', status: 'do wykonania', note: 'Po module produkcji/przerobu.' },
+    { code: 'K03', name: 'Identyfikacja partii produktu', status: 'robocze', note: 'Dodany formularz automatyczny na podstawie FIFO/WZ.' },
+    { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'robocze', note: 'Dodany formularz temperatur CP3/CCP1.' },
+    { code: 'K04/1', name: 'Transport / magazynowanie w samochodzie', status: 'robocze', note: 'Dodany pusty formularz ręczny.' },
+    { code: 'K05', name: 'Towary wycofane', status: 'robocze', note: 'Dodany pusty formularz ręczny.' },
+    { code: 'K06', name: 'Ocena jakości produktu', status: 'robocze', note: 'Dodany formularz miesięczny, domyślnie P.' },
+    { code: 'K07', name: 'Kontrola sita', status: 'robocze', note: 'Dodany formularz dla pulpy maliny/porzeczki.' },
     { code: 'Raporty', name: 'R00–R13', status: 'do wykonania', note: 'Po kartach K.' },
     { code: 'Wykazy/Protokoły', name: 'W01–W10 / PR01–PR08', status: 'do wykonania', note: 'Po raportach podstawowych.' }
   ]
@@ -353,9 +356,113 @@ function App() {
     }
   }
 
+
+  function finishedTempForProduct(productName) {
+    const t = normalizeText(productName)
+    if (t.includes('truskawk')) return '-2'
+    if (t.includes('malin')) return '0'
+    if (t.includes('jabl')) return '2'
+    if (t.includes('porzeczk')) return '2'
+    return '2'
+  }
+
+  function isPulpProduct(productName) {
+    const t = normalizeText(productName)
+    return t.includes('pulpa') && (t.includes('malin') || t.includes('porzeczk'))
+  }
+
+  function monthDays(month) {
+    const y = Number(String(month || '').slice(0,4)) || new Date().getFullYear()
+    const m = Number(String(month || '').slice(5,7)) || (new Date().getMonth()+1)
+    const last = new Date(y, m, 0).getDate()
+    return Array.from({length:last}, (_,i)=>`${y}-${String(m).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`)
+  }
+
+  function syntheticOverride(doc, field, fallback='') {
+    const ov = k02Overrides?.[doc?.id]
+    if (ov && Object.prototype.hasOwnProperty.call(ov, field)) return ov[field]
+    if (doc?.data && Object.prototype.hasOwnProperty.call(doc.data, field)) return doc.data[field]
+    return fallback
+  }
+
+  function liveSyntheticDoc(doc) {
+    const ov = k02Overrides?.[doc?.id] || {}
+    return { ...doc, data: { ...(doc?.data || {}), ...ov }, signed_by_operator: ov.podpis_kontrolujacego ?? ov.podpis ?? doc?.signed_by_operator ?? doc?.data?.podpis_kontrolujacego ?? doc?.data?.podpis ?? '' }
+  }
+
+  function buildSyntheticK03Docs() {
+    const rows = (fifoRows || []).filter(a => a.operations?.document_no)
+    const by = new Map()
+    rows.forEach(a => {
+      const wz = a.operations?.document_no || 'WZ'
+      const product = a.products?.name || 'Produkt'
+      const key = `${wz}|${product}`
+      if (!by.has(key)) by.set(key, { id:`K03-${key}`, synthetic:true, document_type:'K03', document_date:a.operations?.operation_date || new Date().toISOString().slice(0,10), product_name:product, document_no:wz, lot_no:wz, qty:0, status:'P', data:{ rawRows:[], salesRows:[] } })
+      const d = by.get(key)
+      d.qty += Number(a.qty || 0)
+      d.data.rawRows.push({ invoice:a.lots?.lot_no || '', date:a.lots?.production_date || '', supplier:'', qty:Number(a.qty || 0) })
+    })
+    Array.from(by.values()).forEach(d => d.data.salesRows = [{ invoice:d.document_no, date:d.document_date, receiver:'', qty:d.qty, sign:'' }])
+    return Array.from(by.values())
+  }
+
+  function buildSyntheticK04Docs() {
+    const docs = []
+    const lots = (stockRows || []).filter(l => l.products?.name)
+    const candidates = lots.filter(l => {
+      const n = normalizeText(l.products?.name)
+      return isPulpProduct(l.products?.name) || n.includes('truskawk') || n.includes('malin') || n.includes('jabl') || n.includes('porzeczk')
+    })
+    const months = new Set(candidates.map(l => String(l.production_date || '').slice(0,7)).filter(Boolean))
+    if (!months.size && haccpMonth) months.add(haccpMonth)
+    months.forEach(month => {
+      const monthLots = candidates.filter(l => String(l.production_date || '').slice(0,7) === month)
+      const products = Array.from(new Set(monthLots.map(l => l.products?.name).filter(Boolean)))
+      const productLabel = products.length ? products.join(', ') : 'Produkt gotowy'
+      monthDays(month).forEach(day => {
+        const id = `K04-${day}`
+        const ov = k02Overrides[id] || {}
+        docs.push({ id, synthetic:true, document_type:'K04', document_date:day, product_name:productLabel, lot_no:'', document_no:`K04/${day}`, chamber_code:'CP3/CCP1', qty:0, status:ov.uwagi || 'P', data:{ godzina:ov.godzina ?? '09:15', temp_cp3_1:ov.temp_cp3_1 ?? finishedTempForProduct(productLabel), temp_cp3_2:ov.temp_cp3_2 ?? finishedTempForProduct(productLabel), zbiornik_1:ov.zbiornik_1 ?? (products.some(isPulpProduct) ? '0' : ''), zbiornik_2:ov.zbiornik_2 ?? (products.some(isPulpProduct) ? '0' : ''), zbiornik_3:ov.zbiornik_3 ?? (products.some(isPulpProduct) ? '0' : ''), zbiornik_4:ov.zbiornik_4 ?? (products.some(isPulpProduct) ? '0' : ''), podpis_kontrolujacego:ov.podpis_kontrolujacego ?? '', uwagi:ov.uwagi ?? 'P' } })
+      })
+    })
+    return docs
+  }
+
+  function buildManualMonthlyDocs(type) {
+    const month = haccpMonth || new Date().toISOString().slice(0,7)
+    return [{ id:`${type}-${month}`, synthetic:true, manual:true, document_type:type, document_date:`${month}-01`, product_name:type === 'K05' ? 'Towary wycofane' : 'Transport', lot_no:'', document_no:`${type}/${month}`, chamber_code:'', qty:0, status:'P', data:{ rows: Array.from({length:12}, (_,i)=>({ lp:i+1 })) } }]
+  }
+
+  function buildSyntheticK06Docs() {
+    return (stockRows || []).filter(l => l.products?.name).map(l => {
+      const id = `K06-${l.id}`
+      const ov = k02Overrides[id] || {}
+      return { id, synthetic:true, document_type:'K06', document_date:l.production_date || new Date().toISOString().slice(0,10), product_name:l.products?.name || '', lot_no:l.lot_no || '', document_no:`K06/${l.lot_no || l.id}`, chamber_code:l.chamber?.code || '', qty:Number(l.initial_qty || 0), status:ov.uwagi || 'P', data:{ barwa:ov.barwa ?? 'P', zapach:ov.zapach ?? 'P', twardosc:ov.twardosc ?? 'P', plesn:ov.plesn ?? 'P', podpis_kontrolujacego:ov.podpis_kontrolujacego ?? '' } }
+    })
+  }
+
+  function buildSyntheticK07Docs() {
+    return (stockRows || []).filter(l => isPulpProduct(l.products?.name)).map(l => {
+      const id = `K07-${l.id}`
+      const ov = k02Overrides[id] || {}
+      return { id, synthetic:true, document_type:'K07', document_date:l.production_date || new Date().toISOString().slice(0,10), product_name:l.products?.name || '', lot_no:l.lot_no || '', document_no:`K07/${l.lot_no || l.id}`, chamber_code:'CCP1', qty:Number(l.initial_qty || 0), status:ov.stan_sita || 'P', data:{ godzina:ov.godzina ?? 'przed / po', rodzaj_surowca:l.products?.name || '', produkowany_numer_partii:l.lot_no || '', stan_sita:ov.stan_sita ?? 'P', podpis_kontrolujacego:ov.podpis_kontrolujacego ?? '' } }
+    })
+  }
+
+  function buildDocsForCardFilter(type) {
+    if (type === 'K02') return buildSyntheticK02Docs(haccpDocs)
+    if (type === 'K03') return buildSyntheticK03Docs()
+    if (type === 'K04') return buildSyntheticK04Docs()
+    if (type === 'K04/1') return buildManualMonthlyDocs('K04/1')
+    if (type === 'K05') return buildManualMonthlyDocs('K05')
+    if (type === 'K06') return buildSyntheticK06Docs()
+    if (type === 'K07') return buildSyntheticK07Docs()
+    return haccpDocs
+  }
+
   const haccpDocsForFilter = useMemo(() => {
     const q = normalizeText(haccpSearch)
-    const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs) : haccpDocs
+    const sourceDocs = buildDocsForCardFilter(docsFilter)
     return sourceDocs
       .filter(d => d.document_type === docsFilter)
       .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
@@ -394,7 +501,11 @@ function App() {
       // Czyli np. Jabłko przemysłowe ma własną kartę, Wiśnia własną kartę itd.
       const key = doc.document_type === 'K01'
         ? `${doc.document_type}|${period}|${product}`
-        : `${doc.document_type}|${period}|${product}|${chamber}`
+        : (doc.document_type === 'K03'
+          ? `${doc.document_type}|${period}|${doc.document_no || doc.id}`
+          : (doc.document_type === 'K04/1' || doc.document_type === 'K05'
+            ? `${doc.document_type}|${period}`
+            : `${doc.document_type}|${period}|${product}|${chamber}`))
       if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
@@ -741,33 +852,47 @@ function App() {
     const docs = group.docs || []
     const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-    const rows = docs.map((baseDoc) => {
-      const doc = getLiveK02Doc(baseDoc)
-      const godzina = k02FieldValue(doc, 'godzina', '09:15')
-      const temp1 = k02FieldValue(doc, 'temperatura_chlodnia_1', '')
-      const temp2 = k02FieldValue(doc, 'temperatura_chlodnia_2', '')
-      const podpis = k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || ''
-      const uwagi = normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
-      return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(godzina)}</td><td>${escapeHtml(temp1)}</td><td>${escapeHtml(temp2)}</td><td>${escapeHtml(podpis)}</td><td>${escapeHtml(uwagi)}</td></tr>`
-    }).join('')
+    const rows = docs.map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '09:15')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_1 || '2')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_2 || '2')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')}</td><td>${normalizePN(doc.data?.uwagi || doc.status || 'P')}</td></tr>`).join('')
     const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-size:15pt;font-weight:bold;line-height:1.12}.title{width:44%;font-size:15pt;font-weight:bold;line-height:1.5}.meta{width:25%;font-size:13pt;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:12pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}.date{width:15%}.hour{width:15%}.temp{width:13%}.sign{width:18%}.notes{width:21%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K02 - Karta kontroli parametrów<br>magazynowania surowców (CP2)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}</td></tr><tr><td class="temp-note">- Temp. w chłodniach docelowo:<br>2-3°C (±1°C). – GRUPA I i II (jabłka, gruszki,<br>truskawki, wiśnie, porzeczki czarne i czerwone, aronie)<br>0-1°C – GRUPA III (maliny, porzeczki czarne<br>i czerwone)</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th class="date">Data</th><th class="hour">Godzina</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 1 [°C]</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 2 [°C]</th><th class="sign">Podpis osoby<br>kontrolującej</th><th class="notes">Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
 
-  function printHtmlInIframe(html) {
-    const win = window.open('', '_blank', 'width=1200,height=850')
-    if (!win) {
-      setMessage('Przeglądarka zablokowała okno drukowania. Zezwól na wyskakujące okna dla tej strony.')
-      return
+  function buildOtherMonthlyHtml(group) {
+    const docs = (group.docs || []).map(liveSyntheticDoc)
+    const year = (docs[0]?.document_date || group.period || '').slice(0,4)
+    const month = (docs[0]?.document_date || group.period || '').slice(5,7)
+    const baseStyle = `@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.12}.company{width:32%;font-weight:bold;font-size:12pt}.title{font-weight:bold;font-size:12pt}.meta{width:16%;text-align:left;vertical-align:top}.blank-row td{height:25px}.left{text-align:left}.sum{text-align:left;font-weight:bold}`
+    const head = (title, version='I/2024') => `<table><tbody><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja ${version}</td><td class="title">${title}</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><br><b>Strona:</b></td></tr></tbody></table>`
+    if (group.type === 'K03') {
+      const d = docs[0] || { data:{rawRows:[], salesRows:[]} }
+      const left = (d.data?.rawRows || []).slice(0,10).map((r,i)=>`<tr><td>${i+1}</td><td>${escapeHtml(r.invoice||'')}</td><td>${escapeHtml(r.date||'')}</td><td>${escapeHtml(r.supplier||'')}</td><td>${escapeHtml(Number(r.qty||0).toLocaleString('pl-PL'))}</td></tr>`).join('') + Array.from({length:Math.max(0,10-(d.data?.rawRows||[]).length)},(_,i)=>`<tr class="blank-row"><td>${(d.data?.rawRows||[]).length+i+1}</td><td></td><td></td><td></td><td></td></tr>`).join('')
+      const right = (d.data?.salesRows || []).slice(0,10).map((r,i)=>`<tr><td>${i+1}</td><td>${escapeHtml(r.invoice||'')}</td><td>${escapeHtml(r.date||'')}</td><td>${escapeHtml(r.receiver||'')}</td><td>${escapeHtml(Number(r.qty||0).toLocaleString('pl-PL'))}</td><td>${escapeHtml(r.sign||'')}</td></tr>`).join('') + Array.from({length:Math.max(0,10-(d.data?.salesRows||[]).length)},(_,i)=>`<tr class="blank-row"><td>${(d.data?.salesRows||[]).length+i+1}</td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+      return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head><body>${head('Karta K03 - Karta identyfikacji partii produktu','II/2024')}<table><tbody><tr><td colspan="5" class="left">Nazwa produktu: ${escapeHtml(d.product_name||'')}</td><td colspan="6" class="left">Data produkcji: ${escapeHtml(d.document_date||'')}</td></tr><tr><td colspan="5" class="left">Nadany numer partii: ${escapeHtml(d.lot_no||'')}</td><td colspan="6" class="left">Wielkość partii (produktu gotowego): ${escapeHtml(Number(d.qty||0).toLocaleString('pl-PL'))}</td></tr></tbody></table><table><thead><tr><th colspan="5">Dane dotyczące dostaw surowców<br>składających się na partię</th><th colspan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th>Lp.</th><th>Nr faktury</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>${left.split('</tr>').filter(Boolean).map((l,i)=>l+'</tr>').map((l,i)=>{const rights=right.split('</tr>').filter(Boolean).map(x=>x+'</tr>'); return ''}).join('')}</tbody></table><table><tbody>${Array.from({length:10},(_,i)=>{const lr=(d.data?.rawRows||[])[i]||{};const sr=(d.data?.salesRows||[])[i]||{};return `<tr><td>${i+1}</td><td>${escapeHtml(lr.invoice||'')}</td><td>${escapeHtml(lr.date||'')}</td><td>${escapeHtml(lr.supplier||'')}</td><td>${lr.qty?escapeHtml(Number(lr.qty).toLocaleString('pl-PL')):''}</td><td>${i+1}</td><td>${escapeHtml(sr.invoice||'')}</td><td>${escapeHtml(sr.date||'')}</td><td>${escapeHtml(sr.receiver||'')}</td><td>${sr.qty?escapeHtml(Number(sr.qty).toLocaleString('pl-PL')):''}</td><td>${escapeHtml(sr.sign||'')}</td></tr>`}).join('')}<tr><td colspan="8"></td><td colspan="2" class="sum">Suma sprzedana:</td><td>${escapeHtml(Number(d.qty||0).toLocaleString('pl-PL'))}</td></tr></tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
     }
-    win.document.open()
-    win.document.write(html)
-    win.document.close()
+    if (group.type === 'K04') {
+      const rows = docs.map(d=>`<tr><td>${escapeHtml(d.document_date||'')}</td><td>${escapeHtml(d.data?.godzina||'09:15')}</td><td>${escapeHtml(d.data?.temp_cp3_1||'')}</td><td>${escapeHtml(d.data?.temp_cp3_2||'')}</td><td>${escapeHtml(d.data?.zbiornik_1||'')}</td><td>${escapeHtml(d.data?.zbiornik_2||'')}</td><td>${escapeHtml(d.data?.zbiornik_3||'')}</td><td>${escapeHtml(d.data?.zbiornik_4||'')}</td><td>${escapeHtml(d.data?.podpis_kontrolujacego||'')}</td><td>${normalizePN(d.data?.uwagi||'P')}</td></tr>`).join('') + Array.from({length:Math.max(0,16-docs.length)},()=>`<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+      return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head><body>${head('Karta K04 - Karta kontroli parametrów magazynowania produktów gotowych (CP3)','I/2025')}<table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura w chłodni produktu gotowego nr 1 [°C]</th><th>Temperatura w chłodni produktu gotowego nr 2 [°C]</th><th>Zbiornik na pulpę nr 1 [°C]</th><th>Zbiornik na pulpę nr 2 [°C]</th><th>Zbiornik na pulpę nr 3 [°C]</th><th>Zbiornik na pulpę nr 4 [°C]</th><th>Podpis osoby kontrolującej</th><th>Uwagi (P/N)*</th></tr></thead><tbody>${rows}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    }
+    if (group.type === 'K04/1') {
+      return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head><body>${head('Karta K04/1 - Karta kontroli parametrów magazynowania podczas transportu','I/2024')}<table><thead><tr><th>Data transportu/magazynowania w samochodzie</th><th>Temperatura wewnątrz środka transportu [°C]</th><th>Podpis kontrolującego</th><th>Uwagi (P/N)*</th></tr></thead><tbody>${Array.from({length:14},()=>`<tr class="blank-row"><td></td><td></td><td></td><td></td></tr>`).join('')}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    }
+    if (group.type === 'K05') {
+      return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head><body>${head('Karta K05 - Karta towarów wycofanych','I/2024')}<table><thead><tr><th>Data</th><th>Nazwa surowca/produktu</th><th>Ilość</th><th>Przyczyna wycofania/Uwagi</th><th>Podpis</th></tr></thead><tbody>${Array.from({length:12},()=>`<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td></tr>`).join('')}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    }
+    if (group.type === 'K06') {
+      const rows = docs.map(d=>`<tr><td>${escapeHtml(d.document_date||'')}</td><td>${escapeHtml(d.product_name||'')}</td><td>${escapeHtml(d.lot_no||'')}</td><td>${normalizePN(d.data?.barwa||'P')}</td><td>${normalizePN(d.data?.zapach||'P')}</td><td>${normalizePN(d.data?.twardosc||'P')}</td><td>${normalizePN(d.data?.plesn||'P')}</td><td>${escapeHtml(d.data?.podpis_kontrolujacego||'')}</td></tr>`).join('') + Array.from({length:Math.max(0,12-docs.length)},()=>`<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+      return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head><body>${head('Karta K06 - Karta oceny jakości gotowego produktu','I/2024')}<table><thead><tr><th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa (P/N)*</th><th>Zapach (P/N)*</th><th>Twardość (jabłko) (P/N)*</th><th>Brak oznak pleśni (P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    }
+    if (group.type === 'K07') {
+      const rows = docs.map(d=>`<tr><td>${escapeHtml(d.document_date||'')}</td><td>${escapeHtml(d.data?.godzina||'przed / po')}</td><td>${escapeHtml(d.product_name||'')}</td><td>${escapeHtml(d.lot_no||'')}</td><td>${normalizePN(d.data?.stan_sita||'P')}</td><td>${escapeHtml(d.data?.podpis_kontrolujacego||'')}</td></tr>`).join('') + Array.from({length:Math.max(0,12-docs.length)},()=>`<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+      return `<!doctype html><html><head><meta charset="utf-8"><style>${baseStyle}</style></head><body>${head('Karta K07 - Karta kontroli stanu sita na linii do przerobu na pulpę (CCP1)','I/2024')}<table><thead><tr><th>Data</th><th>Godzina (kontrolę należy przeprowadzać przed i po zakończeniu procesu rozdrabniania)</th><th>Rodzaj przerabianego surowca</th><th>Produkowany numer partii</th><th>Stan sita (P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    }
+    return buildK02MonthlyHtml(group)
   }
 
   function printHaccpGroup(group) {
     if (!group) return
-    const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : buildK02MonthlyHtml(group)
+    const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : (group.type === 'K02' ? buildK02MonthlyHtml(group) : buildOtherMonthlyHtml(group))
     printHtmlInIframe(html)
   }
 
@@ -781,23 +906,10 @@ function App() {
       rows.push(['Lp.', 'Data dostawy', 'Dane dostawcy / nr faktury', 'Stan higieniczny pojazdu (P/N)', 'Ilość', 'Wybarwienie/zapach/brak uszkodzeń (P/N)', 'Brak zgnilizny/zapleśnienia/zagrzybienia (P/N)', 'Podpis przyjmującego'])
       docs.forEach((doc, i) => rows.push([i+1, doc.document_date || '', shortSupplier(doc), normalizePN(doc.data?.stan_higieniczny_pojazdu), Number(doc.qty || 0), normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen), normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia), doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '']))
     } else if (group.type === 'K02') {
-      const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
-      const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-      rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.\n24-335 ŁAZISKA, KOLONIA ŁAZISKA 30\nNIP: 7171839598', 'Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', 'Rok:', year])
-      rows.push(['', '- Temp. w chłodniach docelowo:\n2-3°C (±1°C) – GRUPA I i II (jabłka, gruszki, truskawki, wiśnie, porzeczki czarne i czerwone, aronie)\n0-1°C – GRUPA III (maliny, porzeczki czarne i czerwone)', '', '', 'Miesiąc:', month])
-      rows.push(['Data', 'Godzina', 'Temperatura\nw chłodni\nsurowca\nnr 1 [°C]', 'Temperatura\nw chłodni\nsurowca\nnr 2 [°C]', 'Podpis osoby\nkontrolującej', 'Uwagi\n(P/N)*'])
-      docs.forEach(baseDoc => {
-        const doc = getLiveK02Doc(baseDoc)
-        rows.push([
-          doc.document_date || '',
-          k02FieldValue(doc, 'godzina', '09:15'),
-          k02FieldValue(doc, 'temperatura_chlodnia_1', ''),
-          k02FieldValue(doc, 'temperatura_chlodnia_2', ''),
-          k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || '',
-          normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
-        ])
-      })
-      while (rows.length < 19) rows.push(['', '', '', '', '', ''])
+      rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
+      rows.push(['Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', '', '', `Okres: ${periodLabel(group)}`])
+      rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
+      docs.forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina || '09:15', doc.data?.temperatura_chlodnia_1 || '2', doc.data?.temperatura_chlodnia_2 || '2', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -806,17 +918,7 @@ function App() {
     }
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.aoa_to_sheet(rows)
-    if (group.type === 'K02') {
-      ws['!merges'] = [
-        { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } },
-        { s: { r: 0, c: 1 }, e: { r: 0, c: 3 } },
-        { s: { r: 1, c: 1 }, e: { r: 1, c: 3 } }
-      ]
-      ws['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 17 }, { wch: 17 }, { wch: 26 }, { wch: 22 }]
-      ws['!rows'] = [{ hpt: 70 }, { hpt: 78 }, { hpt: 58 }]
-    } else {
-      ws['!cols'] = rows[rows.length-1]?.map(() => ({ wch: 22 })) || []
-    }
+    ws['!cols'] = rows[rows.length-1]?.map(() => ({ wch: 22 })) || []
     XLSX.utils.book_append_sheet(wb, ws, group.type)
     XLSX.writeFile(wb, `${group.type}_${group.product || group.chamber || 'kartoteka'}_${periodLabel(group)}.xlsx`)
   }
@@ -868,28 +970,19 @@ function App() {
     }
   }
 
-  function setEmployeeForVisibleK02Group(group, employeeName, onlyEmpty = false) {
+  function setEmployeeForSyntheticGroup(group, employeeName, onlyEmpty = false) {
     if (!group || !employeeName) return
-    const docs = (group.docs || []).filter(d => {
-      const current = k02FieldValue(getLiveK02Doc(d), 'podpis_kontrolujacego', '') || d.signed_by_operator || ''
-      return !onlyEmpty || !current
-    })
-    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów do uzupełnienia w K02.' : 'Brak pozycji K02 do zmiany podpisu.'); return }
-    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} pozycji w tej kartotece K02?`)
-    if (!confirmed) return
-    const ids = new Set(docs.map(d => d.id))
+    const docs = (group.docs || []).filter(d => !onlyEmpty || !syntheticOverride(d, 'podpis_kontrolujacego', syntheticOverride(d, 'podpis', '')))
+    if (!docs.length) { setMessage('Brak pustych podpisów do uzupełnienia.'); return }
     setK02Overrides(prev => {
       const next = { ...prev }
       docs.forEach(d => {
-        next[d.id] = { ...(next[d.id] || {}), podpis_kontrolujacego: employeeName }
+        next[d.id] = { ...(next[d.id] || {}), podpis_kontrolujacego: employeeName, podpis: employeeName }
       })
       return next
     })
-    setSelectedHaccpDoc(prev => {
-      if (!prev?.groupPreview || !prev.group?.docs) return prev
-      return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => ids.has(d.id) ? { ...d, data: { ...(d.data || {}), podpis_kontrolujacego: employeeName }, signed_by_operator: employeeName } : d) } }
-    })
-    setMessage(`Ustawiono podpis dla ${docs.length} pozycji K02.`)
+    setSelectedHaccpDoc(prev => prev?.groupPreview ? { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => docs.some(x => x.id === d.id) ? liveSyntheticDoc({ ...d, data: { ...(d.data || {}), podpis_kontrolujacego: employeeName, podpis: employeeName } }) : d) } } : prev)
+    setMessage(`Ustawiono podpis dla ${docs.length} pozycji ${group.type}.`)
   }
 
   function renderGroupPreviewTable(group) {
@@ -942,17 +1035,6 @@ function App() {
     if (group.type === 'K02') {
       const maxRows = Math.max(16, docs.length)
       return <div className="monthly-paper k02-original">
-        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
-          <label>Podpis osoby kontrolującej dla całej kartoteki
-            <select value={defaultK02Employee} onChange={e => setDefaultK02Employee(e.target.value)}>
-              <option value="">Wybierz pracownika</option>
-              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
-            </select>
-          </label>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK02Group(group, defaultK02Employee, false)}>Zastosuj do wszystkich pozycji</button>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK02Group(group, defaultK02Employee, true)}>Uzupełnij tylko puste</button>
-          <span className="hint">Po zastosowaniu można nadal zmienić podpis pojedynczego dnia.</span>
-        </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -986,6 +1068,31 @@ function App() {
         </tbody></table>
         <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C. Pola można zmienić ręcznie przed drukiem/Excel.</p>
       </div>
+    }
+    if (['K03','K04','K04/1','K05','K06','K07'].includes(group.type)) {
+      const signSelect = <div className="no-print employee-signature-row" style={{marginBottom:'10px'}}><label>Podpis dla całej kartoteki <select onChange={e=>e.target.value && setEmployeeForSyntheticGroup(group, e.target.value, false)} defaultValue=""><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></label><button className="secondary" onClick={() => { const val = window.prompt('Wpisz imię i nazwisko pracownika do ustawienia w całej kartotece:') || ''; if (val.trim()) setEmployeeForSyntheticGroup(group, val.trim(), false) }}>Ustaw dla wszystkich</button></div>
+      if (group.type === 'K03') {
+        const doc = liveSyntheticDoc(docs[0] || { data:{rawRows:[],salesRows:[]} })
+        const rawRows = doc.data?.rawRows || []
+        const salesRows = doc.data?.salesRows || []
+        return <div className="monthly-paper k03-original">{signSelect}<table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598<br/>Wersja II/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr></tbody></table><table className="k03-top"><tbody><tr><td>Nazwa produktu: {doc.product_name}</td><td>Data produkcji: {doc.document_date}</td></tr><tr><td>Nadany numer partii: {doc.lot_no}</td><td>Wielkość partii (produktu gotowego): {Number(doc.qty||0).toLocaleString('pl-PL')}</td></tr></tbody></table><table className="k03-table"><thead><tr><th colSpan="5">Dane dotyczące dostaw surowców<br/>składających się na partię</th><th colSpan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th>Lp.</th><th>Nr faktury</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>{Array.from({length:10}).map((_,i)=>{const l=rawRows[i]||{}; const r=salesRows[i]||{}; return <tr key={i}><td>{i+1}</td><td>{l.invoice||''}</td><td>{l.date||''}</td><td>{l.supplier||''}</td><td>{l.qty?Number(l.qty).toLocaleString('pl-PL'):''}</td><td>{i+1}</td><td>{r.invoice||''}</td><td>{r.date||''}</td><td>{r.receiver||''}</td><td>{r.qty?Number(r.qty).toLocaleString('pl-PL'):''}</td><td><select className="mini-select no-print" value={syntheticOverride(doc,'podpis_kontrolujacego','')} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{syntheticOverride(doc,'podpis_kontrolujacego','')}</span></td></tr>})}<tr><td colSpan="8"></td><td colSpan="2" className="sum">Suma sprzedana:</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td></tr></tbody></table></div>
+      }
+      if (group.type === 'K04') {
+        const maxRows = Math.max(16, docs.length)
+        return <div className="monthly-paper k04-original">{signSelect}<table className="k02-head"><tbody><tr><td className="k02-company" rowSpan="2"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td className="k02-title"><b>Karta K04 - Karta kontroli parametrów magazynowania produktów gotowych (CP3)</b></td><td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><br/>Wersja I/2025</td></tr><tr><td className="k02-note">- Temp. w chłodniach/zbiornikach na pulpę docelowo:<br/>2-3°C (±1°C) – GRUPA I (jabłka, gruszki), -4 - -2°C (±1°C) – GRUPA I (truskawki),<br/>0-1°C – GRUPA III (maliny, porzeczki czarne i czerwone)</td><td></td></tr></tbody></table><table className="k04-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura w chłodni produktu gotowego nr 1 [°C]</th><th>Temperatura w chłodni produktu gotowego nr 2 [°C]</th><th>Zbiornik na pulpę nr 1 [°C]</th><th>Zbiornik na pulpę nr 2 [°C]</th><th>Zbiornik na pulpę nr 3 [°C]</th><th>Zbiornik na pulpę nr 4 [°C]</th><th>Podpis osoby kontrolującej</th><th>Uwagi (P/N)*</th></tr></thead><tbody>{Array.from({length:maxRows}).map((_,i)=>{const doc=liveSyntheticDoc(docs[i]||{}); if(!docs[i]) return <tr className="blank-row" key={i}>{Array.from({length:10}).map((_,j)=><td key={j}></td>)}</tr>; return <tr key={doc.id}><td>{doc.document_date}</td>{['godzina','temp_cp3_1','temp_cp3_2','zbiornik_1','zbiornik_2','zbiornik_3','zbiornik_4'].map(f=><td key={f}><input className="cell-input no-print" value={syntheticOverride(doc,f,'')} onChange={e=>setK02Override(doc,f,e.target.value)} /><span className="print-only">{syntheticOverride(doc,f,'')}</span></td>)}<td><select className="mini-select no-print" value={syntheticOverride(doc,'podpis_kontrolujacego','')} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{syntheticOverride(doc,'podpis_kontrolujacego','')}</span></td><td><select className="mini-select no-print" value={normalizePN(syntheticOverride(doc,'uwagi','P'))} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(syntheticOverride(doc,'uwagi','P'))}</span></td></tr>})}</tbody></table></div>
+      }
+      if (group.type === 'K04/1' || group.type === 'K05') {
+        const isK05 = group.type === 'K05'
+        return <div className="monthly-paper manual-form">{signSelect}<table className="k02-head"><tbody><tr><td className="k02-company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="k02-title"><b>{isK05 ? 'Karta K05 - Karta towarów wycofanych' : 'Karta K04/1 - Karta kontroli parametrów magazynowania podczas transportu'}</b>{!isK05 && <><br/><br/>- Temperatura docelowa: 2-3°C (±1°C)<br/>- Dane środka transportu (nr rej.) ...................</>}</td><td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b></td></tr></tbody></table><table className="paper-table"><thead><tr>{isK05 ? <><th>Data</th><th>Nazwa surowca/produktu</th><th>Ilość</th><th>Przyczyna wycofania/Uwagi</th><th>Podpis</th></> : <><th>Data transportu/magazynowania w samochodzie</th><th>Temperatura wewnątrz środka transportu [°C]</th><th>Podpis kontrolującego</th><th>Uwagi (P/N)*</th></>}</tr></thead><tbody>{Array.from({length:12}).map((_,i)=><tr className="blank-row" key={i}>{Array.from({length:isK05?5:4}).map((_,j)=><td key={j}></td>)}</tr>)}</tbody></table></div>
+      }
+      if (group.type === 'K06') {
+        const maxRows = Math.max(12, docs.length)
+        return <div className="monthly-paper k06-original">{signSelect}<table className="k02-head"><tbody><tr><td className="k02-company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="k02-title"><b>Karta K06 - Karta oceny jakości gotowego produktu</b></td><td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/>Strona: 1 z 1</td></tr></tbody></table><table className="paper-table"><thead><tr><th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa (P/N)*</th><th>Zapach (P/N)*</th><th>Twardość (jabłko) (P/N)*</th><th>Brak oznak pleśni (P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>{Array.from({length:maxRows}).map((_,i)=>{const doc=liveSyntheticDoc(docs[i]||{}); if(!docs[i]) return <tr className="blank-row" key={i}>{Array.from({length:8}).map((_,j)=><td key={j}></td>)}</tr>; return <tr key={doc.id}><td>{doc.document_date}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td>{['barwa','zapach','twardosc','plesn'].map(f=><td key={f}><select className="mini-select no-print" value={normalizePN(syntheticOverride(doc,f,'P'))} onChange={e=>setK02Override(doc,f,e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(syntheticOverride(doc,f,'P'))}</span></td>)}<td><select className="mini-select no-print" value={syntheticOverride(doc,'podpis_kontrolujacego','')} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{syntheticOverride(doc,'podpis_kontrolujacego','')}</span></td></tr>})}</tbody></table></div>
+      }
+      if (group.type === 'K07') {
+        const maxRows = Math.max(12, docs.length)
+        return <div className="monthly-paper k07-original">{signSelect}<table className="k02-head"><tbody><tr><td className="k02-company"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="k02-title"><b>Karta K07 - Karta kontroli stanu sita na linii do przerobu na pulpę (CCP1)</b></td><td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/>Strona: 1 z 1</td></tr></tbody></table><table className="paper-table"><thead><tr><th>Data</th><th>Godzina (kontrolę należy przeprowadzać przed i po zakończeniu procesu rozdrabniania)</th><th>Rodzaj przerabianego surowca</th><th>Produkowany numer partii</th><th>Stan sita (P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>{Array.from({length:maxRows}).map((_,i)=>{const doc=liveSyntheticDoc(docs[i]||{}); if(!docs[i]) return <tr className="blank-row" key={i}>{Array.from({length:6}).map((_,j)=><td key={j}></td>)}</tr>; return <tr key={doc.id}><td>{doc.document_date}</td><td><input className="cell-input no-print" value={syntheticOverride(doc,'godzina','przed / po')} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{syntheticOverride(doc,'godzina','przed / po')}</span></td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td><select className="mini-select no-print" value={normalizePN(syntheticOverride(doc,'stan_sita','P'))} onChange={e=>setK02Override(doc,'stan_sita',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{normalizePN(syntheticOverride(doc,'stan_sita','P'))}</span></td><td><select className="mini-select no-print" value={syntheticOverride(doc,'podpis_kontrolujacego','')} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{syntheticOverride(doc,'podpis_kontrolujacego','')}</span></td></tr>})}</tbody></table></div>
+      }
     }
     return <div className="monthly-paper"><div className="paper-head"><div><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.</b><br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</div><div><b>{group.type} – kartoteka miesięczna</b><br/>Okres: {periodLabel(group)}<br/>Komora: {group.chamber || '-'}</div></div><table className="paper-table"><thead><tr><th>Lp.</th><th>Data</th><th>Godzina</th><th>Komora</th><th>Produkt</th><th>Partia</th><th>Ilość</th><th>Temperatura</th><th>P/N</th><th>Uwagi</th><th>Podpis</th></tr></thead><tbody>{docs.map((doc,i)=><tr key={doc.id}><td>{i+1}</td><td>{doc.document_date}</td><td>{doc.data?.godzina || ''}</td><td>{doc.chamber_code}</td><td>{doc.product_name}</td><td>{doc.lot_no}</td><td>{Number(doc.qty||0).toLocaleString('pl-PL')}</td><td>{doc.data?.temperatura || ''} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'temperatura','Temperatura',doc.data?.temperatura||'')}>Edytuj</button></td><td className={normalizePN(doc.data?.parametry_magazynowania)==='N'?'pn-n':''}>{normalizePN(doc.data?.parametry_magazynowania || 'P')} <button className="mini edit no-print" onClick={()=>editHaccpRowField(doc,'parametry_magazynowania','Ocena parametrów magazynowania', normalizePN(doc.data?.parametry_magazynowania || 'P'), {pn:true})}>Edytuj</button></td><td>{doc.data?.uwagi || ''}</td><td><select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span></td></tr>)}</tbody></table></div>
   }
@@ -1353,10 +1460,6 @@ function App() {
       </div>
     </div>
   }
-
-  useEffect(() => {
-    try { localStorage.setItem('agromar_k02_overrides', JSON.stringify(k02Overrides || {})) } catch {}
-  }, [k02Overrides])
 
   useEffect(() => {
     if (isSupabaseConfigured) {
@@ -2462,7 +2565,7 @@ async function allocateFifo(operationId, productId, qtyNeeded) {
       <div className="actions"><button className="secondary" onClick={loadHaccpDocs}><RefreshCcw size={16}/> Odśwież kartoteki</button></div>
       {docsFilter === 'K01.1' && renderK011Section()}
       {docsFilter !== 'K01.1' && <>
-      <div className="doc-progress">{['K01','K02','K04','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
+      <div className="doc-progress">{['K01','K02','K03','K04','K04/1','K05','K06','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
       <h3>Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat</h3><p className="hint"><b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</p>
       {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek zbiorczych dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
