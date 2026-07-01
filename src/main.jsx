@@ -206,7 +206,10 @@ function App() {
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
-  const [k02Overrides, setK02Overrides] = useState({})
+  const [defaultK02Employee, setDefaultK02Employee] = useState('')
+  const [k02Overrides, setK02Overrides] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('agromar_k02_overrides') || '{}') } catch { return {} }
+  })
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
   const [auxHalf, setAuxHalf] = useState(new Date().getMonth() < 6 ? '1' : '2')
@@ -738,15 +741,33 @@ function App() {
     const docs = group.docs || []
     const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
     const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
-    const rows = docs.map((doc, i) => `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(doc.data?.godzina || '09:15')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_1 || '2')}</td><td>${escapeHtml(doc.data?.temperatura_chlodnia_2 || '2')}</td><td>${escapeHtml(doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')}</td><td>${normalizePN(doc.data?.uwagi || doc.status || 'P')}</td></tr>`).join('')
+    const rows = docs.map((baseDoc) => {
+      const doc = getLiveK02Doc(baseDoc)
+      const godzina = k02FieldValue(doc, 'godzina', '09:15')
+      const temp1 = k02FieldValue(doc, 'temperatura_chlodnia_1', '')
+      const temp2 = k02FieldValue(doc, 'temperatura_chlodnia_2', '')
+      const podpis = k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || ''
+      const uwagi = normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
+      return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(godzina)}</td><td>${escapeHtml(temp1)}</td><td>${escapeHtml(temp2)}</td><td>${escapeHtml(podpis)}</td><td>${escapeHtml(uwagi)}</td></tr>`
+    }).join('')
     const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
     return `<!doctype html><html><head><meta charset="utf-8"><title>K02 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-size:15pt;font-weight:bold;line-height:1.12}.title{width:44%;font-size:15pt;font-weight:bold;line-height:1.5}.meta{width:25%;font-size:13pt;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:12pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}.date{width:15%}.hour{width:15%}.temp{width:13%}.sign{width:18%}.notes{width:21%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K02 - Karta kontroli parametrów<br>magazynowania surowców (CP2)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}</td></tr><tr><td class="temp-note">- Temp. w chłodniach docelowo:<br>2-3°C (±1°C). – GRUPA I i II (jabłka, gruszki,<br>truskawki, wiśnie, porzeczki czarne i czerwone, aronie)<br>0-1°C – GRUPA III (maliny, porzeczki czarne<br>i czerwone)</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th class="date">Data</th><th class="hour">Godzina</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 1 [°C]</th><th class="temp">Temperatura<br>w chłodni<br>surowca<br>nr 2 [°C]</th><th class="sign">Podpis osoby<br>kontrolującej</th><th class="notes">Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  }
+
+  function printHtmlInIframe(html) {
+    const win = window.open('', '_blank', 'width=1200,height=850')
+    if (!win) {
+      setMessage('Przeglądarka zablokowała okno drukowania. Zezwól na wyskakujące okna dla tej strony.')
+      return
+    }
+    win.document.open()
+    win.document.write(html)
+    win.document.close()
   }
 
   function printHaccpGroup(group) {
     if (!group) return
     const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : buildK02MonthlyHtml(group)
-    // Drukujemy zawartość przez ukryty iframe, a nie przez puste okno. To naprawia białą kartkę w podglądzie druku.
     printHtmlInIframe(html)
   }
 
@@ -760,10 +781,23 @@ function App() {
       rows.push(['Lp.', 'Data dostawy', 'Dane dostawcy / nr faktury', 'Stan higieniczny pojazdu (P/N)', 'Ilość', 'Wybarwienie/zapach/brak uszkodzeń (P/N)', 'Brak zgnilizny/zapleśnienia/zagrzybienia (P/N)', 'Podpis przyjmującego'])
       docs.forEach((doc, i) => rows.push([i+1, doc.document_date || '', shortSupplier(doc), normalizePN(doc.data?.stan_higieniczny_pojazdu), Number(doc.qty || 0), normalizePN(doc.data?.wybarwienie_zapach_brak_uszkodzen), normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia), doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '']))
     } else if (group.type === 'K02') {
-      rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
-      rows.push(['Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', '', '', `Okres: ${periodLabel(group)}`])
-      rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
-      docs.forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina || '09:15', doc.data?.temperatura_chlodnia_1 || '2', doc.data?.temperatura_chlodnia_2 || '2', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
+      const year = (docs[0]?.document_date || group.period || '').slice(0, 4)
+      const month = (docs[0]?.document_date || group.period || '').slice(5, 7)
+      rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.\n24-335 ŁAZISKA, KOLONIA ŁAZISKA 30\nNIP: 7171839598', 'Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', 'Rok:', year])
+      rows.push(['', '- Temp. w chłodniach docelowo:\n2-3°C (±1°C) – GRUPA I i II (jabłka, gruszki, truskawki, wiśnie, porzeczki czarne i czerwone, aronie)\n0-1°C – GRUPA III (maliny, porzeczki czarne i czerwone)', '', '', 'Miesiąc:', month])
+      rows.push(['Data', 'Godzina', 'Temperatura\nw chłodni\nsurowca\nnr 1 [°C]', 'Temperatura\nw chłodni\nsurowca\nnr 2 [°C]', 'Podpis osoby\nkontrolującej', 'Uwagi\n(P/N)*'])
+      docs.forEach(baseDoc => {
+        const doc = getLiveK02Doc(baseDoc)
+        rows.push([
+          doc.document_date || '',
+          k02FieldValue(doc, 'godzina', '09:15'),
+          k02FieldValue(doc, 'temperatura_chlodnia_1', ''),
+          k02FieldValue(doc, 'temperatura_chlodnia_2', ''),
+          k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || '',
+          normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
+        ])
+      })
+      while (rows.length < 19) rows.push(['', '', '', '', '', ''])
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -772,7 +806,17 @@ function App() {
     }
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.aoa_to_sheet(rows)
-    ws['!cols'] = rows[rows.length-1]?.map(() => ({ wch: 22 })) || []
+    if (group.type === 'K02') {
+      ws['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } },
+        { s: { r: 0, c: 1 }, e: { r: 0, c: 3 } },
+        { s: { r: 1, c: 1 }, e: { r: 1, c: 3 } }
+      ]
+      ws['!cols'] = [{ wch: 18 }, { wch: 14 }, { wch: 17 }, { wch: 17 }, { wch: 26 }, { wch: 22 }]
+      ws['!rows'] = [{ hpt: 70 }, { hpt: 78 }, { hpt: 58 }]
+    } else {
+      ws['!cols'] = rows[rows.length-1]?.map(() => ({ wch: 22 })) || []
+    }
     XLSX.utils.book_append_sheet(wb, ws, group.type)
     XLSX.writeFile(wb, `${group.type}_${group.product || group.chamber || 'kartoteka'}_${periodLabel(group)}.xlsx`)
   }
@@ -822,6 +866,30 @@ function App() {
     } catch (err) {
       setMessage(`Błąd zbiorczego ustawiania podpisu: ${err.message}`)
     }
+  }
+
+  function setEmployeeForVisibleK02Group(group, employeeName, onlyEmpty = false) {
+    if (!group || !employeeName) return
+    const docs = (group.docs || []).filter(d => {
+      const current = k02FieldValue(getLiveK02Doc(d), 'podpis_kontrolujacego', '') || d.signed_by_operator || ''
+      return !onlyEmpty || !current
+    })
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów do uzupełnienia w K02.' : 'Brak pozycji K02 do zmiany podpisu.'); return }
+    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} pozycji w tej kartotece K02?`)
+    if (!confirmed) return
+    const ids = new Set(docs.map(d => d.id))
+    setK02Overrides(prev => {
+      const next = { ...prev }
+      docs.forEach(d => {
+        next[d.id] = { ...(next[d.id] || {}), podpis_kontrolujacego: employeeName }
+      })
+      return next
+    })
+    setSelectedHaccpDoc(prev => {
+      if (!prev?.groupPreview || !prev.group?.docs) return prev
+      return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => ids.has(d.id) ? { ...d, data: { ...(d.data || {}), podpis_kontrolujacego: employeeName }, signed_by_operator: employeeName } : d) } }
+    })
+    setMessage(`Ustawiono podpis dla ${docs.length} pozycji K02.`)
   }
 
   function renderGroupPreviewTable(group) {
@@ -874,6 +942,17 @@ function App() {
     if (group.type === 'K02') {
       const maxRows = Math.max(16, docs.length)
       return <div className="monthly-paper k02-original">
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis osoby kontrolującej dla całej kartoteki
+            <select value={defaultK02Employee} onChange={e => setDefaultK02Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK02Group(group, defaultK02Employee, false)}>Zastosuj do wszystkich pozycji</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK02Group(group, defaultK02Employee, true)}>Uzupełnij tylko puste</button>
+          <span className="hint">Po zastosowaniu można nadal zmienić podpis pojedynczego dnia.</span>
+        </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -1274,6 +1353,10 @@ function App() {
       </div>
     </div>
   }
+
+  useEffect(() => {
+    try { localStorage.setItem('agromar_k02_overrides', JSON.stringify(k02Overrides || {})) } catch {}
+  }, [k02Overrides])
 
   useEffect(() => {
     if (isSupabaseConfigured) {
