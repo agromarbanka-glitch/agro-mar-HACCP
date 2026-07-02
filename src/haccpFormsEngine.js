@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.1'
+export const HACCP_FORMS_VERSION = '1.2'
 
 function normalizeText(value) {
   return String(value || '')
@@ -49,6 +49,41 @@ function isSaleOperation(op) {
   if (!op) return false
   const type = normalizeText(op.operation_type)
   return type === 'sprzedaz' || type === 'sprzedaz_bez_produkcji'
+}
+
+/** Jabłko przemysłowe – bez magazynowania CP3, prosto do sprzedaży (K04.1). */
+export function isIndustrialApple(productName = '', productGroup = '') {
+  const t = normalizeText(productName)
+  const g = normalizeText(productGroup)
+  if (t.includes('obier')) return false
+  if (g === 'jab_obier') return false
+  return g === 'jab_przem' || (t.includes('jabl') && (t.includes('przem') || t.includes('przemysl')))
+}
+
+/** Jabłko na obierkę – magazynowane w CP3. */
+export function isPeelingApple(productName = '', productGroup = '') {
+  const t = normalizeText(productName)
+  const g = normalizeText(productGroup)
+  return g === 'jab_obier' || t.includes('obier')
+}
+
+/** Produkty bez magazynowania CP3 – transport bezpośredni (K04.1). */
+export function isDirectToSaleProduct(productName = '', productGroup = '') {
+  return isIndustrialApple(productName, productGroup)
+}
+
+function isFinishedGoodLot(lot, prodOpIds) {
+  const productName = lot.products?.name || lot.product_name || ''
+  const group = lot.product_group || productGroupForName(productName)
+  if (isDirectToSaleProduct(productName, group)) return false
+  if (normalizeText(productName).includes('pulpa')) return false
+  const chamber = lot.chamber
+  if (isCcp1Chamber(chamber)) return false
+  if (chamber?.control_point === 'CP2') return false
+  if (isCp3Chamber(chamber)) return true
+  if (lot.source_operation_id && prodOpIds.has(lot.source_operation_id)) return true
+  const finishedGroups = new Set(['malina', 'truskawka', 'wisnia', 'porzeczka_czarna', 'porzeczka_czerwona', 'aronia', 'sliwka', 'jab_obier', 'gruszka'])
+  return finishedGroups.has(group)
 }
 
 function isCp3Chamber(chamber) {
@@ -127,10 +162,10 @@ export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}) {
 
   for (const lot of lots) {
     const chamber = lot.chamber || null
-    if (!isCp3Chamber(chamber)) continue
-
     const productName = lot.products?.name || lot.product_name || ''
     const productGroup = lot.product_group || productGroupForName(productName)
+    if (isDirectToSaleProduct(productName, productGroup)) continue
+    if (!isCp3Chamber(chamber)) continue
     const chamberCode = chamber.code || 'CP3'
     const start = String(lot.production_date || lot.created_at || '').slice(0, 10)
     if (!start) continue
@@ -264,45 +299,64 @@ export function buildSyntheticK07Docs(allDocs, overrides = {}) {
 }
 
 /**
- * K06 – ocena jakości partii wyjściowej z produkcji (CP3, nie pulpa).
+ * K06 – ocena jakości towaru gotowego (CP3 / produkcja). Bez jabłka przemysłowego.
  */
 export function buildSyntheticK06DocsFromTrace(trace = {}, haccpDocs = []) {
   const { lots = [], operations = [] } = trace
   const prodOpIds = new Set(operations.filter(o => normalizeText(o.operation_type) === 'produkcja').map(o => o.id))
   const existingLotIds = new Set((haccpDocs || []).filter(d => d.document_type === 'K06' && d.lot_id).map(d => d.lot_id))
+  const existingLotNos = new Set((haccpDocs || []).filter(d => d.document_type === 'K06' && d.lot_no).map(d => d.lot_no))
 
   const result = []
   for (const lot of lots) {
-    if (!prodOpIds.has(lot.source_operation_id)) continue
-    const chamber = lot.chamber
-    if (isCcp1Chamber(chamber) || normalizeText(lot.products?.name).includes('pulpa')) continue
+    if (!isFinishedGoodLot(lot, prodOpIds)) continue
     if (existingLotIds.has(lot.id)) continue
+    if (lot.lot_no && existingLotNos.has(lot.lot_no)) continue
 
+    const productName = lot.products?.name || lot.product_name || ''
     result.push({
       id: `K06-syn-${lot.id}`,
       synthetic: true,
       document_type: 'K06',
       document_date: String(lot.production_date || lot.created_at || '').slice(0, 10),
-      product_name: lot.products?.name || '',
+      product_name: productName,
       lot_no: lot.lot_no || '',
       lot_id: lot.id,
       document_no: `K06/${lot.lot_no || lot.id}`,
-      chamber_code: chamber?.code || 'CP3',
-      qty: Number(lot.initial_qty || 0),
+      chamber_code: lot.chamber?.code || 'CP3',
+      qty: Number(lot.initial_qty || lot.remaining_qty || 0),
       status: 'P',
       data: {
         wyglad_zapach: 'P',
         smak: 'P',
         barwa: 'P',
         uwagi: '',
-        podpis: ''
+        podpis: '',
+        auto_source: lot.source_operation_id && prodOpIds.has(lot.source_operation_id) ? 'produkcja' : 'magazyn_cp3'
       },
       signed_by_operator: '',
       document_version: 'I/2024',
       created_at: lot.created_at || lot.production_date
     })
   }
-  return result
+  return result.sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)))
+}
+
+export function buildK06InsertPayload(doc) {
+  return {
+    document_type: 'K06',
+    lot_id: doc.lot_id || null,
+    document_date: doc.document_date,
+    product_name: doc.product_name,
+    lot_no: doc.lot_no,
+    document_no: doc.document_no,
+    chamber_code: doc.chamber_code || 'CP3',
+    qty: doc.qty || 0,
+    status: doc.status || 'P',
+    data: doc.data || { wyglad_zapach: 'P', smak: 'P', barwa: 'P' },
+    signed_by_operator: doc.signed_by_operator || null,
+    document_version: 'I/2024'
+  }
 }
 
 export function normalizePn(value) {
@@ -321,7 +375,7 @@ function k04TempNote(productName = '', chamberCode = '') {
   if (normalizeText(chamberCode).startsWith('ccp')) {
     return '- Temp. w beczkach CCP1 (pulpa): ok. -18°C (±2°C).'
   }
-  return `- Temp. CP3 wg asortymentu: jabłka/gruszki ${k04TempLabel('jabłko')}, truskawki ${k04TempLabel('truskawka')}, maliny/porzeczki ${k04TempLabel('malina')}.`
+  return `- Temp. CP3: jabłko na obierkę/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C. Jabłko przemysłowe nie jest magazynowane – jedzie prosto do sprzedaży (K04.1).`
 }
 
 export function buildK04MonthlyHtml(group, escapeHtml) {

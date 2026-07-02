@@ -5,7 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -72,6 +72,7 @@ function targetControlPointForProduct(productName) {
 }
 
 function targetControlPointForProductionOutput(productName) {
+  if (isDirectToSaleProduct(productName)) return null
   const text = normalizeText(productName)
   if (text.includes('pulpa')) return 'CCP1'
   return 'CP3'
@@ -378,10 +379,13 @@ function App() {
   const syntheticK07Docs = useMemo(() => buildSyntheticK07DocsFromTrace(formsTraceContext, k07Overrides), [formsTraceContext, k07Overrides])
   const syntheticK06Docs = useMemo(() => buildSyntheticK06DocsFromTrace(formsTraceContext, haccpDocs), [formsTraceContext, haccpDocs])
   const mergedK06Docs = useMemo(() => {
-    const manual = (haccpDocs || []).filter(d => d.document_type === 'K06')
-    const synIds = new Set(syntheticK06Docs.map(d => d.lot_id).filter(Boolean))
-    const extra = manual.filter(d => !d.lot_id || !synIds.has(d.lot_id))
-    return [...syntheticK06Docs, ...extra]
+    const fromDb = (haccpDocs || []).filter(d => d.document_type === 'K06')
+    const dbLotIds = new Set(fromDb.map(d => d.lot_id).filter(Boolean))
+    const extraSynthetic = syntheticK06Docs.filter(d => d.lot_id && !dbLotIds.has(d.lot_id))
+    return [...fromDb, ...extraSynthetic].sort((a, b) =>
+      String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+      String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
+    )
   }, [haccpDocs, syntheticK06Docs])
 
   const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
@@ -917,6 +921,13 @@ function App() {
 
   async function editHaccpDataField(doc, field, label, currentValue, options = {}) {
     if (!supabase || !doc) return
+    let workingDoc = doc
+    if (doc.synthetic && doc.lot_id && doc.document_type === 'K06') {
+      const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(doc)).select('id').single()
+      if (error) { setMessage(`K06: nie udało się zapisać wpisu auto: ${error.message}`); return }
+      workingDoc = { ...doc, id: inserted.id, synthetic: false }
+      await loadHaccpDocs()
+    }
     let nextValue
     if (options.pn) {
       const current = normalizePN(currentValue)
@@ -933,8 +944,8 @@ function App() {
           setMessage('Nie zapisano: przy N uwaga jest obowiązkowa.')
           return
         }
-        const nextData = { ...(doc.data || {}), [field]: nextValue, uwagi: reason }
-        await updateHaccpDocumentField(doc, field, label, currentValue, nextValue, nextData, reason)
+        const nextData = { ...(workingDoc.data || {}), [field]: nextValue, uwagi: reason }
+        await updateHaccpDocumentField(workingDoc, field, label, currentValue, nextValue, nextData, reason)
         return
       }
     } else {
@@ -942,8 +953,8 @@ function App() {
       if (nextValue === null) return
     }
     const reason = options.directValue ? 'Zmiana z poziomu kartoteki' : (window.prompt('Powód zmiany / korekty:', 'Korekta zapisu') || 'Korekta zapisu')
-    const nextData = { ...(doc.data || {}), [field]: nextValue }
-    await updateHaccpDocumentField(doc, field, label, currentValue, nextValue, nextData, reason)
+    const nextData = { ...(workingDoc.data || {}), [field]: nextValue }
+    await updateHaccpDocumentField(workingDoc, field, label, currentValue, nextValue, nextData, reason)
   }
 
   async function updateHaccpDocumentField(doc, field, label, oldValue, newValue, nextData, reason) {
@@ -1316,7 +1327,7 @@ function App() {
             <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Komora:</b> {chamber}<br/><b>Produkt:</b> {productLabel}</td>
           </tr>
           <tr>
-            <td className="k02-note">- Temp. docelowa: jabłka/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C.<br/>Pomiar automatyczny codziennie o 9:15 od produkcji do dnia WZ.</td>
+            <td className="k02-note">- Temp. CP3: jabłko na obierkę/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C.<br/><b>Jabłko przemysłowe nie jest magazynowane</b> – prosto do sprzedaży (K04.1).</td>
             <td className="k02-version">Wersja I/2024</td>
           </tr>
         </tbody></table>
@@ -1341,7 +1352,7 @@ function App() {
           })}
         </tbody></table>
         {docs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: wykryto różne asortymenty w tej komorze tego dnia – sprawdź przypisanie partii w Magazynie.</div>}
-        <p className="hint no-print">K04 generuje się z magazynu CP3: jedna kartoteka = komora + asortyment. Towar ładowany prosto na samochód (bez CP3) → uzupełnij ręcznie kartę <b>K04.1</b>.</p>
+        <p className="hint no-print">K04: tylko partie w komorze CP3. <b>Jabłko przemysłowe</b> nie idzie do CP3 – użyj <b>K04.1</b>. <b>Jabłko na obierkę</b> jest magazynowane.</p>
       </div>
     }
 
@@ -1621,35 +1632,105 @@ function App() {
     return <label key={f.key}>{f.label}<input value={value} onChange={e => setManualHaccpForm(prev => ({ ...prev, [f.key]: e.target.value }))} /></label>
   }
 
+  function printManualHaccpPeriod(type, docs) {
+    const cfg = MANUAL_HACCP_FORMS[type]
+    if (!cfg || !docs.length) { setMessage('Brak wpisów do wydruku.'); return }
+    const period = String(docs[0]?.document_date || haccpMonth).slice(0, 7)
+    printHtmlInIframe(buildManualMonthlyHtml({ type, period, docs }, escapeHtml, cfg))
+  }
+
+  function exportManualHaccpPeriodExcel(type, docs) {
+    const cfg = MANUAL_HACCP_FORMS[type]
+    if (!cfg || !docs.length) { setMessage('Brak wpisów do Excel.'); return }
+    const period = String(docs[0]?.document_date || haccpMonth).slice(0, 7)
+    const rows = buildManualExcelRows({ type, period, docs }, cfg)
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.aoa_to_sheet(rows)
+    ws['!cols'] = rows[rows.length - 1]?.map(() => ({ wch: 18 })) || []
+    XLSX.utils.book_append_sheet(wb, ws, type)
+    XLSX.writeFile(wb, `${type}_${period}.xlsx`)
+  }
+
+  function renderManualPaperPreview(type, periodDocs) {
+    const cfg = MANUAL_HACCP_FORMS[type]
+    if (!cfg) return null
+    const period = String(periodDocs[0]?.document_date || haccpMonth).slice(0, 7)
+    const year = period.slice(0, 4)
+    const month = period.slice(5, 7)
+    const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa'])
+    const pnKeyMap = { wyglad: 'wyglad_zapach', powod: 'powod_wycofania', dzialanie: 'dzialanie' }
+    const maxRows = Math.max(type === 'K06' ? periodDocs.length : 12, periodDocs.length)
+    const blanks = Math.max(0, maxRows - periodDocs.length)
+    return <>
+      <div className="actions no-print">
+        <button className="secondary" onClick={() => printManualHaccpPeriod(type, periodDocs)}><Printer size={16}/> Druk/PDF – {type}</button>
+        <button className="secondary" onClick={() => exportManualHaccpPeriodExcel(type, periodDocs)}>Pobierz Excel</button>
+      </div>
+      <h3>Podgląd kartoteki {type} – {year}-{month} ({periodDocs.length} wpisów)</h3>
+      <div className="k011-original haccp-paper">
+        <table className="k011-head"><tbody><tr>
+          <td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598<br/>Wersja I/2024</b></td>
+          <td className="k011-title"><b>{cfg.title}</b></td>
+          <td className="k011-meta"><b>Rok:</b> {year}<br/><b>Miesiąc:</b> {month}</td>
+        </tr></tbody></table>
+        <table className="k011-table"><thead><tr>
+          {cfg.columns.map(c => <th key={c.key}>{c.label}</th>)}
+          <th className="no-print actions-col">Akcje</th>
+        </tr></thead><tbody>
+          {periodDocs.map((doc, i) => <tr key={doc.id || `row-${i}`}>
+            {cfg.columns.map(c => {
+              if (c.key === 'lp') return <td key={c.key}>{i + 1}</td>
+              const dataKey = pnKeyMap[c.key] || (c.key === 'temperatura_transport' ? 'temperatura_transport' : c.key === 'podpis' ? null : c.key)
+              if (dataKey && pnFields.has(dataKey)) {
+                const val = formNormalizePn(doc.data?.[dataKey] || 'P')
+                return <td key={c.key} className={val === 'N' ? 'pn-n' : ''}>
+                  <select className="mini-select no-print" value={val} onChange={e => editHaccpRowField(doc, dataKey, c.label, e.target.value, { directValue: e.target.value, pn: true })}><option value="P">P</option><option value="N">N</option></select>
+                  <span className="print-only">{val}</span>
+                </td>
+              }
+              if (c.key === 'podpis') {
+                return <td key={c.key}>
+                  <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => setDocumentEmployeeFromGroup(doc, e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                  <span className="print-only">{doc.signed_by_operator || ''}</span>
+                </td>
+              }
+              return <td key={c.key} className={c.key === 'product_name' || c.key === 'powod' ? 'left' : ''}>{c.value(doc, i)}</td>
+            })}
+            <td className="no-print row-actions">
+              {!doc.synthetic && <button className="mini secondary" onClick={() => editManualHaccpEntry(doc)}>Edytuj</button>}
+              {!doc.lot_id && !doc.synthetic && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
+              {doc.synthetic && <span className="hint">auto</span>}
+            </td>
+          </tr>)}
+          {Array.from({ length: blanks }).map((_, i) => <tr key={`blank-${i}`} className="blank-row">
+            {cfg.columns.map(c => <td key={c.key}></td>)}
+            <td className="no-print"></td>
+          </tr>)}
+        </tbody></table>
+      </div>
+    </>
+  }
+
   function renderManualHaccpEntrySection() {
     const type = docsFilter
     const cfg = MANUAL_HACCP_FORMS[type]
     if (!cfg) return null
     const periodDocs = haccpPeriodDocs.filter(d => d.document_type === type)
+    const autoCount = periodDocs.filter(d => d.synthetic || d.data?.auto_source).length
     return <>
       <div className="card inner-card no-print">
         <h3>{manualHaccpForm.id ? `Edytuj wpis ${type}` : `Dodaj wpis – ${cfg.title}`}</h3>
-        {type === 'K06' && <p className="hint">Wpisy K06 tworzą się też automatycznie z produkcji (migracja SQL v35). Poniżej możesz dodać ręcznie lub edytować ocenę P/N istniejących partii.</p>}
-        {type === 'K05' && <p className="hint">Rejestruj każde wycofanie partii – wpisy trafiają do kartoteki miesięcznej wybranego okresu.</p>}
-        {type === 'K04.1' && <p className="hint">Kontrola temperatury i opakowania podczas transportu – wpis na każdy transport / partię.</p>}
+        {type === 'K06' && <p className="hint">K06 uzupełnia się automatycznie z magazynu CP3 i produkcji (P domyślnie). {autoCount > 0 ? `W tym okresie: ${autoCount} wpisów auto.` : 'Kliknij „Odśwież magazyn partii”, potem „Odśwież kartoteki”.'} Jabłko przemysłowe nie trafia do K06 – jedzie prosto do sprzedaży.</p>}
+        {type === 'K05' && <p className="hint">Rejestr wycofań – wpis ręczny na każde wycofanie partii. Poniżej podgląd kartoteki jak na papierze.</p>}
+        {type === 'K04.1' && <p className="hint"><b>Transport / sprzedaż bez magazynowania CP3</b> – m.in. jabłko przemysłowe prosto na samochód. Uzupełnij temperaturę, opakowanie P/N i podpis.</p>}
         <div className="form-grid compact">{cfg.fields.map(renderManualFormField)}</div>
         <div className="actions">
           <button onClick={saveManualHaccpEntry}>{manualHaccpForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button>
           <button className="secondary" onClick={() => resetManualHaccpForm(type)}>Wyczyść</button>
         </div>
       </div>
-      <h3 className="no-print">Wpisy w wybranym okresie ({periodDocs.length})</h3>
-      {periodDocs.length === 0 && <p className="hint">Brak wpisów w wybranym miesiącu / zakresie. Dodaj pierwszy wpis powyżej.</p>}
-      {periodDocs.length > 0 && <div className="table-wrap small no-print"><table>
-        <thead><tr>{cfg.columns.filter(c => c.key !== 'lp').map(c => <th key={c.key}>{c.label}</th>)}<th>Akcje</th></tr></thead>
-        <tbody>{periodDocs.map((doc, i) => <tr key={doc.id}>
-          {cfg.columns.filter(c => c.key !== 'lp').map(c => <td key={c.key}>{c.value(doc, i)}</td>)}
-          <td className="row-actions">
-            <button className="mini secondary" onClick={() => editManualHaccpEntry(doc)}>Edytuj</button>
-            {!doc.lot_id && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
-          </td>
-        </tr>)}</tbody>
-      </table></div>}
+      {periodDocs.length === 0 && <p className="hint">Brak wpisów w wybranym okresie. {type === 'K06' ? 'Przypisz partie gotowca do CP3 lub wykonaj produkcję, potem odśwież magazyn.' : 'Dodaj pierwszy wpis powyżej.'}</p>}
+      {periodDocs.length > 0 && renderManualPaperPreview(type, periodDocs)}
     </>
   }
 
@@ -2203,8 +2284,11 @@ async function createIncomingLot(productId, operationId, operationDate, qty, pro
   if (lotNoErr) throw lotNoErr
 
   const productGroup = productGroupForName(productName)
-  const controlPoint = forcedControlPoint || targetControlPointForProduct(productName)
-  const storageChamberId = await findCompatibleChamber(productGroup, controlPoint)
+  const controlPoint = forcedControlPoint === null ? null : (forcedControlPoint || targetControlPointForProduct(productName))
+  let storageChamberId = null
+  if (controlPoint) {
+    storageChamberId = await findCompatibleChamber(productGroup, controlPoint)
+  }
 
   const { data: lot, error: lotErr } = await supabase
     .from('lots')
@@ -2624,6 +2708,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           supabase.from('operations').select('id, operation_type, operation_date, document_no').in('operation_type', ['sprzedaz', 'sprzedaz_bez_produkcji', 'produkcja']).limit(20000)
         ])
         setFormsTrace({ allocations: traceAllocations || [], operations: traceOperations || [] })
+        const { data: k06Existing } = await supabase.from('haccp_documents').select('id, document_type, lot_id, lot_no').eq('document_type', 'K06')
+        const k06Added = await syncAutoK06Documents(lotsData, traceOperations || [], k06Existing || [])
+        if (k06Added > 0) await loadHaccpDocs()
       } catch {
         setFormsTrace({ allocations: [], operations: [] })
       }
@@ -2726,7 +2813,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       const { data: outLot } = await supabase.from('lots').select('lot_no, storage_chamber_id').eq('id', outputLotId).single()
       const isPulpa = /pulpa/i.test(productionOutputName)
-      if (!isPulpa && outLot) {
+      const isDirectSale = isDirectToSaleProduct(productionOutputName)
+      if (!isPulpa && !isDirectSale && outLot) {
         const chamber = chamberRows.find(c => c.id === outLot.storage_chamber_id)
         await supabase.from('haccp_documents').insert({
           document_type: 'K06',
@@ -3158,12 +3246,25 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
   }
 
+  async function syncAutoK06Documents(lotsData, operations, currentDocs) {
+    if (!supabase) return 0
+    const trace = { lots: lotsData, operations }
+    const pending = buildSyntheticK06DocsFromTrace(trace, currentDocs)
+    if (!pending.length) return 0
+    let inserted = 0
+    for (const doc of pending) {
+      const { error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(doc))
+      if (!error) inserted += 1
+    }
+    return inserted
+  }
+
   async function loadHaccpDocs() {
     if (!supabase) return
     try {
       const { data, error } = await supabase
         .from('haccp_documents')
-        .select('id, document_type, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at')
+        .select('id, document_type, lot_id, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at')
         .order('document_date', { ascending: false })
         .limit(5000)
       if (error) throw error
@@ -3662,7 +3763,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </>}
       {docsFilter === 'K01.1' && renderK011Section()}
       {MANUAL_HACCP_FORMS[docsFilter] && renderManualHaccpEntrySection()}
-      {docsFilter !== 'K01.1' && <>
+      {!['K01.1', 'K04.1', 'K05'].includes(docsFilter) && <>
       <div className="doc-progress">{['K01','K02','K03','K04','K04.1','K05','K06','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
       <h3>{docsFilter === 'K03' ? 'Formularze K03 – jedna sprzedaż (WZ) = jedna kartoteka' : 'Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat'}</h3>
       <p className="hint">{docsFilter === 'K03'
@@ -3671,7 +3772,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak formularzy K03 na liście. {k03Diag.wzDocs > 0 ? `W bazie jest ${k03Diag.wzDocs} WZ – kliknij „Odśwież kartoteki” lub „Uzupełnij braki FIFO”.` : ' Zaimportuj Excel z WZ → Zapisz do Supabase → Odśwież kartoteki.'}</p>}
       {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak kartotek K04. Przypisz partie produktu gotowego do komory CP3 w zakładce Magazyn, potem kliknij „Odśwież magazyn partii” i „Odśwież kartoteki”. Towar prosto na samochód → K04.1.</p>}
       {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak kartotek K07. Wpisy powstają po przerobie (zakładka Produkcja / Przerób). Odśwież magazyn i kartoteki.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak kartotek K06. Wpisy powstają automatycznie po produkcji produktu gotowego (CP3). Możesz też dodać ręcznie poniżej.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak kartotek K06 w tabeli powyżej – sprawdź podgląd papierowy niżej. Auto: partie w CP3 lub po produkcji. Odśwież magazyn + kartoteki.</p>}
       {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && docsFilter !== 'K04' && docsFilter !== 'K07' && docsFilter !== 'K06' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
         <thead><tr>
