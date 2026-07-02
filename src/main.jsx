@@ -5,7 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04Docs, buildSyntheticK07Docs, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName } from './haccpFormsEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -225,6 +225,10 @@ function App() {
   const [k02Overrides, setK02Overrides] = useState({})
   const [k04Overrides, setK04Overrides] = useState({})
   const [k07Overrides, setK07Overrides] = useState({})
+  const [defaultK04Employee, setDefaultK04Employee] = useState('')
+  const [defaultK07Employee, setDefaultK07Employee] = useState('')
+  const [defaultK06Employee, setDefaultK06Employee] = useState('')
+  const [formsTrace, setFormsTrace] = useState({ operations: [], allocations: [] })
   const [manualHaccpForm, setManualHaccpForm] = useState({})
   const [k03FormsRaw, setK03FormsRaw] = useState([])
   const [k03Overrides, setK03Overrides] = useState({})
@@ -364,8 +368,21 @@ function App() {
   }
 
 
-  const syntheticK04Docs = useMemo(() => buildSyntheticK04Docs(haccpDocs, k04Overrides), [haccpDocs, k04Overrides])
-  const syntheticK07Docs = useMemo(() => buildSyntheticK07Docs(haccpDocs, k07Overrides), [haccpDocs, k07Overrides])
+  const formsTraceContext = useMemo(() => ({
+    lots: stockRows,
+    allocations: formsTrace.allocations || [],
+    operations: formsTrace.operations || []
+  }), [stockRows, formsTrace])
+
+  const syntheticK04Docs = useMemo(() => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides), [formsTraceContext, k04Overrides])
+  const syntheticK07Docs = useMemo(() => buildSyntheticK07DocsFromTrace(formsTraceContext, k07Overrides), [formsTraceContext, k07Overrides])
+  const syntheticK06Docs = useMemo(() => buildSyntheticK06DocsFromTrace(formsTraceContext, haccpDocs), [formsTraceContext, haccpDocs])
+  const mergedK06Docs = useMemo(() => {
+    const manual = (haccpDocs || []).filter(d => d.document_type === 'K06')
+    const synIds = new Set(syntheticK06Docs.map(d => d.lot_id).filter(Boolean))
+    const extra = manual.filter(d => !d.lot_id || !synIds.has(d.lot_id))
+    return [...syntheticK06Docs, ...extra]
+  }, [haccpDocs, syntheticK06Docs])
 
   const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
 
@@ -492,6 +509,49 @@ function App() {
     }))
   }
 
+  function setEmployeeForVisibleK04Group(group, employeeName, onlyEmpty = false) {
+    if (!group || !employeeName) return
+    const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_kontrolujacego))
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K04.' : 'Brak wpisów K04.'); return }
+    setK04Overrides(prev => {
+      const next = { ...prev }
+      for (const doc of docs) next[doc.id] = { ...(next[doc.id] || {}), podpis_kontrolujacego: employeeName }
+      return next
+    })
+    setMessage(`Ustawiono podpis K04 dla ${docs.length} wpisów.`)
+  }
+
+  function setEmployeeForVisibleK07Group(group, employeeName, onlyEmpty = false) {
+    if (!group || !employeeName) return
+    const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_kontrolujacego))
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K07.' : 'Brak wpisów K07.'); return }
+    setK07Overrides(prev => {
+      const next = { ...prev }
+      for (const doc of docs) next[doc.id] = { ...(next[doc.id] || {}), podpis_kontrolujacego: employeeName }
+      return next
+    })
+    setMessage(`Ustawiono podpis K07 dla ${docs.length} wpisów.`)
+  }
+
+  async function setEmployeeForVisibleK06Group(group, employeeName, onlyEmpty = false) {
+    if (!group || !employeeName) return
+    const docs = (group.docs || []).filter(d => !onlyEmpty || !d.signed_by_operator)
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K06.' : 'Brak wpisów K06.'); return }
+    if (!supabase) { setMessage('Brak bazy – podpis K06 wymaga Supabase.'); return }
+    try {
+      for (const doc of docs) {
+        if (doc.synthetic && !doc.lot_id) continue
+        if (doc.id && !String(doc.id).startsWith('K06-syn-')) {
+          await supabase.from('haccp_documents').update({ signed_by_operator: employeeName, updated_at: new Date().toISOString() }).eq('id', doc.id)
+        }
+      }
+      await loadHaccpDocs()
+      setMessage(`Ustawiono podpis K06 dla ${docs.length} pozycji.`)
+    } catch (err) {
+      setMessage(`Błąd podpisu K06: ${err.message}`)
+    }
+  }
+
   function setK02Override(doc, field, value) {
     if (!doc?.id) return
     setK02Overrides(prev => {
@@ -536,6 +596,7 @@ function App() {
     const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs)
       : docsFilter === 'K03' ? syntheticK03Docs
       : docsFilter === 'K04' ? syntheticK04Docs
+      : docsFilter === 'K06' ? mergedK06Docs
       : docsFilter === 'K07' ? syntheticK07Docs
       : haccpDocs
     return sourceDocs
@@ -557,7 +618,7 @@ function App() {
         if (!q) return true
         return normalizeText(`${d.lot_no || ''} ${d.product_name || ''} ${d.supplier_name || ''} ${d.document_no || ''} ${d.chamber_code || ''}`).includes(q)
       })
-  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, syntheticK04Docs, syntheticK07Docs, k03AssortmentFilter, k03YearFilter, k03MonthFilter])
+  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, syntheticK04Docs, syntheticK07Docs, mergedK06Docs, k03AssortmentFilter, k03YearFilter, k03MonthFilter])
 
 
   function docInSelectedPeriod(doc) {
@@ -614,8 +675,7 @@ function App() {
       const period = String(doc.document_date || '').slice(0, 7) || haccpMonth || 'brak-daty'
       const product = doc.product_name || 'Bez produktu'
       const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
-      // K01: jedna kartoteka miesięczna/zakresowa DLA JEDNEGO ASORTYMENTU.
-      // Czyli np. Jabłko przemysłowe ma własną kartę, Wiśnia własną kartę itd.
+      const productGroup = doc.document_type === 'K04' ? (doc.data?.product_group || doc.product_name || 'produkt') : (doc.product_name || 'Bez produktu')
       const key = doc.document_type === 'K01'
         ? `${doc.document_type}|${period}|${product}`
         : doc.document_type === 'K03'
@@ -625,9 +685,9 @@ function App() {
             : doc.document_type === 'K02'
               ? `${doc.document_type}|${period}`
               : doc.document_type === 'K04'
-                ? `${doc.document_type}|${period}|${chamber}`
+                ? `${doc.document_type}|${period}|${chamber}|${productGroup}`
                 : `${doc.document_type}|${period}|${product}|${chamber}`
-      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
+      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K04' ? productGroup : product, chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
     return Array.from(map.values()).map(g => {
@@ -635,7 +695,11 @@ function App() {
       const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
       return {
         ...g,
-        product: g.type === 'K01' ? (products.length === 1 ? products[0] : 'według wpisów w tabeli') : g.product,
+        product: g.type === 'K04'
+          ? (products.length === 1 ? products[0] : (docs[0]?.data?.produkty || g.product))
+          : g.type === 'K01'
+            ? (products.length === 1 ? products[0] : 'według wpisów w tabeli')
+            : g.product,
         docs
       }
     })
@@ -673,13 +737,18 @@ function App() {
       return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period) || null
     }
     const product = doc.product_name || 'Bez produktu'
+    const productGroup = doc.data?.product_group || product
     const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
+    if (doc.document_type === 'K04') {
+      return haccpMonthlyGroups.find(g => g.type === 'K04' && g.period === period && g.chamber === chamber && g.product === productGroup) || null
+    }
     return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period && g.product === product && g.chamber === chamber) || null
   }
 
   function haccpCount(type) {
     if (type === 'K03') return syntheticK03Docs.length
     if (type === 'K04') return syntheticK04Docs.length
+    if (type === 'K06') return mergedK06Docs.length
     if (type === 'K07') return syntheticK07Docs.length
     return haccpDocs.filter(d => d.document_type === type).length
   }
@@ -687,6 +756,7 @@ function App() {
   function haccpNonconformityCount(type) {
     if (type === 'K03') return syntheticK03Docs.filter(d => d.status === 'N').length
     if (type === 'K04') return syntheticK04Docs.filter(d => d.status === 'N').length
+    if (type === 'K06') return mergedK06Docs.filter(d => d.status === 'N').length
     if (type === 'K07') return syntheticK07Docs.filter(d => d.status === 'N').length
     return haccpDocs.filter(d => d.document_type === type && d.status === 'N').length
   }
@@ -694,6 +764,7 @@ function App() {
   function haccpPendingCount(type) {
     if (type === 'K03') return syntheticK03Docs.filter(d => !d.signed_by_operator).length
     if (type === 'K04') return syntheticK04Docs.filter(d => !d.signed_by_operator).length
+    if (type === 'K06') return mergedK06Docs.filter(d => !d.signed_by_operator).length
     if (type === 'K07') return syntheticK07Docs.filter(d => !d.signed_by_operator).length
     return haccpDocs.filter(d => d.document_type === type && !d.signed_by_operator).length
   }
@@ -1225,15 +1296,27 @@ function App() {
     if (group.type === 'K04') {
       const maxRows = Math.max(16, docs.length)
       const chamber = group.chamber || docs[0]?.chamber_code || 'CP3'
+      const productLabel = docs[0]?.product_name || docs[0]?.data?.produkty || group.product || ''
+      const defaultTemp = k04TempForProductName(productLabel)
       return <div className="monthly-paper k02-original k04-original">
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis kontrolującego (zbiorczo)
+            <select value={defaultK04Employee} onChange={e => setDefaultK04Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
+        </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
-            <td className="k02-title"><b>Karta K04 - Karta kontroli parametrów<br/>magazynowania produktów gotowych (CP3/CCP1)</b></td>
-            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Komora:</b> {chamber}</td>
+            <td className="k02-title"><b>Karta K04 - Karta kontroli parametrów<br/>magazynowania produktów gotowych (CP3)</b></td>
+            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Komora:</b> {chamber}<br/><b>Produkt:</b> {productLabel}</td>
           </tr>
           <tr>
-            <td className="k02-note">{chamber.startsWith('CCP') ? '- Temp. beczki CCP1 (pulpa): ok. -18°C (±2°C).' : '- Temp. CP3: 0–2°C dla produktu świeżego.'}</td>
+            <td className="k02-note">- Temp. docelowa: jabłka/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C.<br/>Pomiar automatyczny codziennie o 9:15 od produkcji do dnia WZ.</td>
             <td className="k02-version">Wersja I/2024</td>
           </tr>
         </tbody></table>
@@ -1243,8 +1326,8 @@ function App() {
             if (!baseDoc) return <tr className="blank-row" key={`k04-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
             const doc = getLiveK04Doc(baseDoc, k04Overrides)
             const godzina = doc.data?.godzina || '09:15'
-            const temp1 = doc.data?.temperatura_chlodnia_1 || ''
-            const temp2 = doc.data?.temperatura_chlodnia_2 || ''
+            const temp1 = doc.data?.temperatura_chlodnia_1 ?? String(defaultTemp)
+            const temp2 = doc.data?.temperatura_chlodnia_2 ?? String(defaultTemp)
             const signed = doc.data?.podpis_kontrolujacego || doc.signed_by_operator || ''
             const uwagi = formNormalizePn(doc.data?.uwagi || 'P')
             return <tr key={doc.id}>
@@ -1257,19 +1340,31 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K04: dzienna kontrola temperatury w komorze {chamber}. Wpisy generowane automatycznie, gdy w bazie są partie produktu gotowego w CP3/CCP1.</p>
+        {docs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: wykryto różne asortymenty w tej komorze tego dnia – sprawdź przypisanie partii w Magazynie.</div>}
+        <p className="hint no-print">K04 generuje się z magazynu CP3: jedna kartoteka = komora + asortyment. Towar ładowany prosto na samochód (bez CP3) → uzupełnij ręcznie kartę <b>K04.1</b>.</p>
       </div>
     }
 
     if (group.type === 'K07') {
       const maxRows = Math.max(16, docs.length)
       return <div className="monthly-paper k02-original k07-original">
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis kontrolującego (zbiorczo)
+            <select value={defaultK07Employee} onChange={e => setDefaultK07Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK07Group(group, defaultK07Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK07Group(group, defaultK07Employee, true)}>Uzupełnij puste</button>
+        </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
             <td className="k02-title"><b>Karta K07 - Karta kontroli stanu sita<br/>na linii do przerobu na pulę (CCP1)</b></td>
             <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}</td>
           </tr>
+          <tr><td className="k02-note">Wpis przy rozpoczęciu/zakończeniu przerobu. Domyślnie P.</td><td className="k02-version">Wersja I/2024</td></tr>
         </tbody></table>
         <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Stan sita<br/>(P/N)*</th><th>Sito całe<br/>(P/N)*</th><th>Partia / produkt</th><th>Podpis</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
@@ -1293,14 +1388,25 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K07: codzienna kontrola sita na linii CCP1. Wpisy generowane, gdy w bazie są partie w beczkach CCP1.</p>
+        <p className="hint no-print">K07: wpis przy każdym przerobie (produkcja). Domyślnie P – możesz zmienić każde pole przed drukiem/Excel.</p>
       </div>
     }
 
     if (MANUAL_HACCP_FORMS[group.type]) {
       const cfg = MANUAL_HACCP_FORMS[group.type]
       const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa'])
+      const isK06 = group.type === 'K06'
       return <div className="monthly-paper k011-original">
+        {isK06 && <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis oceniającego (zbiorczo)
+            <select value={defaultK06Employee} onChange={e => setDefaultK06Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, true)}>Uzupełnij puste</button>
+        </div>}
         <table className="k011-head"><tbody><tr><td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td className="k011-title"><b>{cfg.title}</b></td><td className="k011-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}</td></tr></tbody></table>
         <table className="k011-table"><thead><tr>{cfg.columns.map(c => <th key={c.key}>{c.label}</th>)}</tr></thead><tbody>
           {docs.map((doc, i) => <tr key={doc.id}>
@@ -2437,7 +2543,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       // Wersja v7: celowo bez zagnieżdżonych relacji Supabase, żeby ominąć błędy typu select/relationship.
       const { data: lotsRaw, error: lotsErr } = await supabase
         .from('lots')
-        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, product_id, product_group, storage_chamber_id, created_at')
+        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, product_id, product_group, storage_chamber_id, source_operation_id, created_at')
         .order('production_date', { ascending: true })
         .order('created_at', { ascending: true })
       if (lotsErr) throw lotsErr
@@ -2511,6 +2617,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       setStockRows(lotsData)
       setFifoRows(allocationsData)
+
+      try {
+        const [{ data: traceAllocations }, { data: traceOperations }] = await Promise.all([
+          supabase.from('fifo_allocations').select('id, qty, source_lot_id, output_lot_id, operation_id').limit(20000),
+          supabase.from('operations').select('id, operation_type, operation_date, document_no').in('operation_type', ['sprzedaz', 'sprzedaz_bez_produkcji', 'produkcja']).limit(20000)
+        ])
+        setFormsTrace({ allocations: traceAllocations || [], operations: traceOperations || [] })
+      } catch {
+        setFormsTrace({ allocations: [], operations: [] })
+      }
+
       setMessage('Stany FIFO, komory, magazyn partii i produkcja odświeżone. Wersja v15.')
     } catch (err) {
       setMessage(`Błąd odczytu stanów FIFO: ${err?.message || String(err)}`)
@@ -2607,11 +2724,31 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       })
       if (allocErr) throw allocErr
 
+      const { data: outLot } = await supabase.from('lots').select('lot_no, storage_chamber_id').eq('id', outputLotId).single()
+      const isPulpa = /pulpa/i.test(productionOutputName)
+      if (!isPulpa && outLot) {
+        const chamber = chamberRows.find(c => c.id === outLot.storage_chamber_id)
+        await supabase.from('haccp_documents').insert({
+          document_type: 'K06',
+          lot_id: outputLotId,
+          operation_id: op.id,
+          document_date: today,
+          product_name: productionOutputName,
+          lot_no: outLot.lot_no,
+          document_no: documentNo,
+          chamber_code: chamber?.code || 'CP3',
+          qty: outputQty,
+          status: 'P',
+          data: { wyglad_zapach: 'P', smak: 'P', barwa: 'P', uwagi: '', podpis: '' }
+        })
+      }
+
       setMessage(`Utworzono produkcję ${documentNo}. Zdjęto ${inputQty.toLocaleString('pl-PL')} kg z partii ${sourceLot.lot_no}, utworzono ${outputQty.toLocaleString('pl-PL')} kg: ${productionOutputName}.`)
       setProductionInputLotId('')
       setProductionInputQty('')
       setProductionOutputQty('')
       await loadFifoData()
+      await loadHaccpDocs()
     } catch (err) {
       setMessage(`Błąd produkcji/przerobu: ${err.message}`)
     }
@@ -3480,7 +3617,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         {haccpPeriodMode === 'month' && <label>Miesiąc<input type="month" value={haccpMonth} onChange={e => setHaccpMonth(e.target.value)} /></label>}
         {haccpPeriodMode === 'range' && <><label>Od<input type="date" value={haccpFrom} onChange={e => setHaccpFrom(e.target.value)} /></label><label>Do<input type="date" value={haccpTo} onChange={e => setHaccpTo(e.target.value)} /></label></>}
       </div>}
-      <div className="actions"><button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData() }}><RefreshCcw size={16}/> Odśwież kartoteki</button>{docsFilter === 'K03' && <><button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO (admin)</button></>}</div>
+      <div className="actions"><button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież kartoteki</button>{docsFilter === 'K03' && <><button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO (admin)</button></>}</div>
       {docsFilter === 'K03' && <>
         <div className="k03-status-box">
           <strong>K03 – status (wersja {K03_ENGINE_VERSION})</strong>
@@ -3532,9 +3669,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         ? <>Wybierz asortyment, rok i miesiąc powyżej, potem kliknij <b>Kartoteka</b> przy wybranym WZ. Suma PZ po lewej musi równać się ilości WZ po prawej.</>
         : <> <b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</>}</p>
       {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak formularzy K03 na liście. {k03Diag.wzDocs > 0 ? `W bazie jest ${k03Diag.wzDocs} WZ – kliknij „Odśwież kartoteki” lub „Uzupełnij braki FIFO”.` : ' Zaimportuj Excel z WZ → Zapisz do Supabase → Odśwież kartoteki.'}</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak kartotek K04. System generuje je automatycznie, gdy w bazie są partie produktu gotowego w komorach CP3 lub CCP1 (migracja SQL v20). Kliknij „Odśwież kartoteki”.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak kartotek K07. Wpisy dzienne powstają, gdy w bazie są partie w beczkach CCP1 (migracja SQL v20). Kliknij „Odśwież kartoteki”.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && docsFilter !== 'K04' && docsFilter !== 'K07' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak kartotek K04. Przypisz partie produktu gotowego do komory CP3 w zakładce Magazyn, potem kliknij „Odśwież magazyn partii” i „Odśwież kartoteki”. Towar prosto na samochód → K04.1.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak kartotek K07. Wpisy powstają po przerobie (zakładka Produkcja / Przerób). Odśwież magazyn i kartoteki.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak kartotek K06. Wpisy powstają automatycznie po produkcji produktu gotowego (CP3). Możesz też dodać ręcznie poniżej.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && docsFilter !== 'K04' && docsFilter !== 'K07' && docsFilter !== 'K06' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
         <thead><tr>
           <th>Kartoteka</th>
