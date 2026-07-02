@@ -3,7 +3,185 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.1'
+export const K03_ENGINE_VERSION = '3.2'
+
+const PRODUCT_CODES = new Map([
+  ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
+  ['porzeczka czerwona', 'Pk'], ['porzeczka czerwona pulpa', 'Pkp'], ['truskawka', 'T'],
+  ['truskawka z szypulka', 'Tsz'], ['aronia', 'A'], ['sliwka', 'S'], ['wisnia', 'W'],
+  ['malina klasa i', 'M1'], ['malina extra', 'Mex'], ['jablko obierka', 'Jabobier'],
+  ['jablko na obierke', 'Jabobier'], ['jablko przemyslowe', 'Jab'], ['jablko', 'Jab']
+])
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]))
+}
+
+function isAgromarName(value) {
+  return /agro[-\s]?mar|mariusz\s+ba[nń]ka/i.test(String(value || ''))
+}
+
+export function inferProductCode(productName, product) {
+  if (product?.code) return product.code
+  const key = normalizeText(productName)
+  if (PRODUCT_CODES.has(key)) return PRODUCT_CODES.get(key)
+  const text = String(productName || 'Produkt')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ł/g, 'l')
+    .replace(/[^a-zA-Z0-9]/g, '')
+  return (text.slice(0, 8) || 'X')
+}
+
+export function formatK03PzNo(row) {
+  const raw = String(row?.pz_no || row?.source_lot_no || '').trim()
+  if (!raw) return ''
+  if (row?.isShortage) return raw
+  const match = raw.match(/\b(PZ[\s./-]?\d[\d./-]*|F[\s./-]?V[\s./-]?\d[\d./-]*)\b/i)
+  if (match) return match[1].replace(/\s+/g, '')
+  if (isAgromarName(raw)) return ''
+  const cleaned = raw.replace(/agro[-\s]*mar[^/]*/gi, '').trim()
+  if (/^[a-z]\d+\/\d{3}\/\d{4}$/i.test(cleaned)) return ''
+  return cleaned
+}
+
+/** W kolumnie „Dostawca” pokazujemy wyłącznie numer PZ (bez nazwy AGRO-MAR). */
+export function formatK03Dostawca(row) {
+  if (row?.isShortage) return ''
+  return formatK03PzNo(row)
+}
+
+export function formatK03Receiver(value) {
+  const text = String(value || '').trim()
+  if (!text || isAgromarName(text)) return ''
+  return text.replace(/agro[-\s]*mar[^/]*/gi, '').replace(/\s+/g, ' ').trim()
+}
+
+function assignFinishedLotNumbers(forms, productMap) {
+  const counters = new Map()
+  const sorted = [...(forms || [])].sort((a, b) =>
+    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
+    String(a.product_name || '').localeCompare(String(b.product_name || ''))
+  )
+  const lotById = new Map()
+  for (const form of sorted) {
+    const product = productMap?.get?.(form.data?.product_id)
+    const year = String(form.document_date || '').slice(0, 4) || String(new Date().getFullYear())
+    const productKey = form.data?.product_id || normalizeText(form.product_name || 'produkt')
+    const counterKey = `${productKey}|${year}`
+    const seq = (counters.get(counterKey) || 0) + 1
+    counters.set(counterKey, seq)
+    const code = inferProductCode(form.product_name, product)
+    lotById.set(form.id, `${code}/${String(seq).padStart(3, '0')}/${year}`)
+  }
+  return (forms || []).map(form => lotById.has(form.id) ? { ...form, lot_no: lotById.get(form.id) } : form)
+}
+
+function finalizeK03LotNumbers(forms, productMap, outputLotByKey = new Map()) {
+  const toAssign = []
+  const withDbLot = (forms || []).map(form => {
+    const dbKey = `${form.data?.sale_operation_id}|${form.data?.product_id || 'null'}`
+    const fromDb = outputLotByKey.get(dbKey)
+    if (fromDb) return { ...form, lot_no: fromDb }
+    toAssign.push(form)
+    return form
+  })
+  if (!toAssign.length) return withDbLot
+  const assigned = assignFinishedLotNumbers(toAssign, productMap)
+  const assignedMap = new Map(assigned.map(f => [f.id, f.lot_no]))
+  return withDbLot.map(form => assignedMap.has(form.id) ? { ...form, lot_no: assignedMap.get(form.id) } : form)
+}
+
+export function buildK03PaperData(doc) {
+  const rawRows = doc?.data?.rawRows || []
+  const saleRow = (doc?.data?.saleRows || [])[0] || {}
+  const maxRows = Math.max(10, rawRows.length)
+  const saleTotal = Number(doc?.qty || 0)
+  const rawTotal = Number(doc?.data?.rawTotal || 0)
+  const signed = doc?.signed_by_operator || saleRow.signed_by || ''
+  const receiver = formatK03Receiver(doc?.data?.odbiorca || saleRow.receiver || '')
+
+  const rows = Array.from({ length: maxRows }).map((_, i) => {
+    const r = rawRows[i] || {}
+    const pzNo = formatK03PzNo(r) || (r.isShortage ? (r.pz_no || '') : '')
+    return {
+      lp: i + 1,
+      pzNo,
+      pzDate: r.pz_date || '',
+      dostawca: formatK03Dostawca(r),
+      qty: r.qty ? Number(r.qty) : '',
+      wzLp: i + 1,
+      wzNo: i === 0 ? (saleRow.wz_no || doc?.document_no || '') : '',
+      wzDate: i === 0 ? (saleRow.wz_date || doc?.document_date || '') : '',
+      wzReceiver: i === 0 ? receiver : '',
+      wzQty: i === 0 ? saleTotal : '',
+      signed: i === 0 ? signed : ''
+    }
+  })
+
+  return {
+    year: String(doc?.document_date || '').slice(0, 4),
+    month: String(doc?.document_date || '').slice(5, 7),
+    productName: doc?.product_name || '',
+    lotNo: doc?.lot_no || '',
+    wzNo: doc?.document_no || '',
+    wzDate: doc?.document_date || '',
+    saleTotal,
+    rawTotal,
+    signed,
+    receiver,
+    shortage: Number(doc?.data?.shortage || 0),
+    rows
+  }
+}
+
+export function buildK03PrintHtml(doc) {
+  const paper = buildK03PaperData(doc)
+  const rows = paper.rows.map(r => {
+    const rightCells = r.lp === 1
+      ? `<td class="right-start">${r.wzLp}</td><td>${escapeHtml(r.wzNo)}</td><td>${escapeHtml(r.wzDate)}</td><td>${escapeHtml(r.wzReceiver)}</td><td>${r.wzQty ? escapeHtml(Number(r.wzQty).toLocaleString('pl-PL')) : ''}</td><td>${escapeHtml(r.signed)}</td>`
+      : `<td class="right-start">${r.wzLp}</td><td></td><td></td><td></td><td></td><td></td>`
+    const qtyCell = r.qty !== '' ? escapeHtml(Number(r.qty).toLocaleString('pl-PL')) : ''
+    return `<tr><td>${r.lp}</td><td>${escapeHtml(r.pzNo)}</td><td>${escapeHtml(r.pzDate)}</td><td>${escapeHtml(r.dostawca)}</td><td>${qtyCell}</td>${rightCells}</tr>`
+  }).join('')
+  const warn = paper.shortage > 0
+    ? `<div style="font-weight:bold;color:#900;margin-top:6px">UWAGA: brak ${paper.shortage.toLocaleString('pl-PL')} kg surowca dostępnego na dzień WZ.</div>`
+    : ''
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K03 ${escapeHtml(paper.wzNo)}</title><style>@page{size:A4 landscape;margin:7mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:3px 2px;text-align:center;vertical-align:middle;font-size:9.5pt;line-height:1.06;word-wrap:break-word;overflow-wrap:anywhere}.company{width:33%;font-weight:bold}.title{width:50%;font-weight:bold}.meta{width:17%;text-align:left}.field td{height:28px;text-align:left;font-size:10pt}.section{font-weight:bold;text-align:center;background:#eee}.sum{font-weight:bold;text-align:right}.col-pz{width:11%}.col-date{width:8%}.col-dost{width:10%}.col-qty{width:7%}.col-wz{width:11%}.col-odb{width:14%}.col-sign{width:10%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja I/2024</td><td class="title">Karta K03 - Karta identyfikacji partii produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(paper.year)}<br><br><b>Miesiąc:</b> ${escapeHtml(paper.month)}<br><br><b>Strona:</b></td></tr></tbody></table><table class="field"><tbody><tr><td><b>Nazwa produktu:</b> ${escapeHtml(paper.productName)}</td><td><b>Data sprzedaży (WZ):</b> ${escapeHtml(paper.wzDate)}</td></tr><tr><td><b>Numer WZ:</b> ${escapeHtml(paper.wzNo)}</td><td><b>Ilość WZ (kg):</b> ${escapeHtml(paper.saleTotal.toLocaleString('pl-PL'))}</td></tr><tr><td><b>Nadany numer partii wyrobu gotowego:</b> ${escapeHtml(paper.lotNo)}</td><td><b>Odbiorca:</b> ${escapeHtml(paper.receiver || '-')}</td></tr></tbody></table><table><thead><tr><th class="section" colspan="5">Dane dotyczące dostaw surowców składających się na partię</th><th style="border-left:3px solid #111" class="section" colspan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th style="border-left:3px solid #111">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>${rows}<tr><td colspan="4" class="sum">Suma surowca:</td><td><b>${escapeHtml(paper.rawTotal.toLocaleString('pl-PL'))}</b></td><td style="border-left:3px solid #111" colspan="4" class="sum">Suma sprzedana:</td><td><b>${escapeHtml(paper.saleTotal.toLocaleString('pl-PL'))}</b></td><td></td></tr></tbody></table>${warn}<script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+}
+
+export function buildK03ExcelRows(doc) {
+  const paper = buildK03PaperData(doc)
+  const rows = []
+  rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.', '', '', '', '', '', 'Karta K03 - Karta identyfikacji partii produktu', '', '', '', ''])
+  rows.push([`Rok: ${paper.year}`, '', '', '', '', `Miesiąc: ${paper.month}`, '', '', '', '', ''])
+  rows.push([`Nazwa produktu: ${paper.productName}`, '', '', '', '', `Data sprzedaży (WZ): ${paper.wzDate}`, '', '', '', '', ''])
+  rows.push([`Numer WZ: ${paper.wzNo}`, '', '', '', '', `Ilość WZ (kg): ${paper.saleTotal}`, '', '', '', '', ''])
+  rows.push([`Nadany numer partii wyrobu gotowego: ${paper.lotNo}`, '', '', '', '', `Odbiorca: ${paper.receiver || '-'}`, '', '', '', '', ''])
+  rows.push(['Dane dotyczące dostaw surowców składających się na partię', '', '', '', '', 'Dane dotyczące sprzedaży partii gotowego produktu', '', '', '', '', ''])
+  rows.push(['Lp.', 'Nr faktury / PZ', 'Data zakupu', 'Dostawca', 'Ilość surowca (kg)', 'Lp.', 'Nr faktury / WZ', 'Data', 'Odbiorca', 'Ilość w kg', 'Podpis uzupełniającego wpisy'])
+  for (const r of paper.rows) {
+    rows.push([
+      r.lp,
+      r.pzNo,
+      r.pzDate,
+      r.dostawca,
+      r.qty === '' ? '' : r.qty,
+      r.wzLp,
+      r.wzNo,
+      r.wzDate,
+      r.wzReceiver,
+      r.wzQty === '' ? '' : r.wzQty,
+      r.signed
+    ])
+  }
+  rows.push(['', '', '', 'Suma surowca:', paper.rawTotal, '', '', '', 'Suma sprzedana:', paper.saleTotal, ''])
+  if (paper.shortage > 0) {
+    rows.push(['UWAGA', `Brak ${paper.shortage} kg surowca na dzień WZ`, '', '', '', '', '', '', '', '', ''])
+  }
+  return rows
+}
 
 function normalizeText(value) {
   return String(value || '')
@@ -89,7 +267,7 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
   const wzNo = saleDocumentNo(op) || saleLine.document_no || `OP-${String(saleLine.operation_id || '').slice(0, 8)}`
   const wzDate = saleOperationDate(op) || saleLine.issue_date || '0000-01-01'
   const saleQty = Number(saleLine.qty || 0)
-  const receiver = contractorMap.get(op?.contractor_id)?.name || saleLine.receiver_name || ''
+  const receiver = formatK03Receiver(contractorMap.get(op?.contractor_id)?.name || saleLine.receiver_name || '')
 
   const rawRowsBase = (pzRows || [])
     .filter(r => Number(r.qty || 0) > 0)
@@ -128,7 +306,7 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
     document_date: wzDate,
     product_name: productName,
     product_group: productGroup,
-    lot_no: wzNo,
+    lot_no: '',
     supplier_name: '',
     document_no: wzNo,
     chamber_code: '',
@@ -187,12 +365,13 @@ export function buildK03FormsFromExcelRows(excelRows) {
   }
 
   const emptyMap = new Map()
-  return Array.from(saleLines.values())
+  const forms = Array.from(saleLines.values())
     .map(line => buildFormDoc(line, [], emptyMap, emptyMap, 'excel'))
     .sort((a, b) =>
       String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
       String(a.document_no || '').localeCompare(String(b.document_no || ''))
     )
+  return finalizeK03LotNumbers(forms, emptyMap)
 }
 
 /** Formularze K03 z podglądu importu (tabela operations + operation_items). */
@@ -220,8 +399,9 @@ export function buildK03FormsFromImportPreview(importOps) {
     }
   }
   const emptyMap = new Map()
-  return Array.from(saleLines.values())
+  const forms = Array.from(saleLines.values())
     .map(line => buildFormDoc(line, [], emptyMap, emptyMap, 'import'))
+  return finalizeK03LotNumbers(forms, emptyMap)
 }
 
 /**
@@ -369,13 +549,27 @@ export async function loadK03Forms(client) {
     })
   }
 
-  const forms = Array.from(saleLines.values())
-    .map(line => buildFormDoc(line, pzBySaleKey.get(line.key) || [], productMap, contractorMap, 'baza'))
-    .sort((a, b) =>
-      String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
-      String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
-      String(a.product_name || '').localeCompare(String(b.product_name || ''))
-    )
+  const saleOpIdList = Array.from(saleOpIds)
+  const outputLots = saleOpIdList.length
+    ? await fetchInChunks(client, 'lots', 'id, lot_no, product_id, source_operation_id', 'source_operation_id', saleOpIdList)
+    : []
+  const outputLotByKey = new Map()
+  for (const lot of outputLots) {
+    if (!lot?.lot_no) continue
+    outputLotByKey.set(`${lot.source_operation_id}|${lot.product_id || 'null'}`, lot.lot_no)
+  }
+
+  const forms = finalizeK03LotNumbers(
+    Array.from(saleLines.values())
+      .map(line => buildFormDoc(line, pzBySaleKey.get(line.key) || [], productMap, contractorMap, 'baza'))
+      .sort((a, b) =>
+        String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+        String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
+        String(a.product_name || '').localeCompare(String(b.product_name || ''))
+      ),
+    productMap,
+    outputLotByKey
+  )
 
   const diag = {
     wzDocs: saleOpIds.size,

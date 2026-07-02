@@ -165,7 +165,18 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 /* K03 – identyfikacja partii produktu, układ zgodny z formularzem */
 .k03-original { font-family: "Times New Roman", serif; color:#111; }
 .k03-original table { width:100%; border-collapse:collapse; table-layout:fixed; }
-.k03-original td, .k03-original th { border:1px solid #111; padding:4px; text-align:center; vertical-align:middle; font-size:13px; line-height:1.08; }
+.k03-original td, .k03-original th { border:1px solid #111; padding:3px 2px; text-align:center; vertical-align:middle; font-size:12px; line-height:1.06; word-wrap:break-word; overflow-wrap:anywhere; }
+.k03-original .cell-wrap { font-size:11px; text-align:center; }
+.k03-table .col-lp { width:4%; }
+.k03-table .col-pz { width:11%; }
+.k03-table .col-date { width:8%; }
+.k03-table .col-dost { width:10%; }
+.k03-table .col-qty { width:7%; }
+.k03-table .col-wz { width:11%; }
+.k03-table .col-odb { width:14%; }
+.k03-table .col-sign { width:10%; }
+.k03-filters { margin: 8px 0 12px; align-items: end; }
+.k03-filters .actions.inline { display:flex; gap:8px; flex-wrap:wrap; }
 .k03-head .company { width:34%; font-weight:bold; }
 .k03-head .title { width:50%; font-weight:bold; font-size:16px; }
 .k03-head .meta { width:16%; text-align:left; vertical-align:top; }
