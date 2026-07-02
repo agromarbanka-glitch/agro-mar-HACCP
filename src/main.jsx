@@ -1169,7 +1169,7 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ.' : 'Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = {paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = {paper.saleTotal.toLocaleString('pl-PL')} kg.'}</span>
+          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg.`}</span>
         </div>
         <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {paper.year}<br/><b>Miesiąc:</b> {paper.month}<br/><b>Strona:</b></td></tr></tbody></table>
         <table className="k03-fields"><tbody><tr><td><b>Nazwa produktu:</b> {paper.productName}</td><td><b>Data sprzedaży (WZ):</b> {paper.wzDate}</td></tr><tr><td><b>Numer WZ:</b> {paper.wzNo}</td><td><b>Ilość WZ (kg):</b> {paper.saleTotal.toLocaleString('pl-PL')}</td></tr><tr><td><b>Nadany numer partii wyrobu gotowego:</b> {paper.lotNo || '-'}</td><td><b>Odbiorca:</b> {paper.receiver || '-'}</td></tr></tbody></table>
