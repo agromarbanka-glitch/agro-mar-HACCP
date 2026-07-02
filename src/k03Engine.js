@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.3'
+export const K03_ENGINE_VERSION = '3.4'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -259,7 +259,10 @@ function pickSaleItems(items, op) {
   return []
 }
 
-function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baza') {
+export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baza', options = {}) {
+  const fifoCutoffDate = options.fifoCutoffDate || null
+  const workflow = options.workflow || null
+  const lotNoOverride = options.lotNo || ''
   const op = saleLine.op
   const product = productMap.get(saleLine.product_id)
   const productName = product?.name || saleLine.raw_product_name || 'Produkt'
@@ -268,6 +271,7 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
   const wzDate = saleOperationDate(op) || saleLine.issue_date || '0000-01-01'
   const saleQty = Number(saleLine.qty || 0)
   const receiver = formatK03Receiver(contractorMap.get(op?.contractor_id)?.name || saleLine.receiver_name || '')
+  const cutoffDate = String(fifoCutoffDate || wzDate || '').slice(0, 10)
 
   const rawRowsBase = (pzRows || [])
     .filter(r => Number(r.qty || 0) > 0)
@@ -279,7 +283,7 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
   let invalidFuturePz = false
   for (const r of rawRowsBase) {
     const pzDate = String(r.pz_date || '').slice(0, 10)
-    if (pzDate && wzDate && wzDate !== '0000-01-01' && pzDate > wzDate) invalidFuturePz = true
+    if (pzDate && cutoffDate && cutoffDate !== '0000-01-01' && pzDate > cutoffDate) invalidFuturePz = true
   }
 
   const allocatedTotal = rawRowsBase.reduce((sum, r) => sum + Number(r.qty || 0), 0)
@@ -296,7 +300,10 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
     : rawRowsBase
 
   const rawTotal = rawRows.reduce((sum, r) => sum + Number(r.qty || 0), 0)
-  const quantitiesMatch = source === 'excel' ? false : (Math.abs(rawTotal - saleQty) < 0.001 && shortage <= 0)
+  const quantityWarningAccepted = workflow?.quantity_warning_accepted === true
+  const quantitiesMatch = source === 'excel'
+    ? false
+    : (Math.abs(rawTotal - saleQty) < 0.001 && shortage <= 0) || quantityWarningAccepted
   const formId = `K03-${saleLine.key}`
 
   return {
@@ -306,7 +313,7 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
     document_date: wzDate,
     product_name: productName,
     product_group: productGroup,
-    lot_no: '',
+    lot_no: lotNoOverride || '',
     supplier_name: '',
     document_no: wzNo,
     chamber_code: '',
@@ -327,7 +334,9 @@ function buildFormDoc(saleLine, pzRows, productMap, contractorMap, source = 'baz
       invalidFuturePz,
       sale_operation_id: saleLine.operation_id,
       product_id: saleLine.product_id,
-      k03_source: source
+      k03_source: source,
+      fifo_cutoff_date: cutoffDate !== '0000-01-01' ? cutoffDate : wzDate,
+      k03_workflow: workflow
     },
     signed_by_operator: '',
     signed_by_admin: '',
@@ -366,7 +375,7 @@ export function buildK03FormsFromExcelRows(excelRows) {
 
   const emptyMap = new Map()
   const forms = Array.from(saleLines.values())
-    .map(line => buildFormDoc(line, [], emptyMap, emptyMap, 'excel'))
+    .map(line => buildK03FormDoc(line, [], emptyMap, emptyMap, 'excel'))
     .sort((a, b) =>
       String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
       String(a.document_no || '').localeCompare(String(b.document_no || ''))
@@ -400,7 +409,7 @@ export function buildK03FormsFromImportPreview(importOps) {
   }
   const emptyMap = new Map()
   const forms = Array.from(saleLines.values())
-    .map(line => buildFormDoc(line, [], emptyMap, emptyMap, 'import'))
+    .map(line => buildK03FormDoc(line, [], emptyMap, emptyMap, 'import'))
   return finalizeK03LotNumbers(forms, emptyMap)
 }
 
@@ -561,7 +570,7 @@ export async function loadK03Forms(client) {
 
   const forms = finalizeK03LotNumbers(
     Array.from(saleLines.values())
-      .map(line => buildFormDoc(line, pzBySaleKey.get(line.key) || [], productMap, contractorMap, 'baza'))
+      .map(line => buildK03FormDoc(line, pzBySaleKey.get(line.key) || [], productMap, contractorMap, 'baza'))
       .sort((a, b) =>
         String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
         String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
@@ -661,8 +670,9 @@ export function mergeK03Snapshots(forms, snapshots = []) {
   })
 }
 
-export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 'operator' } = {}) {
+export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 'operator', unfreeze = false } = {}) {
   if (!client || !doc?.id) return null
+  const wasFrozen = doc.frozen === true || doc.data?.frozen === true
   const payload = {
     document_type: 'K03',
     operation_id: doc.data?.sale_operation_id || null,
@@ -677,13 +687,17 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
       ...(doc.data || {}),
       k03_key: doc.id,
       form_id: doc.id,
-      frozen: freeze,
-      frozen_at: freeze ? new Date().toISOString() : (doc.data?.frozen_at || null),
+      frozen: unfreeze ? false : (freeze || (wasFrozen && !unfreeze)),
+      frozen_at: freeze ? new Date().toISOString() : (unfreeze ? null : (doc.data?.frozen_at || null)),
       rawRows: doc.data?.rawRows || [],
       saleRows: doc.data?.saleRows || [],
       product_group: doc.product_group || doc.data?.product_group
     },
     updated_at: new Date().toISOString()
+  }
+  if (unfreeze) {
+    payload.data.unfrozen_at = new Date().toISOString()
+    payload.data.unfreeze_reason = doc.data?.unfreeze_reason || ''
   }
 
   const { data: existingRows, error: findErr } = await client
@@ -695,7 +709,7 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
   const existing = (existingRows || []).find(r => r.data?.k03_key === doc.id)
 
   if (existing?.id) {
-    if (existing.data?.frozen === true && !freeze) {
+    if (existing.data?.frozen === true && !freeze && !unfreeze) {
       payload.data.frozen = true
       payload.data.frozen_at = existing.data?.frozen_at
       payload.data.rawRows = existing.data?.rawRows || payload.data.rawRows

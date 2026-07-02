@@ -231,6 +231,187 @@ async function allocateSale(client, sale, lotState, productMap) {
   }
 }
 
+function simulateAllocation(sale, lotState, productMap, cutoffDate) {
+  let remaining = Number(sale.sale_qty || 0)
+  let allocated = 0
+  const allocationRows = []
+  const lots = candidateLots(lotState, productMap, sale.sale_group, cutoffDate)
+
+  for (const lot of lots) {
+    if (remaining <= 0.0005) break
+    const available = Number(lot.remaining_qty || 0)
+    const take = Math.min(available, remaining)
+    if (take <= 0) continue
+
+    lot.remaining_qty = available - take
+    lotState.set(lot.id, lot)
+    allocationRows.push({ source_lot_id: lot.id, product_id: sale.product_id, qty: take })
+    remaining -= take
+    allocated += take
+  }
+
+  return {
+    allocationRows,
+    allocated,
+    shortage: remaining > 0.0005 ? remaining : 0
+  }
+}
+
+async function enrichAllocationRows(client, allocationRows) {
+  if (!allocationRows.length) return []
+  const lotIds = Array.from(new Set(allocationRows.map(a => a.source_lot_id).filter(Boolean)))
+  const lots = await fetchInChunks(client, 'lots', 'id, lot_no, production_date, source_operation_id, product_id', 'id', lotIds)
+  const lotMap = new Map(lots.map(l => [l.id, l]))
+  const opIds = Array.from(new Set(lots.map(l => l.source_operation_id).filter(Boolean)))
+  const ops = opIds.length
+    ? await fetchInChunks(client, 'operations', 'id, operation_date, document_no, contractor_id', 'id', opIds)
+    : []
+  const opMap = new Map(ops.map(o => [o.id, o]))
+  const contractorIds = Array.from(new Set(ops.map(o => o.contractor_id).filter(Boolean)))
+  const contractors = contractorIds.length
+    ? await fetchInChunks(client, 'contractors', 'id, name', 'id', contractorIds)
+    : []
+  const contractorMap = new Map(contractors.map(c => [c.id, c]))
+
+  return allocationRows.map(row => {
+    const lot = lotMap.get(row.source_lot_id) || {}
+    const pzOp = opMap.get(lot.source_operation_id) || {}
+    return {
+      pz_no: pzOp.document_no || lot.lot_no || '',
+      pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
+      supplier: contractorMap.get(pzOp.contractor_id)?.name || '',
+      qty: row.qty,
+      source_lot_no: lot.lot_no || '',
+      source_lot_id: row.source_lot_id
+    }
+  })
+}
+
+/** Podgląd FIFO dla jednej pozycji WZ z datą graniczną (przerób lub WZ). */
+export async function previewFifoForSale(client, operationId, productId, cutoffDate) {
+  const base = await loadFifoBaseData(client)
+  const saleKey = saleLineKey(operationId, productId)
+  const sale = base.sortedSales.find(s => s.key === saleKey)
+  if (!sale) {
+    return { ok: false, error: 'Nie znaleziono pozycji WZ w danych FIFO.', pzRows: [], allocated: 0, shortage: 0, saleQty: 0 }
+  }
+
+  const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
+  const existing = base.allocationsBySaleKey.get(saleKey) || []
+  if (existing.length) restoreAllocationsToLots(existing, lotState)
+
+  const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
+  const sim = simulateAllocation(sale, lotState, base.productMap, cutoff)
+  const pzRows = await enrichAllocationRows(client, sim.allocationRows)
+
+  return {
+    ok: true,
+    saleKey,
+    saleQty: Number(sale.sale_qty || 0),
+    allocated: sim.allocated,
+    shortage: sim.shortage,
+    pzRows,
+    cutoffDate: cutoff
+  }
+}
+
+/** Zapisuje rozliczenie FIFO dla jednej pozycji WZ z datą graniczną. */
+export async function persistFifoForSale(client, operationId, productId, cutoffDate, logEntry = {}) {
+  const base = await loadFifoBaseData(client)
+  const saleKey = saleLineKey(operationId, productId)
+  const sale = base.sortedSales.find(s => s.key === saleKey)
+  if (!sale) throw new Error('Nie znaleziono pozycji WZ w danych FIFO.')
+
+  const existing = base.allocationsBySaleKey.get(saleKey) || []
+  const beforeData = {
+    allocation_count: existing.length,
+    allocated_qty: existing.reduce((s, a) => s + Number(a.qty || 0), 0)
+  }
+
+  if (existing.length) {
+    restoreAllocationsToLots(existing, base.lotState)
+    await deleteAllocations(client, existing.map(a => a.id))
+    for (const lot of base.lotState.values()) {
+      await persistLot(client, lot)
+    }
+  }
+
+  const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
+  const saleForAlloc = { ...sale, sale_date: cutoff }
+  const result = await allocateSale(client, saleForAlloc, base.lotState, base.productMap)
+
+  const { data: newAllocs, error: allocErr } = await client
+    .from('fifo_allocations')
+    .select('id, qty, source_lot_id, product_id')
+    .eq('operation_id', operationId)
+    .eq('product_id', productId)
+  if (allocErr) throw allocErr
+  const enrichedPz = await enrichAllocationRows(client, (newAllocs || []).map(a => ({
+    source_lot_id: a.source_lot_id,
+    product_id: a.product_id,
+    qty: a.qty
+  })))
+
+  await logFifoChange(client, {
+    wz_no: sale.sale_doc_no,
+    wz_date: String(sale.sale_date || '').slice(0, 10),
+    product_name: sale.product_name,
+    k03_key: logEntry.k03_key || saleKey,
+    change_type: logEntry.change_type || 'k03_fifo_allocated',
+    before_data: beforeData,
+    after_data: {
+      allocated_qty: result.allocated,
+      shortage: result.shortage,
+      cutoff_date: cutoff,
+      allocation_count: result.allocationCount
+    },
+    change_reason: logEntry.change_reason || 'Rozliczenie FIFO dla K03',
+    changed_by: logEntry.changed_by || 'operator'
+  })
+
+  return {
+    ok: true,
+    ...result,
+    pzRows: enrichedPz,
+    cutoffDate: cutoff,
+    saleQty: Number(sale.sale_qty || 0)
+  }
+}
+
+/** Cofnięcie rozliczenia FIFO dla pozycji WZ (tylko gdy K03 nie zamrożony). */
+export async function revertFifoForSale(client, operationId, productId, logEntry = {}) {
+  const base = await loadFifoBaseData(client)
+  const saleKey = saleLineKey(operationId, productId)
+  const existing = base.allocationsBySaleKey.get(saleKey) || []
+  if (!existing.length) return { ok: true, removed: 0 }
+
+  const beforeData = {
+    allocation_count: existing.length,
+    allocated_qty: existing.reduce((s, a) => s + Number(a.qty || 0), 0)
+  }
+
+  restoreAllocationsToLots(existing, base.lotState)
+  await deleteAllocations(client, existing.map(a => a.id))
+  for (const lot of base.lotState.values()) {
+    await persistLot(client, lot)
+  }
+
+  const sale = base.sortedSales.find(s => s.key === saleKey)
+  await logFifoChange(client, {
+    wz_no: sale?.sale_doc_no || '',
+    wz_date: String(sale?.sale_date || '').slice(0, 10),
+    product_name: sale?.product_name || '',
+    k03_key: logEntry.k03_key || saleKey,
+    change_type: logEntry.change_type || 'k03_fifo_reverted',
+    before_data: beforeData,
+    after_data: { allocation_count: 0 },
+    change_reason: logEntry.change_reason || 'Cofnięcie rozliczenia K03/WZ',
+    changed_by: logEntry.changed_by || 'operator'
+  })
+
+  return { ok: true, removed: existing.length }
+}
+
 async function logFifoChange(client, entry) {
   try {
     await client.from('fifo_allocation_change_log').insert(entry)
