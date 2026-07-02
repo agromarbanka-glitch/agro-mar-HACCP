@@ -369,12 +369,16 @@ function App() {
     }
     return Array.from(bySaleProduct.values()).map(doc => {
       const ov = k03Overrides[doc.id] || {}
-      const rawRows = (doc.data.rawRows || []).sort((a,b) => String(a.pz_date || '').localeCompare(String(b.pz_date || '')) || String(a.pz_no || '').localeCompare(String(b.pz_no || '')) || String(a.source_lot_no || '').localeCompare(String(b.source_lot_no || '')))
-      const rawTotal = rawRows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
+      const rawRowsBase = (doc.data.rawRows || []).sort((a,b) => String(a.pz_date || '').localeCompare(String(b.pz_date || '')) || String(a.pz_no || '').localeCompare(String(b.pz_no || '')) || String(a.source_lot_no || '').localeCompare(String(b.source_lot_no || '')))
+      const allocatedTotal = rawRowsBase.reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
       const saleQty = Number(doc.qty || 0)
-      const shortage = Math.max(0, Math.round((saleQty - rawTotal) * 1000) / 1000)
+      const shortage = Math.max(0, Math.round((saleQty - allocatedTotal) * 1000) / 1000)
+      const rawRows = shortage > 0
+        ? [...rawRowsBase, { pz_no: 'BRAK SUROWCA NA DZIEŃ WZ', pz_date: `≤ ${doc.document_date || ''}`, supplier: 'uzupełnij PZ lub popraw datę w PZ/FIFO', qty: shortage, isShortage: true }]
+        : rawRowsBase
+      const rawTotal = rawRows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
       const signed = ov.signed_by_operator || ''
-      return { ...doc, status: doc.data.invalidFuturePz || shortage > 0 ? 'N' : 'P', signed_by_operator: signed, data: { ...doc.data, rawRows, rawTotal, saleQty, shortage, saleRows: [{ wz_no: doc.document_no, wz_date: doc.document_date, receiver: doc.data.odbiorca || '', qty: saleQty, signed_by: signed }] } }
+      return { ...doc, status: doc.data.invalidFuturePz || shortage > 0 ? 'N' : 'P', signed_by_operator: signed, data: { ...doc.data, rawRows, allocatedTotal, rawTotal, saleQty, shortage, saleRows: [{ wz_no: doc.document_no, wz_date: doc.document_date, receiver: doc.data.odbiorca || '', qty: saleQty, signed_by: signed }] } }
     })
   }
 
@@ -872,6 +876,7 @@ function App() {
       rows.push(['Lp.', 'Nr faktury', 'Data zakupu', 'Dostawca', 'Ilość surowca (kg)', 'Lp.', 'Nr faktury', 'Data', 'Odbiorca', 'Ilość w kg', 'Podpis'])
       const max = Math.max(10, rawRows.length, saleRows.length)
       for (let i=0;i<max;i++) { const r = rawRows[i] || {}; const sr = saleRows[i] || {}; rows.push([i+1, r.pz_no || r.source_lot_no || '', r.pz_date || '', r.supplier || '', r.qty || '', i+1, sr.wz_no || '', sr.wz_date || '', sr.receiver || '', sr.qty || '', sr.signed_by || doc?.signed_by_operator || '']) }
+      if (Number(doc?.data?.shortage || 0) > 0) rows.push(['UWAGA', 'Brak surowca na dzień WZ', '', 'Nie dobrano PZ z przyszłości', Number(doc?.data?.shortage || 0), '', '', '', '', '', ''])
       rows.push(['', '', '', 'Suma surowca:', Number(doc?.data?.rawTotal || 0), '', '', '', 'Suma sprzedana:', Number(doc?.qty || 0), ''])
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
@@ -1043,7 +1048,7 @@ function App() {
           {Array.from({ length: maxRows }).map((_, i) => {
             const r = rawRows[i] || {}
             const sr = saleRows[i] || {}
-            return <tr key={`k03-${i}`}><td>{i+1}</td><td>{r.pz_no || r.source_lot_no || ''}</td><td>{r.pz_date || ''}</td><td>{r.supplier || ''}</td><td>{r.qty ? Number(r.qty).toLocaleString('pl-PL') : ''}</td><td className="right-start">{i+1}</td><td>{sr.wz_no || ''}</td><td>{sr.wz_date || ''}</td><td>{sr.receiver || ''}</td><td>{sr.qty ? Number(sr.qty).toLocaleString('pl-PL') : ''}</td><td>{sr.signed_by || doc.signed_by_operator || ''}</td></tr>
+            return <tr key={`k03-${i}`} className={r.isShortage ? 'k03-shortage-row' : ''}><td>{i+1}</td><td>{r.pz_no || r.source_lot_no || ''}</td><td>{r.pz_date || ''}</td><td>{r.supplier || ''}</td><td>{r.qty ? Number(r.qty).toLocaleString('pl-PL') : ''}</td><td className="right-start">{i+1}</td><td>{sr.wz_no || ''}</td><td>{sr.wz_date || ''}</td><td>{sr.receiver || ''}</td><td>{sr.qty ? Number(sr.qty).toLocaleString('pl-PL') : ''}</td><td>{sr.signed_by || doc.signed_by_operator || ''}</td></tr>
           })}
           <tr><td colSpan="4" className="sum-cell">Suma surowca:</td><td><b>{rawTotal.toLocaleString('pl-PL')}</b></td><td className="right-start" colSpan="4">Suma sprzedana:</td><td><b>{saleTotal.toLocaleString('pl-PL')}</b></td><td></td></tr>
         </tbody></table>
@@ -1662,7 +1667,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       }
       let products = []
       if (productIds.length) {
-        const { data, error } = await supabase.from('products').select('id, name').in('id', productIds)
+        const { data, error } = await supabase.from('products').select('id, name, code, product_group').in('id', productIds)
         if (error) throw error
         products = data || []
       }
