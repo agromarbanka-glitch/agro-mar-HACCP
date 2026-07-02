@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION } from './k03Engine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -23,6 +24,19 @@ const DOCS = [
   ['Specyfikacje', 'S01-S09', 'Specyfikacje produktów i opakowań']
 ]
 
+
+const K03_ASSORTMENT_TABS = [
+  ['all', 'Wszystkie'],
+  ['malina', 'Malina'],
+  ['truskawka', 'Truskawka'],
+  ['wisnia', 'Wiśnia'],
+  ['porzeczka_czarna', 'Porzeczka czarna'],
+  ['porzeczka_czerwona', 'Porzeczka czerwona'],
+  ['aronia', 'Aronia'],
+  ['jab_obier', 'Jabłko obierka'],
+  ['jab_przem', 'Jabłko przemysłowe'],
+  ['sliwka', 'Śliwka']
+]
 
 const CHAMBERS = [
   ['CP2-1', 'Komora CP2-1', 'CP2', 'Surowce'],
@@ -207,8 +221,13 @@ function App() {
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
   const [k02Overrides, setK02Overrides] = useState({})
-  const [k03TraceRows, setK03TraceRows] = useState([])
+  const [k03FormsRaw, setK03FormsRaw] = useState([])
   const [k03Overrides, setK03Overrides] = useState({})
+  const [k03AssortmentFilter, setK03AssortmentFilter] = useState('all')
+  const [k03Diag, setK03Diag] = useState({ wzDocs: 0, saleLines: 0, forms: 0, allocations: 0 })
+  const [k03Loading, setK03Loading] = useState(false)
+  const [k03PanelNote, setK03PanelNote] = useState('')
+  const [fifoRecalculating, setFifoRecalculating] = useState(false)
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
   const [auxHalf, setAuxHalf] = useState(new Date().getMonth() < 6 ? '1' : '2')
@@ -258,7 +277,7 @@ function App() {
     { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
     { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna i ręczna edycja. OCR faktur odłożony na później.' },
     { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
-    { code: 'K03', name: 'Identyfikacja partii produktu', status: 'do wykonania', note: 'Po K02, na bazie FIFO i historii partii.' },
+    { code: 'K03', name: 'Identyfikacja partii produktu', status: 'w realizacji', note: 'Jeden formularz = jeden WZ. PZ po lewej, WZ po prawej, sumy zgodne z FIFO.' },
     { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'do wykonania', note: 'CP3/CCP1, po domknięciu K02/K03.' },
     { code: 'K05', name: 'Towary wycofane', status: 'do wykonania', note: 'Po podstawowych kartach magazynowych.' },
     { code: 'K06', name: 'Ocena jakości produktu', status: 'do wykonania', note: 'Po module produkcji/przerobu.' },
@@ -330,57 +349,7 @@ function App() {
   }
 
 
-  function buildSyntheticK03Docs() {
-    const bySaleProduct = new Map()
-    for (const row of k03TraceRows || []) {
-      if (!row.sale_operation_id || !row.product_id) continue
-      const key = `${row.sale_operation_id}|${row.product_id}`
-      if (!bySaleProduct.has(key)) {
-        const saleQty = Number(row.wz_qty ?? row.sale_qty ?? row.qty ?? 0) || 0
-        bySaleProduct.set(key, {
-          id: `K03-${key}`,
-          synthetic: true,
-          document_type: 'K03',
-          document_date: row.wz_date || '',
-          product_name: row.product_name || 'Produkt',
-          lot_no: row.wz_no || '',
-          supplier_name: '',
-          document_no: row.wz_no || '',
-          chamber_code: '',
-          qty: saleQty,
-          status: 'P',
-          data: { wz_no: row.wz_no || '', wz_date: row.wz_date || '', odbiorca: row.receiver_name || '', rawRows: [], saleRows: [], shortage: 0, invalidFuturePz: false },
-          signed_by_operator: '', signed_by_admin: '', document_version: 'II/2024', created_at: row.wz_date || ''
-        })
-      }
-      const doc = bySaleProduct.get(key)
-      const saleQty = Number(row.wz_qty ?? row.sale_qty ?? doc.qty ?? 0) || 0
-      if (saleQty > 0) doc.qty = saleQty
-      if (!doc.product_name || doc.product_name === 'Produkt') doc.product_name = row.product_name || doc.product_name
-      if (!doc.data.odbiorca) doc.data.odbiorca = row.receiver_name || ''
-
-      const qty = Number(row.qty || 0)
-      const pzDate = String(row.pz_date || '').slice(0, 10)
-      const wzDate = String(row.wz_date || '').slice(0, 10)
-      if (pzDate && wzDate && pzDate > wzDate) doc.data.invalidFuturePz = true
-      if (qty > 0 && (row.pz_no || row.source_lot_no)) {
-        doc.data.rawRows.push({ pz_no: row.pz_no || row.source_lot_no || '', pz_date: pzDate, supplier: row.supplier_name || '', qty, source_lot_no: row.source_lot_no || '' })
-      }
-    }
-    return Array.from(bySaleProduct.values()).map(doc => {
-      const ov = k03Overrides[doc.id] || {}
-      const rawRowsBase = (doc.data.rawRows || []).sort((a,b) => String(a.pz_date || '').localeCompare(String(b.pz_date || '')) || String(a.pz_no || '').localeCompare(String(b.pz_no || '')) || String(a.source_lot_no || '').localeCompare(String(b.source_lot_no || '')))
-      const allocatedTotal = rawRowsBase.reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
-      const saleQty = Number(doc.qty || 0)
-      const shortage = Math.max(0, Math.round((saleQty - allocatedTotal) * 1000) / 1000)
-      const rawRows = shortage > 0
-        ? [...rawRowsBase, { pz_no: 'BRAK SUROWCA NA DZIEŃ WZ', pz_date: `≤ ${doc.document_date || ''}`, supplier: 'uzupełnij PZ lub popraw datę w PZ/FIFO', qty: shortage, isShortage: true }]
-        : rawRowsBase
-      const rawTotal = rawRows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
-      const signed = ov.signed_by_operator || ''
-      return { ...doc, status: doc.data.invalidFuturePz || shortage > 0 ? 'N' : 'P', signed_by_operator: signed, data: { ...doc.data, rawRows, allocatedTotal, rawTotal, saleQty, shortage, saleRows: [{ wz_no: doc.document_no, wz_date: doc.document_date, receiver: doc.data.odbiorca || '', qty: saleQty, signed_by: signed }] } }
-    })
-  }
+  const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
 
   function setK03GroupEmployee(doc, employeeName) {
     if (!doc?.id) return
@@ -434,21 +403,27 @@ function App() {
 
   const haccpDocsForFilter = useMemo(() => {
     const q = normalizeText(haccpSearch)
-    const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs) : (docsFilter === 'K03' ? buildSyntheticK03Docs() : haccpDocs)
+    const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs) : (docsFilter === 'K03' ? syntheticK03Docs : haccpDocs)
     return sourceDocs
       .filter(d => d.document_type === docsFilter)
+      .filter(d => {
+        if (docsFilter !== 'K03' || k03AssortmentFilter === 'all') return true
+        const group = d.product_group || d.data?.product_group || productGroupForName(d.product_name || '')
+        return group === k03AssortmentFilter
+      })
       .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
       .filter(d => {
         if (!q) return true
         return normalizeText(`${d.lot_no || ''} ${d.product_name || ''} ${d.supplier_name || ''} ${d.document_no || ''} ${d.chamber_code || ''}`).includes(q)
       })
-  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, k03TraceRows, k03Overrides])
+  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, k03AssortmentFilter])
 
 
   function docInSelectedPeriod(doc) {
     const date = String(doc.document_date || '').slice(0, 10)
-    if (!date) return false
+    if (!date || date === '0000-01-01') return docsFilter === 'K03'
     if (haccpPeriodMode === 'month') return date.slice(0, 7) === haccpMonth
+    if (haccpPeriodMode === 'range' && !haccpFrom && !haccpTo) return true
     const from = haccpFrom || '0000-01-01'
     const to = haccpTo || '9999-12-31'
     return date >= from && date <= to
@@ -456,13 +431,27 @@ function App() {
 
   const haccpPeriodDocs = useMemo(() => {
     return haccpDocsForFilter.filter(docInSelectedPeriod)
-  }, [haccpDocsForFilter, haccpPeriodMode, haccpMonth, haccpFrom, haccpTo])
+  }, [haccpDocsForFilter, haccpPeriodMode, haccpMonth, haccpFrom, haccpTo, docsFilter])
+
+  const haccpListDocs = useMemo(() => {
+    if (docsFilter === 'K03') return haccpDocsForFilter
+    return haccpPeriodDocs
+  }, [docsFilter, haccpDocsForFilter, haccpPeriodDocs])
+
+  const k03AssortmentCounts = useMemo(() => {
+    const counts = new Map([['all', syntheticK03Docs.length]])
+    for (const doc of syntheticK03Docs) {
+      const group = doc.product_group || doc.data?.product_group || productGroupForName(doc.product_name || '')
+      counts.set(group, (counts.get(group) || 0) + 1)
+    }
+    return counts
+  }, [syntheticK03Docs])
 
   const haccpMonthlyGroups = useMemo(() => {
     // Kartoteki zbiorcze korzystają z tych samych dokumentów co filtr okresu,
     // ale grupują je do kartotek miesięcznych/asortymentowych.
     // Na stronie głównej NIE pokazujemy pojedynczych dostaw jako osobnych kartotek.
-    const source = haccpPeriodDocs
+    const source = haccpListDocs
 
     const map = new Map()
     for (const doc of source) {
@@ -474,7 +463,7 @@ function App() {
       const key = doc.document_type === 'K01'
         ? `${doc.document_type}|${period}|${product}`
         : (doc.document_type === 'K03'
-          ? `${doc.document_type}|${period}|${doc.document_no || doc.id}|${product}`
+          ? `${doc.document_type}|${doc.id}|${doc.document_no || 'brak-wz'}`
           : `${doc.document_type}|${period}|${product}|${chamber}`)
       if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
       map.get(key).docs.push(doc)
@@ -488,7 +477,7 @@ function App() {
         docs
       }
     })
-  }, [haccpPeriodDocs])
+  }, [haccpListDocs])
 
   function buildK01MonthlyGroupForPeriod(period) {
     const docs = haccpDocs
@@ -515,20 +504,26 @@ function App() {
       // w wierszu z października nie działa, jeśli u góry wybrany jest inny miesiąc.
       return haccpMonthlyGroups.find(g => g.type === 'K01' && g.period === period) || buildK01MonthlyGroupForPeriod(period)
     }
+    if (doc.document_type === 'K03') {
+      return haccpMonthlyGroups.find(g => g.type === 'K03' && g.docs.some(d => d.id === doc.id)) || null
+    }
     const product = doc.product_name || 'Bez produktu'
     const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
     return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period && g.product === product && g.chamber === chamber) || null
   }
 
   function haccpCount(type) {
+    if (type === 'K03') return syntheticK03Docs.length
     return haccpDocs.filter(d => d.document_type === type).length
   }
 
   function haccpNonconformityCount(type) {
+    if (type === 'K03') return syntheticK03Docs.filter(d => d.status === 'N').length
     return haccpDocs.filter(d => d.document_type === type && d.status === 'N').length
   }
 
   function haccpPendingCount(type) {
+    if (type === 'K03') return syntheticK03Docs.filter(d => !d.signed_by_operator).length
     return haccpDocs.filter(d => d.document_type === type && !d.signed_by_operator).length
   }
 
@@ -836,12 +831,17 @@ function App() {
     const rawRows = doc.data?.rawRows || []
     const saleRows = doc.data?.saleRows || []
     const maxRows = Math.max(10, rawRows.length, saleRows.length)
+    const saleRow = saleRows[0] || {}
+    const saleTotal = Number(doc.qty || 0)
     const rows = Array.from({ length: maxRows }).map((_, i) => {
-      const r = rawRows[i] || {}; const sr = saleRows[i] || {}
-      return `<tr><td>${i+1}</td><td>${escapeHtml(r.pz_no || r.source_lot_no || '')}</td><td>${escapeHtml(r.pz_date || '')}</td><td>${escapeHtml(r.supplier || '')}</td><td>${r.qty ? escapeHtml(Number(r.qty).toLocaleString('pl-PL')) : ''}</td><td>${i+1}</td><td>${escapeHtml(sr.wz_no || '')}</td><td>${escapeHtml(sr.wz_date || '')}</td><td>${escapeHtml(sr.receiver || '')}</td><td>${sr.qty ? escapeHtml(Number(sr.qty).toLocaleString('pl-PL')) : ''}</td><td>${escapeHtml(sr.signed_by || doc.signed_by_operator || '')}</td></tr>`
+      const r = rawRows[i] || {}
+      const rightCells = i === 0
+        ? `<td class="right-start">${i+1}</td><td>${escapeHtml(saleRow.wz_no || doc.document_no || '')}</td><td>${escapeHtml(saleRow.wz_date || doc.document_date || '')}</td><td>${escapeHtml(saleRow.receiver || doc.data?.odbiorca || '')}</td><td>${escapeHtml(saleTotal.toLocaleString('pl-PL'))}</td><td>${escapeHtml(saleRow.signed_by || doc.signed_by_operator || '')}</td>`
+        : `<td class="right-start">${i+1}</td><td></td><td></td><td></td><td></td><td></td>`
+      return `<tr><td>${i+1}</td><td>${escapeHtml(r.pz_no || r.source_lot_no || '')}</td><td>${escapeHtml(r.pz_date || '')}</td><td>${escapeHtml(r.supplier || '')}</td><td>${r.qty ? escapeHtml(Number(r.qty).toLocaleString('pl-PL')) : ''}</td>${rightCells}</tr>`
     }).join('')
     const warn = Number(doc.data?.shortage || 0) > 0 ? `<div style="font-weight:bold;color:#900;margin-top:6px">UWAGA: brak ${(Number(doc.data.shortage)||0).toLocaleString('pl-PL')} kg surowca dostępnego na dzień WZ. Nie użyto PZ z datą po WZ.</div>` : ''
-    return `<!doctype html><html><head><meta charset="utf-8"><title>K03 ${escapeHtml(doc.document_no || '')}</title><style>@page{size:A4 landscape;margin:7mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:33%;font-weight:bold}.title{width:50%;font-weight:bold}.meta{width:17%;text-align:left}.field td{height:28px;text-align:left}.section{font-weight:bold;text-align:center;background:#eee}.sum{font-weight:bold;text-align:right}</style></head><body><table><tbody><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja II/2024</td><td class="title">Karta K03 - Karta identyfikacji partii produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><br><b>Strona:</b></td></tr></tbody></table><table class="field"><tbody><tr><td><b>Nazwa produktu:</b> ${escapeHtml(doc.product_name || '')}</td><td><b>Data produkcji:</b> ${escapeHtml(doc.document_date || '')}</td></tr><tr><td><b>Nadany numer partii:</b> ${escapeHtml(doc.document_no || '')}</td><td><b>Wielkość partii (produktu gotowego):</b> ${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td></tr></tbody></table><table><thead><tr><th class="section" colspan="5">Dane dotyczące dostaw surowców składających się na partię</th><th style="border-left:3px solid #111" class="section" colspan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th style="border-left:3px solid #111">Lp.</th><th>Nr faktury</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>${rows}<tr><td colspan="4" class="sum">Suma surowca:</td><td><b>${escapeHtml(Number(doc.data?.rawTotal || 0).toLocaleString('pl-PL'))}</b></td><td style="border-left:3px solid #111" colspan="4" class="sum">Suma sprzedana:</td><td><b>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</b></td><td></td></tr></tbody></table>${warn}<script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+    return `<!doctype html><html><head><meta charset="utf-8"><title>K03 ${escapeHtml(doc.document_no || '')}</title><style>@page{size:A4 landscape;margin:7mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.08}.company{width:33%;font-weight:bold}.title{width:50%;font-weight:bold}.meta{width:17%;text-align:left}.field td{height:28px;text-align:left}.section{font-weight:bold;text-align:center;background:#eee}.sum{font-weight:bold;text-align:right}</style></head><body><table><tbody><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja I/2024</td><td class="title">Karta K03 - Karta identyfikacji partii produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><br><b>Strona:</b></td></tr></tbody></table><table class="field"><tbody><tr><td><b>Nazwa produktu:</b> ${escapeHtml(doc.product_name || '')}</td><td><b>Data sprzedaży (WZ):</b> ${escapeHtml(doc.document_date || '')}</td></tr><tr><td><b>Numer WZ:</b> ${escapeHtml(doc.document_no || '')}</td><td><b>Ilość WZ (kg):</b> ${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</td></tr></tbody></table><table><thead><tr><th class="section" colspan="5">Dane dotyczące dostaw surowców składających się na partię</th><th style="border-left:3px solid #111" class="section" colspan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th style="border-left:3px solid #111">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>${rows}<tr><td colspan="4" class="sum">Suma surowca:</td><td><b>${escapeHtml(Number(doc.data?.rawTotal || 0).toLocaleString('pl-PL'))}</b></td><td style="border-left:3px solid #111" colspan="4" class="sum">Suma sprzedana:</td><td><b>${escapeHtml(Number(doc.qty || 0).toLocaleString('pl-PL'))}</b></td><td></td></tr></tbody></table>${warn}<script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
   }
 
   function printHaccpGroup(group) {
@@ -868,16 +868,24 @@ function App() {
     } else if (group.type === 'K03') {
       const doc = (docs || [])[0]
       const rawRows = doc?.data?.rawRows || []
-      const saleRows = doc?.data?.saleRows || []
+      const saleRow = (doc?.data?.saleRows || [])[0] || {}
+      const saleTotal = Number(doc?.qty || 0)
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.', '', '', '', '', '', '', 'Karta K03 - Karta identyfikacji partii produktu'])
-      rows.push(['Nazwa produktu:', doc?.product_name || '', '', '', '', 'Data produkcji:', doc?.document_date || ''])
-      rows.push(['Nadany numer partii:', doc?.document_no || '', '', '', '', 'Wielkość partii:', Number(doc?.qty || 0)])
-      rows.push(['Dane dotyczące dostaw surowców składających się na partię', '', '', '', '', 'Dane dotyczące sprzedaży partii gotowego produktu'])
-      rows.push(['Lp.', 'Nr faktury', 'Data zakupu', 'Dostawca', 'Ilość surowca (kg)', 'Lp.', 'Nr faktury', 'Data', 'Odbiorca', 'Ilość w kg', 'Podpis'])
-      const max = Math.max(10, rawRows.length, saleRows.length)
-      for (let i=0;i<max;i++) { const r = rawRows[i] || {}; const sr = saleRows[i] || {}; rows.push([i+1, r.pz_no || r.source_lot_no || '', r.pz_date || '', r.supplier || '', r.qty || '', i+1, sr.wz_no || '', sr.wz_date || '', sr.receiver || '', sr.qty || '', sr.signed_by || doc?.signed_by_operator || '']) }
+      rows.push(['Nazwa produktu:', doc?.product_name || '', '', '', '', 'Data sprzedaży (WZ):', doc?.document_date || ''])
+      rows.push(['Numer WZ:', doc?.document_no || '', '', '', '', 'Ilość WZ (kg):', saleTotal])
+      rows.push(['Dane dotyczące dostaw surowców (PZ)', '', '', '', '', 'Dane dotyczące sprzedaży (WZ)'])
+      rows.push(['Lp.', 'Nr faktury / PZ', 'Data zakupu', 'Dostawca', 'Ilość surowca (kg)', 'Lp.', 'Nr faktury / WZ', 'Data', 'Odbiorca', 'Ilość w kg', 'Podpis'])
+      const max = Math.max(10, rawRows.length)
+      for (let i = 0; i < max; i++) {
+        const r = rawRows[i] || {}
+        if (i === 0) {
+          rows.push([i + 1, r.pz_no || r.source_lot_no || '', r.pz_date || '', r.supplier || '', r.qty || '', i + 1, saleRow.wz_no || doc?.document_no || '', saleRow.wz_date || doc?.document_date || '', saleRow.receiver || doc?.data?.odbiorca || '', saleTotal, saleRow.signed_by || doc?.signed_by_operator || ''])
+        } else {
+          rows.push([i + 1, r.pz_no || r.source_lot_no || '', r.pz_date || '', r.supplier || '', r.qty || '', i + 1, '', '', '', '', ''])
+        }
+      }
       if (Number(doc?.data?.shortage || 0) > 0) rows.push(['UWAGA', 'Brak surowca na dzień WZ', '', 'Nie dobrano PZ z przyszłości', Number(doc?.data?.shortage || 0), '', '', '', '', '', ''])
-      rows.push(['', '', '', 'Suma surowca:', Number(doc?.data?.rawTotal || 0), '', '', '', 'Suma sprzedana:', Number(doc?.qty || 0), ''])
+      rows.push(['', '', '', 'Suma surowca (PZ):', Number(doc?.data?.rawTotal || 0), '', '', '', 'Suma sprzedana (WZ):', saleTotal, ''])
     } else {
       rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
       rows.push([`${group.type} – kartoteka miesięczna`, '', '', '', '', '', '', `Okres: ${periodLabel(group)}`])
@@ -1028,10 +1036,12 @@ function App() {
       if (!doc) return <div className="monthly-paper">Brak danych K03.</div>
       const rawRows = doc.data?.rawRows || []
       const saleRows = doc.data?.saleRows || []
-      const maxRows = Math.max(10, rawRows.length, saleRows.length)
+      const saleRow = saleRows[0] || {}
+      const maxRows = Math.max(10, rawRows.length)
       const rawTotal = Number(doc.data?.rawTotal || 0)
       const saleTotal = Number(doc.qty || 0)
       const shortage = Number(doc.data?.shortage || 0)
+      const quantitiesOk = doc.data?.quantitiesMatch !== false && shortage <= 0
       return <div className="monthly-paper k03-original">
         <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
           <label>Podpis dla całej kartoteki
@@ -1040,19 +1050,24 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <span className="hint">K03 pokazuje tylko PZ faktycznie przypisane przez FIFO do wybranego WZ.</span>
+          <span className="hint">Jeden formularz K03 = jedna sprzedaż (WZ). Po lewej PZ użyte przez FIFO (data PZ ≤ data WZ). Suma PZ = {rawTotal.toLocaleString('pl-PL')} kg, WZ = {saleTotal.toLocaleString('pl-PL')} kg.</span>
         </div>
-        <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja II/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {String(doc.document_date || '').slice(0,4)}<br/><b>Miesiąc:</b> {String(doc.document_date || '').slice(5,7)}<br/><b>Strona:</b></td></tr></tbody></table>
-        <table className="k03-fields"><tbody><tr><td><b>Nazwa produktu:</b> {doc.product_name}</td><td><b>Data produkcji:</b> {doc.document_date}</td></tr><tr><td><b>Nadany numer partii:</b> {doc.document_no}</td><td><b>Wielkość partii (produktu gotowego):</b> {saleTotal.toLocaleString('pl-PL')}</td></tr></tbody></table>
-        <table className="k03-table"><thead><tr><th colSpan="5">Dane dotyczące dostaw surowców składających się na partię</th><th className="right-start" colSpan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th className="right-start">Lp.</th><th>Nr faktury</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>
+        <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {String(doc.document_date || '').slice(0,4)}<br/><b>Miesiąc:</b> {String(doc.document_date || '').slice(5,7)}<br/><b>Strona:</b></td></tr></tbody></table>
+        <table className="k03-fields"><tbody><tr><td><b>Nazwa produktu:</b> {doc.product_name}</td><td><b>Data sprzedaży (WZ):</b> {doc.document_date}</td></tr><tr><td><b>Numer WZ:</b> {doc.document_no}</td><td><b>Ilość WZ (kg):</b> {saleTotal.toLocaleString('pl-PL')}</td></tr><tr><td><b>Odbiorca:</b> {doc.data?.odbiorca || saleRow.receiver || '-'}</td><td><b>FIFO:</b> {quantitiesOk ? 'zgodne' : 'brak / niezgodność'}</td></tr></tbody></table>
+        <table className="k03-table"><thead><tr><th colSpan="5">Dane dotyczące dostaw surowców składających się na partię (PZ)</th><th className="right-start" colSpan="6">Dane dotyczące sprzedaży (WZ)</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th className="right-start">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>
           {Array.from({ length: maxRows }).map((_, i) => {
             const r = rawRows[i] || {}
-            const sr = saleRows[i] || {}
-            return <tr key={`k03-${i}`} className={r.isShortage ? 'k03-shortage-row' : ''}><td>{i+1}</td><td>{r.pz_no || r.source_lot_no || ''}</td><td>{r.pz_date || ''}</td><td>{r.supplier || ''}</td><td>{r.qty ? Number(r.qty).toLocaleString('pl-PL') : ''}</td><td className="right-start">{i+1}</td><td>{sr.wz_no || ''}</td><td>{sr.wz_date || ''}</td><td>{sr.receiver || ''}</td><td>{sr.qty ? Number(sr.qty).toLocaleString('pl-PL') : ''}</td><td>{sr.signed_by || doc.signed_by_operator || ''}</td></tr>
+            return <tr key={`k03-${i}`} className={r.isShortage ? 'k03-shortage-row' : ''}>
+              <td>{i+1}</td><td>{r.pz_no || r.source_lot_no || ''}</td><td>{r.pz_date || ''}</td><td>{r.supplier || ''}</td><td>{r.qty ? Number(r.qty).toLocaleString('pl-PL') : ''}</td>
+              {i === 0
+                ? <><td className="right-start">1</td><td>{doc.document_no || ''}</td><td>{doc.document_date || ''}</td><td>{doc.data?.odbiorca || saleRow.receiver || ''}</td><td>{saleTotal.toLocaleString('pl-PL')}</td><td>{doc.signed_by_operator || saleRow.signed_by || ''}</td></>
+                : <><td className="right-start">{i+1}</td><td></td><td></td><td></td><td></td><td></td></>}
+            </tr>
           })}
-          <tr><td colSpan="4" className="sum-cell">Suma surowca:</td><td><b>{rawTotal.toLocaleString('pl-PL')}</b></td><td className="right-start" colSpan="4">Suma sprzedana:</td><td><b>{saleTotal.toLocaleString('pl-PL')}</b></td><td></td></tr>
+          <tr><td colSpan="4" className="sum-cell">Suma surowca (PZ):</td><td><b>{rawTotal.toLocaleString('pl-PL')}</b></td><td className="right-start" colSpan="4">Suma sprzedana (WZ):</td><td><b>{saleTotal.toLocaleString('pl-PL')}</b></td><td></td></tr>
         </tbody></table>
-        {shortage > 0 && <div className="haccp-warning no-print">Brak {shortage.toLocaleString('pl-PL')} kg surowca dostępnego na dzień WZ. System nie dobiera PZ z datą późniejszą niż WZ.</div>}
+        {shortage > 0 && <div className="haccp-warning no-print">Brak {shortage.toLocaleString('pl-PL')} kg surowca dostępnego na dzień WZ ({doc.document_date}). System nie dobiera PZ z datą późniejszą niż WZ.</div>}
+        {doc.data?.invalidFuturePz && <div className="haccp-warning no-print">Wykryto PZ z datą późniejszą niż WZ – popraw datę w zakładce PZ / FIFO.</div>}
       </div>
     }
 
@@ -1424,16 +1439,67 @@ function App() {
   }
 
   useEffect(() => {
-    if (isSupabaseConfigured) {
-      loadFifoData()
+    if (activeTab === 'kartoteki' && docsFilter === 'K03') {
+      loadK03TraceData()
+    }
+  }, [activeTab, docsFilter])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return
+    ;(async () => {
+      await loadFifoData()
       loadImports()
       loadHaccpDocs()
       loadEmployees()
       loadAuxMaterials()
-      loadK03TraceData()
       loadPzManagementData()
-    }
+      setFifoRecalculating(true)
+      try {
+        const fifoResult = await recalculateFifoEngine()
+        if (fifoResult.ok) {
+          await loadFifoData()
+          await loadK03TraceData()
+          await loadPzManagementData()
+          if ((fifoResult.shortages || []).length) {
+            setMessage(`FIFO przeliczone (${fifoResult.mode}). Brak PZ dla ${fifoResult.shortages.length} pozycji WZ – sprawdź K03.`)
+          }
+        } else {
+          await loadK03TraceData()
+        }
+      } catch (err) {
+        await loadK03TraceData()
+        setMessage(`Uwaga: nie udało się przeliczyć FIFO przy starcie: ${err?.message || String(err)}`)
+      } finally {
+        setFifoRecalculating(false)
+      }
+    })()
   }, [])
+
+  async function runFifoRecalculate(showConfirm = true) {
+    if (!supabase) {
+      setMessage('Brak konfiguracji Supabase.')
+      return null
+    }
+    if (showConfirm && !window.confirm('Przeliczyć FIFO od początku? WZ zostaną rozliczone chronologicznie. PZ użyte będą tylko z datą ≤ data WZ. To zwolni komory po wydaniach.')) return null
+    setFifoRecalculating(true)
+    try {
+      const fifoResult = await recalculateFifoEngine()
+      if (!fifoResult.ok) throw new Error('Przeliczenie FIFO nie powiodło się.')
+      await loadFifoData()
+      await loadK03TraceData()
+      await loadPzManagementData()
+      setFifoKartotekiDirty(false)
+      const shortageCount = (fifoResult.shortages || []).length
+      const shortageMsg = shortageCount ? ` Brak PZ dla ${shortageCount} pozycji WZ.` : ''
+      setMessage(`FIFO przeliczone (${fifoResult.mode}). Komory i K03 odświeżone.${shortageMsg}`)
+      return fifoResult
+    } catch (err) {
+      setMessage(`Błąd przeliczenia FIFO: ${err?.message || String(err)}`)
+      return null
+    } finally {
+      setFifoRecalculating(false)
+    }
+  }
 
   async function handleFile(e) {
     const file = e.target.files?.[0]
@@ -1558,21 +1624,222 @@ async function createIncomingLot(productId, operationId, operationDate, qty, pro
   return lot.id
 }
 
+function resolveProductGroup(product, productName = '') {
+  return product?.product_group || productGroupForName(product?.name || productName)
+}
+
+async function fetchSupabaseInChunks(table, select, column, ids, chunkSize = 80) {
+  const uniqueIds = Array.from(new Set((ids || []).filter(Boolean)))
+  if (!uniqueIds.length) return []
+  const results = []
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize)
+    const { data, error } = await supabase.from(table).select(select).in(column, chunk)
+    if (error) throw error
+    results.push(...(data || []))
+  }
+  return results
+}
+
+function isIncomingLotOperation(op) {
+  if (!op) return true
+  if (op.operation_type === 'przyjecie') return true
+  const no = String(op.document_no || '').toUpperCase()
+  return no.startsWith('PZ') || no.startsWith('MM')
+}
+
+async function recalculateFifoClientSide() {
+  const [{ data: products, error: productsErr }, { data: lotsRaw, error: lotsErr }, { data: operations, error: opsErr }, { data: saleItemsRaw, error: itemsErr }] = await Promise.all([
+    supabase.from('products').select('id, name, code, product_group'),
+    supabase.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
+    supabase.from('operations').select('id, operation_type, operation_date, document_no, created_at'),
+    supabase.from('operation_items').select('id, operation_id, product_id, qty, direction').eq('direction', 'rozchod')
+  ])
+  if (productsErr) throw productsErr
+  if (lotsErr) throw lotsErr
+  if (opsErr) throw opsErr
+  if (itemsErr) throw itemsErr
+
+  const productMap = new Map((products || []).map(p => [p.id, p]))
+  const opMap = new Map((operations || []).map(o => [o.id, o]))
+  const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
+  for (const item of saleItemsRaw || []) {
+    if (item.operation_id) saleOpIds.add(item.operation_id)
+  }
+
+  const { data: existingAllocations, error: allocFetchErr } = await supabase
+    .from('fifo_allocations')
+    .select('id, operation_id')
+  if (allocFetchErr) throw allocFetchErr
+
+  const allocIdsToDelete = (existingAllocations || []).filter(a => saleOpIds.has(a.operation_id)).map(a => a.id)
+  for (let i = 0; i < allocIdsToDelete.length; i += 100) {
+    const chunk = allocIdsToDelete.slice(i, i + 100)
+    if (!chunk.length) continue
+    const { error } = await supabase.from('fifo_allocations').delete().in('id', chunk)
+    if (error) throw error
+  }
+
+  const lotState = new Map()
+  for (const lot of lotsRaw || []) {
+    const srcOp = opMap.get(lot.source_operation_id)
+    const isIncoming = !lot.source_operation_id || isIncomingLotOperation(srcOp)
+    if (!isIncoming || Number(lot.initial_qty || 0) <= 0) {
+      lotState.set(lot.id, { ...lot, remaining_qty: Number(lot.remaining_qty || 0) })
+      continue
+    }
+    lotState.set(lot.id, {
+      ...lot,
+      remaining_qty: Number(lot.initial_qty || 0),
+      status: Number(lot.initial_qty || 0) > 0 ? 'aktywna' : lot.status
+    })
+    const { error } = await supabase.from('lots').update({
+      remaining_qty: Number(lot.initial_qty || 0),
+      status: Number(lot.initial_qty || 0) > 0 ? 'aktywna' : lot.status
+    }).eq('id', lot.id)
+    if (error) throw error
+  }
+
+  const saleLines = []
+  for (const item of saleItemsRaw || []) {
+    const op = opMap.get(item.operation_id)
+    if (!item.operation_id || !item.product_id) continue
+    const qty = Math.abs(Number(item.qty || 0))
+    if (qty <= 0) continue
+    const product = productMap.get(item.product_id)
+    saleLines.push({
+      operation_id: item.operation_id,
+      product_id: item.product_id,
+      sale_group: resolveProductGroup(product),
+      sale_date: op?.operation_date,
+      sale_doc_no: op?.document_no || '',
+      sale_created_at: op?.created_at,
+      sale_qty: qty
+    })
+  }
+
+  const saleGroups = new Map()
+  for (const line of saleLines) {
+    const key = `${line.operation_id}|${line.product_id}`
+    const current = saleGroups.get(key) || { ...line, sale_qty: 0 }
+    current.sale_qty += line.sale_qty
+    saleGroups.set(key, current)
+  }
+
+  const sortedSales = Array.from(saleGroups.values()).sort((a, b) =>
+    String(a.sale_date || '').localeCompare(String(b.sale_date || '')) ||
+    String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
+    String(a.sale_doc_no || '').localeCompare(String(b.sale_doc_no || '')) ||
+    String(a.product_id || '').localeCompare(String(b.product_id || ''))
+  )
+
+  const shortages = []
+  let allocationCount = 0
+
+  for (const sale of sortedSales) {
+    let remaining = Number(sale.sale_qty || 0)
+    let allocated = 0
+    const saleDate = String(sale.sale_date || '9999-12-31').slice(0, 10)
+
+    const candidateLots = Array.from(lotState.values())
+      .filter(lot => {
+        const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+        return group === sale.sale_group &&
+          Number(lot.remaining_qty || 0) > 0 &&
+          lot.production_date &&
+          String(lot.production_date).slice(0, 10) <= saleDate
+      })
+      .sort((a, b) =>
+        String(a.production_date || '').localeCompare(String(b.production_date || '')) ||
+        String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+        String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
+      )
+
+    for (const lot of candidateLots) {
+      if (remaining <= 0) break
+      const available = Number(lot.remaining_qty || 0)
+      const take = Math.min(available, remaining)
+      if (take <= 0) continue
+
+      const newRemaining = available - take
+      lot.remaining_qty = newRemaining
+      lot.status = newRemaining <= 0.0005 ? 'zuzyta' : 'aktywna'
+      lotState.set(lot.id, lot)
+
+      const { error: lotErr } = await supabase.from('lots').update({
+        remaining_qty: newRemaining,
+        status: lot.status
+      }).eq('id', lot.id)
+      if (lotErr) throw lotErr
+
+      const { error: allocErr } = await supabase.from('fifo_allocations').insert({
+        operation_id: sale.operation_id,
+        source_lot_id: lot.id,
+        product_id: sale.product_id,
+        qty: take
+      })
+      if (allocErr) throw allocErr
+
+      allocationCount += 1
+      remaining -= take
+      allocated += take
+    }
+
+    if (remaining > 0.0005) {
+      shortages.push({
+        wz_no: sale.sale_doc_no,
+        wz_date: saleDate,
+        product_group: sale.sale_group,
+        wz_qty: Number(sale.sale_qty || 0),
+        allocated_qty: allocated,
+        shortage: remaining
+      })
+    }
+  }
+
+  return { ok: true, mode: 'client', shortages, allocationCount }
+}
+
+async function recalculateFifoEngine() {
+  if (!supabase) return { ok: false, mode: 'none', shortages: [], allocationCount: 0 }
+  const { error } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
+  if (!error) {
+    const { count } = await supabase.from('fifo_allocations').select('*', { count: 'exact', head: true })
+    return { ok: true, mode: 'rpc', shortages: [], allocationCount: count || 0 }
+  }
+  console.warn('FIFO RPC niedostępne, przeliczanie po stronie aplikacji:', error?.message || error)
+  const clientResult = await recalculateFifoClientSide()
+  return clientResult
+}
+
 async function allocateFifo(operationId, productId, qtyNeeded, operationDate = null) {
   let remainingToAllocate = Math.abs(Number(qtyNeeded) || 0)
   const allocations = []
 
+  const { data: product, error: productErr } = await supabase
+    .from('products')
+    .select('id, name, code, product_group')
+    .eq('id', productId)
+    .maybeSingle()
+  if (productErr) throw productErr
+  const saleGroup = resolveProductGroup(product)
+
   const { data: lots, error } = await supabase
     .from('lots')
-    .select('id, remaining_qty, production_date, created_at')
-    .eq('product_id', productId)
+    .select('id, remaining_qty, production_date, created_at, product_group, lot_no, product_id')
     .gt('remaining_qty', 0)
     .lte('production_date', operationDate || '9999-12-31')
     .order('production_date', { ascending: true })
     .order('created_at', { ascending: true })
   if (error) throw error
 
-  for (const lot of lots || []) {
+  const matchingLots = (lots || []).filter(lot => {
+    const lotGroup = lot.product_group
+    if (lotGroup && saleGroup) return lotGroup === saleGroup
+    return lot.product_id === productId
+  })
+
+  for (const lot of matchingLots) {
     if (remainingToAllocate <= 0) break
     const available = Number(lot.remaining_qty) || 0
     const take = Math.min(available, remainingToAllocate)
@@ -1599,149 +1866,67 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
 
   async function loadK03TraceData() {
-    if (!supabase) return
+    setK03Loading(true)
     try {
-      // K03 musi pokazać również WZ, dla których FIFO nie znalazło pełnej ilości PZ.
-      // Dlatego najpierw pobieramy wszystkie rozchody (WZ), a dopiero potem dołączamy rozliczenia FIFO.
-      const { data: saleItemsRaw, error: saleItemsErr } = await supabase
-        .from('operation_items')
-        .select('id, operation_id, product_id, qty, direction')
-        .eq('direction', 'rozchod')
-        .limit(50000)
-      if (saleItemsErr) throw saleItemsErr
+      let forms = []
+      let diag = { wzDocs: 0, saleLines: 0, forms: 0, allocations: 0, source: 'brak' }
+      let note = ''
 
-      const saleOperationIdsFromItems = Array.from(new Set((saleItemsRaw || []).map(i => i.operation_id).filter(Boolean)))
-      let saleOps = []
-      if (saleOperationIdsFromItems.length) {
-        const { data, error } = await supabase
+      if (supabase) {
+        const result = await loadK03Forms(supabase)
+        forms = result.forms || []
+        diag = result.diag || diag
+        note = result.message || ''
+      } else {
+        note = 'Brak pliku .env z danymi bazy – K03 pokaże WZ z wczytanego Excela (jeśli jest).'
+      }
+
+      if (!forms.length && supabase && importRows.length) {
+        const latestImport = importRows[0]
+        const { data: opsFromImport, error: importOpsErr } = await supabase
           .from('operations')
-          .select('id, operation_type, operation_date, document_no, contractor_id, created_at')
-          .in('id', saleOperationIdsFromItems)
-        if (error) throw error
-        saleOps = data || []
-      }
-      const saleOpMap = new Map(saleOps.map(o => [o.id, o]))
-      const saleItems = (saleItemsRaw || []).filter(i => {
-        const op = saleOpMap.get(i.operation_id)
-        const no = String(op?.document_no || '').toUpperCase()
-        // K03 dotyczy sprzedaży/WZ, nie ręcznych przerobów technologicznych.
-        return op && (no.startsWith('WZ') || op.operation_type === 'sprzedaz' || op.operation_type === 'sprzedaz_bez_produkcji')
-      })
-
-      const saleKeyMap = new Map()
-      for (const item of saleItems) {
-        if (!item.operation_id || !item.product_id) continue
-        const key = `${item.operation_id}|${item.product_id}`
-        const op = saleOpMap.get(item.operation_id) || {}
-        const current = saleKeyMap.get(key) || { operation_id: item.operation_id, product_id: item.product_id, wz_qty: 0, op }
-        current.wz_qty += Math.abs(Number(item.qty || 0))
-        saleKeyMap.set(key, current)
-      }
-
-      const { data: allocationsRaw, error: allocErr } = await supabase
-        .from('fifo_allocations')
-        .select('id, qty, source_lot_id, product_id, operation_id, created_at')
-        .order('created_at', { ascending: true })
-        .limit(50000)
-      if (allocErr) throw allocErr
-      const allocations = allocationsRaw || []
-
-      const sourceLotIds = Array.from(new Set(allocations.map(a => a.source_lot_id).filter(Boolean)))
-      const productIds = Array.from(new Set([
-        ...Array.from(saleKeyMap.values()).map(s => s.product_id).filter(Boolean),
-        ...allocations.map(a => a.product_id).filter(Boolean)
-      ]))
-
-      let sourceLots = []
-      if (sourceLotIds.length) {
-        const { data, error } = await supabase.from('lots').select('id, lot_no, production_date, source_operation_id, product_id').in('id', sourceLotIds)
-        if (error) throw error
-        sourceLots = data || []
-      }
-      const sourceOperationIds = Array.from(new Set(sourceLots.map(l => l.source_operation_id).filter(Boolean)))
-      let sourceOps = []
-      if (sourceOperationIds.length) {
-        const { data, error } = await supabase.from('operations').select('id, operation_date, document_no, contractor_id').in('id', sourceOperationIds)
-        if (error) throw error
-        sourceOps = data || []
-      }
-      let products = []
-      if (productIds.length) {
-        const { data, error } = await supabase.from('products').select('id, name, code, product_group').in('id', productIds)
-        if (error) throw error
-        products = data || []
-      }
-      const contractorIds = Array.from(new Set([...saleOps, ...sourceOps].map(o => o.contractor_id).filter(Boolean)))
-      let contractors = []
-      if (contractorIds.length) {
-        const { data } = await supabase.from('contractors').select('id, name').in('id', contractorIds)
-        contractors = data || []
-      }
-
-      const sourceLotMap = new Map(sourceLots.map(l => [l.id, l]))
-      const sourceOpMap = new Map(sourceOps.map(o => [o.id, o]))
-      const productMap = new Map(products.map(p => [p.id, p]))
-      const contractorMap = new Map(contractors.map(c => [c.id, c]))
-      const allocSumBySaleKey = new Map()
-
-      const rows = []
-      for (const a of allocations) {
-        const saleKey = `${a.operation_id}|${a.product_id}`
-        const sale = saleKeyMap.get(saleKey)
-        if (!sale) continue
-        const saleOp = sale.op || saleOpMap.get(a.operation_id) || {}
-        const lot = sourceLotMap.get(a.source_lot_id) || {}
-        const pzOp = sourceOpMap.get(lot.source_operation_id) || {}
-        const pzDate = String(pzOp.operation_date || lot.production_date || '').slice(0, 10)
-        const wzDate = String(saleOp.operation_date || '').slice(0, 10)
-        const qty = Number(a.qty || 0)
-        allocSumBySaleKey.set(saleKey, (allocSumBySaleKey.get(saleKey) || 0) + qty)
-        rows.push({
-          allocation_id: a.id,
-          sale_operation_id: a.operation_id,
-          product_id: a.product_id,
-          product_name: productMap.get(a.product_id)?.name || '',
-          wz_no: saleOp.document_no || '',
-          wz_date: wzDate,
-          wz_qty: Number(sale.wz_qty || 0),
-          receiver_name: contractorMap.get(saleOp.contractor_id)?.name || '',
-          source_lot_id: a.source_lot_id,
-          source_lot_no: lot.lot_no || '',
-          pz_no: pzOp.document_no || lot.lot_no || '',
-          pz_date: pzDate,
-          supplier_name: contractorMap.get(pzOp.contractor_id)?.name || '',
-          qty
-        })
-      }
-
-      // Dodajemy pusty wiersz dla każdego WZ z brakiem FIFO, żeby K03 nie była pusta.
-      for (const [key, sale] of saleKeyMap.entries()) {
-        const allocated = allocSumBySaleKey.get(key) || 0
-        const wzQty = Number(sale.wz_qty || 0)
-        if (wzQty <= 0) continue
-        if (allocated < wzQty - 0.001) {
-          const saleOp = sale.op || {}
-          rows.push({
-            allocation_id: `SHORTAGE-${key}`,
-            sale_operation_id: sale.operation_id,
-            product_id: sale.product_id,
-            product_name: productMap.get(sale.product_id)?.name || '',
-            wz_no: saleOp.document_no || '',
-            wz_date: String(saleOp.operation_date || '').slice(0, 10),
-            wz_qty: wzQty,
-            receiver_name: contractorMap.get(saleOp.contractor_id)?.name || '',
-            source_lot_id: '', source_lot_no: '', pz_no: '', pz_date: '', supplier_name: '', qty: 0,
-            shortage_only: true
-          })
+          .select('id, operation_type, operation_date, document_no, invoice_no, contractor_id, created_at, operation_items(qty, direction, raw_product_name, product_id)')
+          .eq('imported_file_id', latestImport.id)
+          .order('operation_date', { ascending: true })
+          .limit(500)
+        if (!importOpsErr && opsFromImport?.length) {
+          const fromImport = buildK03FormsFromImportPreview(opsFromImport)
+          if (fromImport.length) {
+            forms = fromImport
+            diag = { ...diag, forms: fromImport.length, wzDocs: opsFromImport.filter(isSaleOperation).length, source: 'ostatni-import' }
+            note = `Pokazuję ${fromImport.length} WZ z ostatniego importu Excel („${latestImport.filename || 'plik'}”). Kliknij „Przelicz FIFO”, żeby dobrać PZ.`
+          }
         }
       }
 
-      rows.sort((a,b) => String(a.wz_date || '').localeCompare(String(b.wz_date || '')) || String(a.wz_no || '').localeCompare(String(b.wz_no || '')) || String(a.pz_date || '').localeCompare(String(b.pz_date || '')))
-      setK03TraceRows(rows.filter(r => r.wz_no && r.wz_date))
+      if (!forms.length && importPreview.length) {
+        const fromImport = buildK03FormsFromImportPreview(importPreview)
+        if (fromImport.length) {
+          forms = fromImport
+          diag = { ...diag, forms: fromImport.length, source: 'podglad-importu' }
+          note = `Pokazuję ${fromImport.length} WZ z podglądu importu. Otwórz zakładkę Importy → Podgląd przy pliku Excel.`
+        }
+      }
+
+      if (!forms.length && filteredRows.some(r => r.operation === 'sprzedaz')) {
+        const fromExcel = buildK03FormsFromExcelRows(filteredRows)
+        if (fromExcel.length) {
+          forms = fromExcel
+          diag = { ...diag, forms: fromExcel.length, wzDocs: new Set(fromExcel.map(f => f.document_no)).size, source: 'excel' }
+          note = `Pokazuję ${fromExcel.length} WZ z wczytanego Excela. Aby zapisać na stałe: Importy → Zapisz do Supabase, potem Odśwież kartoteki.`
+        }
+      }
+
+      setK03FormsRaw(forms)
+      setK03Diag(diag)
+      setK03PanelNote(note || (forms.length ? `Załadowano ${forms.length} formularzy K03.` : 'Brak WZ do wyświetlenia.'))
     } catch (err) {
-      setK03TraceRows([])
-      console.error('K03 trace load error', err)
-      setMessage(`Błąd odczytu K03/FIFO: ${err?.message || String(err)}`)
+      setK03FormsRaw([])
+      setK03Diag({ wzDocs: 0, saleLines: 0, forms: 0, allocations: 0, source: 'blad' })
+      console.error('K03 load error', err)
+      setK03PanelNote(`Błąd K03: ${err?.message || String(err)}`)
+    } finally {
+      setK03Loading(false)
     }
   }
 
@@ -2298,24 +2483,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         if (opErr) throw opErr
       }
       await supabase.from('pz_fifo_change_log').insert({ lot_id: row.id, source_operation_id: row.source_operation_id, document_no: row.document_no, old_date: oldDate, new_date: newDate, change_reason: reason || 'Korekta daty PZ/FIFO', changed_by: 'admin', action_type: 'change_date' })
-      const { error: rpcErr } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
-      if (rpcErr) throw rpcErr
+      await runFifoRecalculate(false)
       setFifoKartotekiDirty(true)
-      setMessage('Zmieniono datę PZ i przeliczono FIFO. Kartoteki nie zostały jeszcze odświeżone – kliknij „Odśwież kartoteki”.')
-      await loadPzManagementData(); await loadFifoData()
+      setMessage('Zmieniono datę PZ i przeliczono FIFO. K03 i komory zostały odświeżone.')
+      await loadPzManagementData()
     } catch (err) { setMessage(`Błąd zmiany daty PZ: ${err?.message || String(err)}`) }
   }
 
   async function recalculateFifoFromPzTab() {
-    if (!supabase) return
-    if (!window.confirm('Przeliczyć FIFO od początku? System nie będzie używał PZ z datą późniejszą niż WZ.')) return
-    try {
-      const { error } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
-      if (error) throw error
-      setFifoKartotekiDirty(true)
-      setMessage('FIFO przeliczone. Kartoteki wymagają odświeżenia.')
-      await loadPzManagementData(); await loadFifoData(); await loadK03TraceData()
-    } catch (err) { setMessage(`Błąd przeliczenia FIFO: ${err?.message || String(err)}`) }
+    await runFifoRecalculate(true)
   }
 
   async function refreshHaccpAfterFifo() {
@@ -2335,11 +2511,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         if (opErr) throw opErr
       }
       await supabase.from('pz_fifo_change_log').insert({ lot_id: change.lot_id, source_operation_id: change.source_operation_id, document_no: change.document_no, old_date: change.new_date, new_date: change.old_date, change_reason: `Cofnięcie zmiany ${change.id || ''}`, changed_by: 'admin', action_type: 'undo_date_change' })
-      const { error } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
-      if (error) throw error
+      await runFifoRecalculate(false)
       setFifoKartotekiDirty(true)
-      setMessage('Cofnięto zmianę i przeliczono FIFO. Kartoteki wymagają odświeżenia.')
-      await loadPzManagementData(); await loadFifoData()
+      setMessage('Cofnięto zmianę i przeliczono FIFO. K03 i komory odświeżone.')
+      await loadPzManagementData()
     } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
   }
 
@@ -2387,7 +2562,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       const contractorCache = new Map()
       const groups = groupImportRows(filteredRows)
       const existingKeys = await getExistingOperationKeys(groups)
-      const groupsToImport = groups.filter(g => !existingKeys.has(`${g.operation}|${g.documentNo}`))
+      const groupsToImport = groups
+        .filter(g => !existingKeys.has(`${g.operation}|${g.documentNo}`))
+        .sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
       const duplicateCount = groups.length - groupsToImport.length
 
       const { data: imported, error: fileError } = await supabase
@@ -2404,9 +2581,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       let importedOperations = 0
       let importedItems = 0
       let createdLots = 0
-      let fifoAllocations = 0
-      let shortageCount = 0
-      let shortageKg = 0
+      let rozchodItems = 0
 
       for (const group of groupsToImport) {
         const contractorId = await getOrCreateContractor(group.contractorName, contractorCache)
@@ -2464,14 +2639,24 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               .eq('id', item.id)
             if (itemLotErr) throw itemLotErr
           } else {
-            const result = await allocateFifo(op.id, productId, itemQty, group.issueDate)
-            fifoAllocations += result.allocations.length
-            if (result.shortage > 0) {
-              shortageCount += 1
-              shortageKg += result.shortage
-            }
+            rozchodItems += 1
           }
         }
+      }
+
+      setFifoRecalculating(true)
+      let fifoAllocations = 0
+      let shortageCount = 0
+      let shortageKg = 0
+      try {
+        const fifoResult = await recalculateFifoEngine()
+        if (fifoResult.ok) {
+          fifoAllocations = fifoResult.allocationCount ?? rozchodItems
+          shortageCount = (fifoResult.shortages || []).length
+          shortageKg = (fifoResult.shortages || []).reduce((sum, s) => sum + Number(s.shortage || 0), 0)
+        }
+      } finally {
+        setFifoRecalculating(false)
       }
 
       setMessage(
@@ -2494,7 +2679,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> Osobny projekt od opakowań · v26 STATUS MODUŁÓW</div>
+      <div className="badge"><ShieldCheck size={18}/> v27 · K03 {K03_ENGINE_VERSION} · FIFO</div>
     </header>
 
     <section className="warning">
@@ -2771,9 +2956,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p>v24.16: dodano K01.1 – materiały pomocnicze, kartoteka półroczna z ręczną edycją, drukiem i Excelem.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v27 · K03 {K03_ENGINE_VERSION}</b> – jeden formularz = jeden WZ. Po lewej PZ, po prawej WZ. K03 pokazuje <b>wszystkie WZ</b> (filtr daty go nie dotyczy).</p></div></div>
       <div className="haccp-card-grid">
-        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => setDocsFilter(code)}>
+        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData() } }}>
           <b>{title}</b><small>{desc}</small>
           <span><b>{haccpCount(code)}</b> dokumentów · <b>{haccpNonconformityCount(code)}</b> N · <b>{haccpPendingCount(code)}</b> bez podpisu</span>
         </button>)}
@@ -2782,34 +2967,100 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <label>Szukaj partii / produktu / PZ / dostawcy<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="np. Jab/067, PZ/..., dostawca" /></label>
         <label>Status<select value={haccpStatusFilter} onChange={e => setHaccpStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="P">Prawidłowe P</option><option value="N">Niezgodność N</option></select></label>
       </div>
-      <div className="form-grid compact">
+      {docsFilter !== 'K03' && <div className="form-grid compact">
         <label>Okres<select value={haccpPeriodMode} onChange={e => setHaccpPeriodMode(e.target.value)}><option value="month">Miesiąc</option><option value="range">Własny zakres</option></select></label>
         {haccpPeriodMode === 'month' && <label>Miesiąc<input type="month" value={haccpMonth} onChange={e => setHaccpMonth(e.target.value)} /></label>}
         {haccpPeriodMode === 'range' && <><label>Od<input type="date" value={haccpFrom} onChange={e => setHaccpFrom(e.target.value)} /></label><label>Do<input type="date" value={haccpTo} onChange={e => setHaccpTo(e.target.value)} /></label></>}
-      </div>
-      <div className="actions"><button className="secondary" onClick={loadHaccpDocs}><RefreshCcw size={16}/> Odśwież kartoteki</button></div>
+      </div>}
+      <div className="actions"><button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData() }}><RefreshCcw size={16}/> Odśwież kartoteki</button>{docsFilter === 'K03' && <button onClick={() => runFifoRecalculate(true)} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'Przeliczanie FIFO...' : 'Przelicz FIFO (wydania WZ)'}</button>}</div>
+      {docsFilter === 'K03' && <>
+        <div className="k03-status-box">
+          <strong>K03 – status (wersja {K03_ENGINE_VERSION})</strong>
+          <p>{k03Loading ? 'Ładowanie formularzy…' : (k03PanelNote || 'Kliknij „Odśwież kartoteki”, jeśli lista jest pusta.')}</p>
+          <p className="hint">
+            W bazie: <b>{k03Diag.wzDocs}</b> WZ · <b>{k03Diag.saleLines || k03Diag.forms}</b> pozycji ·
+            <b> {syntheticK03Docs.length}</b> formularzy na liście
+            {k03Diag.source ? ` · źródło: ${k03Diag.source}` : ''}
+          </p>
+          <p className="hint">Jeśli u góry strony widzisz „v26” zamiast „<b>v27 · K03 {K03_ENGINE_VERSION}</b>” – masz starą wersję. Zamknij aplikację i uruchom ponownie z folderu projektu (patrz instrukcja poniżej).</p>
+        </div>
+        <div className="haccp-tabs k03-tabs">
+          {K03_ASSORTMENT_TABS.map(([code, label]) => {
+            const count = k03AssortmentCounts.get(code) || 0
+            return <button key={code} className={k03AssortmentFilter === code ? 'tab active' : 'tab'} onClick={() => setK03AssortmentFilter(code)}>{label} ({count})</button>
+          })}
+        </div>
+      </>}
       {docsFilter === 'K01.1' && renderK011Section()}
       {docsFilter !== 'K01.1' && <>
-      <div className="doc-progress">{['K01','K02','K04','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
-      <h3>Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat</h3><p className="hint"><b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</p>
-      {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek zbiorczych dla wybranego okresu i filtrów.</p>}
+      <div className="doc-progress">{['K01','K02','K03','K04','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
+      <h3>{docsFilter === 'K03' ? 'Formularze K03 – jedna sprzedaż (WZ) = jedna kartoteka' : 'Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat'}</h3>
+      <p className="hint">{docsFilter === 'K03'
+        ? <>Wybierz asortyment powyżej, potem kliknij <b>Kartoteka</b> przy wybranym WZ. Suma PZ po lewej musi równać się ilości WZ po prawej.</>
+        : <> <b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</>}</p>
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak formularzy K03 na liście. {k03Diag.wzDocs > 0 ? `W bazie jest ${k03Diag.wzDocs} WZ – kliknij „Odśwież kartoteki” lub „Przelicz FIFO”.` : ' Zaimportuj Excel z WZ → Zapisz do Supabase → Odśwież kartoteki.'}</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr><th>Kartoteka</th><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th><th>Akcje</th></tr></thead>
-        <tbody>{haccpMonthlyGroups.map(g => <tr key={g.key}><td><b>{g.type}</b></td><td>{periodLabel(g)}</td><td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td><td>{g.docs.length}</td><td>{g.docs.filter(d => d.status === 'N').length}</td><td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td></tr>)}</tbody>
+        <thead><tr>
+          <th>Kartoteka</th>
+          {docsFilter === 'K03' ? <><th>Data WZ</th><th>Nr WZ</th><th>Asortyment</th><th>Ilość WZ</th><th>Suma PZ</th><th>FIFO</th><th>Niezgodności</th></> : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th></>}
+          <th>Akcje</th>
+        </tr></thead>
+        <tbody>{haccpMonthlyGroups.map(g => {
+          const doc = g.docs[0]
+          if (docsFilter === 'K03' && doc) {
+            const saleQty = Number(doc.qty || 0)
+            const pzQty = Number(doc.data?.rawTotal || 0)
+            const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
+            return <tr key={g.key}>
+              <td><b>{g.type}</b></td>
+              <td>{doc.document_date || '-'}</td>
+              <td><b>{doc.document_no || '-'}</b></td>
+              <td>{doc.product_name || g.product}</td>
+              <td>{saleQty.toLocaleString('pl-PL')} kg</td>
+              <td>{pzQty.toLocaleString('pl-PL')} kg</td>
+              <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : 'BRAK'}</span></td>
+              <td>{doc.status === 'N' ? 1 : 0}</td>
+              <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td>
+            </tr>
+          }
+          return <tr key={g.key}><td><b>{g.type}</b></td><td>{periodLabel(g)}</td><td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td><td>{g.docs.length}</td><td>{g.docs.filter(d => d.status === 'N').length}</td><td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td></tr>
+        })}</tbody>
       </table></div>}
-      <h3>Kartoteki do edycji – dokładnie te same pozycje co wyżej</h3>
-      <p className="hint"><b>Ta sekcja ma mieć taką samą liczbę pozycji jak sekcja u góry.</b> Kliknięcie „Edytuj kartotekę” otwiera całą miesięczną kartotekę asortymentu w trybie edycji: P/N, podpis pracownika i PZ.</p>
+      <h3>{docsFilter === 'K03' ? 'Edycja formularzy K03' : 'Kartoteki do edycji – dokładnie te same pozycje co wyżej'}</h3>
+      <p className="hint">{docsFilter === 'K03'
+        ? 'Te same pozycje co powyżej. W formularzu możesz ustawić podpis uzupełniającego wpisy.'
+        : <> <b>Ta sekcja ma mieć taką samą liczbę pozycji jak sekcja u góry.</b> Kliknięcie „Edytuj kartotekę” otwiera całą miesięczną kartotekę asortymentu w trybie edycji: P/N, podpis pracownika i PZ.</>}</p>
       {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek do edycji dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr><th>Kartoteka</th><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th><th>Akcje</th></tr></thead>
-        <tbody>{haccpMonthlyGroups.map(g => <tr key={`edit-${g.key}`}>
-          <td><b>{g.type}</b></td>
-          <td>{periodLabel(g)}</td>
-          <td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td>
-          <td>{g.docs.length}</td>
-          <td>{g.docs.filter(d => d.status === 'N').length}</td>
-          <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
-        </tr>)}</tbody>
+        <thead><tr>
+          <th>Kartoteka</th>
+          {docsFilter === 'K03' ? <><th>Data WZ</th><th>Nr WZ</th><th>Asortyment</th><th>Ilość WZ</th><th>FIFO</th></> : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th></>}
+          <th>Akcje</th>
+        </tr></thead>
+        <tbody>{haccpMonthlyGroups.map(g => {
+          const doc = g.docs[0]
+          if (docsFilter === 'K03' && doc) {
+            const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
+            return <tr key={`edit-${g.key}`}>
+              <td><b>{g.type}</b></td>
+              <td>{doc.document_date || '-'}</td>
+              <td><b>{doc.document_no || '-'}</b></td>
+              <td>{doc.product_name || g.product}</td>
+              <td>{Number(doc.qty || 0).toLocaleString('pl-PL')} kg</td>
+              <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : 'BRAK'}</span></td>
+              <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
+            </tr>
+          }
+          return <tr key={`edit-${g.key}`}>
+            <td><b>{g.type}</b></td>
+            <td>{periodLabel(g)}</td>
+            <td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td>
+            <td>{g.docs.length}</td>
+            <td>{g.docs.filter(d => d.status === 'N').length}</td>
+            <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
+          </tr>
+        })}</tbody>
       </table></div>}
       </>}
     </section>

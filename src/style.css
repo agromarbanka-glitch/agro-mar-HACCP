@@ -181,5 +181,9 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .pz-status-czesciowo { background: #fef3c7; color: #92400e; }
 .pz-status-wykorzystana { background: #dcfce7; color: #166534; }
 
-.k03-shortage-row td { background: #fee2e2 !important; color: #7f1d1d; font-weight: 700; }
+.k03-status-box { margin: 12px 0; padding: 14px 16px; border-radius: 14px; background: #eef6ef; border: 1px solid #c8dcc9; }
+.k03-status-box strong { display: block; margin-bottom: 6px; color: #1d4d28; }
+.k03-status-box p { margin: 4px 0; }
+.k03-tabs { margin: 10px 0 14px; flex-wrap: wrap; }
+.k03-tabs .tab { font-size: 13px; }
 @media print { .k03-shortage-row td { background: #fff !important; color: #111; font-weight: 700; } }
