@@ -2958,7 +2958,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     <section className="card" id="kartoteki-haccp">
       <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v27 · K03 {K03_ENGINE_VERSION}</b> – jeden formularz = jeden WZ. Po lewej PZ, po prawej WZ. K03 pokazuje <b>wszystkie WZ</b> (filtr daty go nie dotyczy).</p></div></div>
       <div className="haccp-card-grid">
-        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData() } }}>
+        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData() }}>
           <b>{title}</b><small>{desc}</small>
           <span><b>{haccpCount(code)}</b> dokumentów · <b>{haccpNonconformityCount(code)}</b> N · <b>{haccpPendingCount(code)}</b> bez podpisu</span>
         </button>)}
