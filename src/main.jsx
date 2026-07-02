@@ -321,6 +321,7 @@ function App() {
       if (!row.sale_operation_id || !row.product_id) continue
       const key = `${row.sale_operation_id}|${row.product_id}`
       if (!bySaleProduct.has(key)) {
+        const saleQty = Number(row.wz_qty ?? row.sale_qty ?? row.qty ?? 0) || 0
         bySaleProduct.set(key, {
           id: `K03-${key}`,
           synthetic: true,
@@ -331,26 +332,32 @@ function App() {
           supplier_name: '',
           document_no: row.wz_no || '',
           chamber_code: '',
-          qty: 0,
+          qty: saleQty,
           status: 'P',
           data: { wz_no: row.wz_no || '', wz_date: row.wz_date || '', odbiorca: row.receiver_name || '', rawRows: [], saleRows: [], shortage: 0, invalidFuturePz: false },
           signed_by_operator: '', signed_by_admin: '', document_version: 'II/2024', created_at: row.wz_date || ''
         })
       }
       const doc = bySaleProduct.get(key)
+      const saleQty = Number(row.wz_qty ?? row.sale_qty ?? doc.qty ?? 0) || 0
+      if (saleQty > 0) doc.qty = saleQty
+      if (!doc.product_name || doc.product_name === 'Produkt') doc.product_name = row.product_name || doc.product_name
+      if (!doc.data.odbiorca) doc.data.odbiorca = row.receiver_name || ''
+
       const qty = Number(row.qty || 0)
-      doc.qty += qty
       const pzDate = String(row.pz_date || '').slice(0, 10)
       const wzDate = String(row.wz_date || '').slice(0, 10)
       if (pzDate && wzDate && pzDate > wzDate) doc.data.invalidFuturePz = true
-      doc.data.rawRows.push({ pz_no: row.pz_no || row.source_lot_no || '', pz_date: pzDate, supplier: row.supplier_name || '', qty, source_lot_no: row.source_lot_no || '' })
+      if (qty > 0 && (row.pz_no || row.source_lot_no)) {
+        doc.data.rawRows.push({ pz_no: row.pz_no || row.source_lot_no || '', pz_date: pzDate, supplier: row.supplier_name || '', qty, source_lot_no: row.source_lot_no || '' })
+      }
     }
     return Array.from(bySaleProduct.values()).map(doc => {
       const ov = k03Overrides[doc.id] || {}
       const rawRows = (doc.data.rawRows || []).sort((a,b) => String(a.pz_date || '').localeCompare(String(b.pz_date || '')) || String(a.pz_no || '').localeCompare(String(b.pz_no || '')) || String(a.source_lot_no || '').localeCompare(String(b.source_lot_no || '')))
       const rawTotal = rawRows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
       const saleQty = Number(doc.qty || 0)
-      const shortage = Math.max(0, saleQty - rawTotal)
+      const shortage = Math.max(0, Math.round((saleQty - rawTotal) * 1000) / 1000)
       const signed = ov.signed_by_operator || ''
       return { ...doc, status: doc.data.invalidFuturePz || shortage > 0 ? 'N' : 'P', signed_by_operator: signed, data: { ...doc.data, rawRows, rawTotal, saleQty, shortage, saleRows: [{ wz_no: doc.document_no, wz_date: doc.document_date, receiver: doc.data.odbiorca || '', qty: saleQty, signed_by: signed }] } }
     })
@@ -1573,29 +1580,148 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   async function loadK03TraceData() {
     if (!supabase) return
     try {
-      const { data: allocationsRaw, error: allocErr } = await supabase.from('fifo_allocations').select('id, qty, source_lot_id, product_id, operation_id, created_at').order('created_at', { ascending: true }).limit(20000)
+      // K03 musi pokazać również WZ, dla których FIFO nie znalazło pełnej ilości PZ.
+      // Dlatego najpierw pobieramy wszystkie rozchody (WZ), a dopiero potem dołączamy rozliczenia FIFO.
+      const { data: saleItemsRaw, error: saleItemsErr } = await supabase
+        .from('operation_items')
+        .select('id, operation_id, product_id, qty, direction')
+        .eq('direction', 'rozchod')
+        .limit(50000)
+      if (saleItemsErr) throw saleItemsErr
+
+      const saleOperationIdsFromItems = Array.from(new Set((saleItemsRaw || []).map(i => i.operation_id).filter(Boolean)))
+      let saleOps = []
+      if (saleOperationIdsFromItems.length) {
+        const { data, error } = await supabase
+          .from('operations')
+          .select('id, operation_type, operation_date, document_no, contractor_id, created_at')
+          .in('id', saleOperationIdsFromItems)
+        if (error) throw error
+        saleOps = data || []
+      }
+      const saleOpMap = new Map(saleOps.map(o => [o.id, o]))
+      const saleItems = (saleItemsRaw || []).filter(i => {
+        const op = saleOpMap.get(i.operation_id)
+        const no = String(op?.document_no || '').toUpperCase()
+        // K03 dotyczy sprzedaży/WZ, nie ręcznych przerobów technologicznych.
+        return op && (no.startsWith('WZ') || op.operation_type === 'sprzedaz' || op.operation_type === 'sprzedaz_bez_produkcji')
+      })
+
+      const saleKeyMap = new Map()
+      for (const item of saleItems) {
+        if (!item.operation_id || !item.product_id) continue
+        const key = `${item.operation_id}|${item.product_id}`
+        const op = saleOpMap.get(item.operation_id) || {}
+        const current = saleKeyMap.get(key) || { operation_id: item.operation_id, product_id: item.product_id, wz_qty: 0, op }
+        current.wz_qty += Math.abs(Number(item.qty || 0))
+        saleKeyMap.set(key, current)
+      }
+
+      const { data: allocationsRaw, error: allocErr } = await supabase
+        .from('fifo_allocations')
+        .select('id, qty, source_lot_id, product_id, operation_id, created_at')
+        .order('created_at', { ascending: true })
+        .limit(50000)
       if (allocErr) throw allocErr
       const allocations = allocationsRaw || []
-      if (!allocations.length) { setK03TraceRows([]); return }
-      const saleOperationIds = Array.from(new Set(allocations.map(a => a.operation_id).filter(Boolean)))
+
       const sourceLotIds = Array.from(new Set(allocations.map(a => a.source_lot_id).filter(Boolean)))
-      const productIds = Array.from(new Set(allocations.map(a => a.product_id).filter(Boolean)))
-      let saleOps = []
-      if (saleOperationIds.length) { const { data, error } = await supabase.from('operations').select('id, operation_type, operation_date, document_no, contractor_id').in('id', saleOperationIds); if (error) throw error; saleOps = data || [] }
+      const productIds = Array.from(new Set([
+        ...Array.from(saleKeyMap.values()).map(s => s.product_id).filter(Boolean),
+        ...allocations.map(a => a.product_id).filter(Boolean)
+      ]))
+
       let sourceLots = []
-      if (sourceLotIds.length) { const { data, error } = await supabase.from('lots').select('id, lot_no, production_date, source_operation_id, product_id').in('id', sourceLotIds); if (error) throw error; sourceLots = data || [] }
+      if (sourceLotIds.length) {
+        const { data, error } = await supabase.from('lots').select('id, lot_no, production_date, source_operation_id, product_id').in('id', sourceLotIds)
+        if (error) throw error
+        sourceLots = data || []
+      }
       const sourceOperationIds = Array.from(new Set(sourceLots.map(l => l.source_operation_id).filter(Boolean)))
       let sourceOps = []
-      if (sourceOperationIds.length) { const { data, error } = await supabase.from('operations').select('id, operation_date, document_no, contractor_id').in('id', sourceOperationIds); if (error) throw error; sourceOps = data || [] }
+      if (sourceOperationIds.length) {
+        const { data, error } = await supabase.from('operations').select('id, operation_date, document_no, contractor_id').in('id', sourceOperationIds)
+        if (error) throw error
+        sourceOps = data || []
+      }
       let products = []
-      if (productIds.length) { const { data, error } = await supabase.from('products').select('id, name').in('id', productIds); if (error) throw error; products = data || [] }
+      if (productIds.length) {
+        const { data, error } = await supabase.from('products').select('id, name').in('id', productIds)
+        if (error) throw error
+        products = data || []
+      }
       const contractorIds = Array.from(new Set([...saleOps, ...sourceOps].map(o => o.contractor_id).filter(Boolean)))
       let contractors = []
-      if (contractorIds.length) { const { data } = await supabase.from('contractors').select('id, name').in('id', contractorIds); contractors = data || [] }
-      const saleOpMap = new Map(saleOps.map(o => [o.id, o])); const sourceLotMap = new Map(sourceLots.map(l => [l.id, l])); const sourceOpMap = new Map(sourceOps.map(o => [o.id, o])); const productMap = new Map(products.map(p => [p.id, p])); const contractorMap = new Map(contractors.map(c => [c.id, c]))
-      const rows = allocations.map(a => { const saleOp = saleOpMap.get(a.operation_id) || {}; const lot = sourceLotMap.get(a.source_lot_id) || {}; const pzOp = sourceOpMap.get(lot.source_operation_id) || {}; const pzDate = String(pzOp.operation_date || lot.production_date || '').slice(0, 10); const wzDate = String(saleOp.operation_date || '').slice(0, 10); return { allocation_id: a.id, sale_operation_id: a.operation_id, product_id: a.product_id, product_name: productMap.get(a.product_id)?.name || '', wz_no: saleOp.document_no || '', wz_date: wzDate, receiver_name: contractorMap.get(saleOp.contractor_id)?.name || '', source_lot_id: a.source_lot_id, source_lot_no: lot.lot_no || '', pz_no: pzOp.document_no || lot.lot_no || '', pz_date: pzDate, supplier_name: contractorMap.get(pzOp.contractor_id)?.name || '', qty: Number(a.qty || 0) } }).filter(r => r.wz_no && r.wz_date)
-      setK03TraceRows(rows)
-    } catch (err) { setK03TraceRows([]); console.error('K03 trace load error', err) }
+      if (contractorIds.length) {
+        const { data } = await supabase.from('contractors').select('id, name').in('id', contractorIds)
+        contractors = data || []
+      }
+
+      const sourceLotMap = new Map(sourceLots.map(l => [l.id, l]))
+      const sourceOpMap = new Map(sourceOps.map(o => [o.id, o]))
+      const productMap = new Map(products.map(p => [p.id, p]))
+      const contractorMap = new Map(contractors.map(c => [c.id, c]))
+      const allocSumBySaleKey = new Map()
+
+      const rows = []
+      for (const a of allocations) {
+        const saleKey = `${a.operation_id}|${a.product_id}`
+        const sale = saleKeyMap.get(saleKey)
+        if (!sale) continue
+        const saleOp = sale.op || saleOpMap.get(a.operation_id) || {}
+        const lot = sourceLotMap.get(a.source_lot_id) || {}
+        const pzOp = sourceOpMap.get(lot.source_operation_id) || {}
+        const pzDate = String(pzOp.operation_date || lot.production_date || '').slice(0, 10)
+        const wzDate = String(saleOp.operation_date || '').slice(0, 10)
+        const qty = Number(a.qty || 0)
+        allocSumBySaleKey.set(saleKey, (allocSumBySaleKey.get(saleKey) || 0) + qty)
+        rows.push({
+          allocation_id: a.id,
+          sale_operation_id: a.operation_id,
+          product_id: a.product_id,
+          product_name: productMap.get(a.product_id)?.name || '',
+          wz_no: saleOp.document_no || '',
+          wz_date: wzDate,
+          wz_qty: Number(sale.wz_qty || 0),
+          receiver_name: contractorMap.get(saleOp.contractor_id)?.name || '',
+          source_lot_id: a.source_lot_id,
+          source_lot_no: lot.lot_no || '',
+          pz_no: pzOp.document_no || lot.lot_no || '',
+          pz_date: pzDate,
+          supplier_name: contractorMap.get(pzOp.contractor_id)?.name || '',
+          qty
+        })
+      }
+
+      // Dodajemy pusty wiersz dla każdego WZ z brakiem FIFO, żeby K03 nie była pusta.
+      for (const [key, sale] of saleKeyMap.entries()) {
+        const allocated = allocSumBySaleKey.get(key) || 0
+        const wzQty = Number(sale.wz_qty || 0)
+        if (wzQty <= 0) continue
+        if (allocated < wzQty - 0.001) {
+          const saleOp = sale.op || {}
+          rows.push({
+            allocation_id: `SHORTAGE-${key}`,
+            sale_operation_id: sale.operation_id,
+            product_id: sale.product_id,
+            product_name: productMap.get(sale.product_id)?.name || '',
+            wz_no: saleOp.document_no || '',
+            wz_date: String(saleOp.operation_date || '').slice(0, 10),
+            wz_qty: wzQty,
+            receiver_name: contractorMap.get(saleOp.contractor_id)?.name || '',
+            source_lot_id: '', source_lot_no: '', pz_no: '', pz_date: '', supplier_name: '', qty: 0,
+            shortage_only: true
+          })
+        }
+      }
+
+      rows.sort((a,b) => String(a.wz_date || '').localeCompare(String(b.wz_date || '')) || String(a.wz_no || '').localeCompare(String(b.wz_no || '')) || String(a.pz_date || '').localeCompare(String(b.pz_date || '')))
+      setK03TraceRows(rows.filter(r => r.wz_no && r.wz_date))
+    } catch (err) {
+      setK03TraceRows([])
+      console.error('K03 trace load error', err)
+      setMessage(`Błąd odczytu K03/FIFO: ${err?.message || String(err)}`)
+    }
   }
 
   async function loadFifoData() {
