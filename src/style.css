@@ -144,10 +144,10 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .module-status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}.module-status-card{border:1px solid #e5e7eb;border-radius:14px;padding:12px;background:#fff}.module-status-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}.module-status-head span{font-size:12px;padding:3px 8px;border-radius:999px;font-weight:700}.status-green{background:#dcfce7;color:#166534}.status-yellow{background:#fef3c7;color:#92400e}.status-gray{background:#f3f4f6;color:#374151}.module-status-card small{display:block;color:#64748b;margin-top:6px;line-height:1.35}.backlog-list{display:grid;gap:10px;margin-top:10px}.backlog-item{display:grid;grid-template-columns:110px 1fr 2fr;gap:10px;align-items:center;border:1px solid #e5e7eb;border-radius:12px;padding:10px;background:#fff}.backlog-item span{font-weight:800;border-radius:999px;padding:4px 8px;text-align:center}.backlog-item small{color:#64748b}.prio-A span{background:#fee2e2;color:#991b1b}.prio-B span{background:#dbeafe;color:#1e40af}.prio-C span{background:#f3f4f6;color:#374151}@media(max-width:760px){.backlog-item{grid-template-columns:1fr}.module-status-grid{grid-template-columns:1fr}}
 
 /* v26.1 - K02 odwzorowanie wzoru papierowego */
-.k02-original{font-family:"Times New Roman",serif;color:#111;background:#fff;padding:12px;max-width:1220px;overflow:auto}
-.k02-original table{width:100%;border-collapse:collapse;table-layout:fixed;margin:0}
-.k02-original td,.k02-original th{border:1px solid #111;text-align:center;vertical-align:middle;padding:4px 5px;font-size:14px;line-height:1.12;background:#fff;color:#111;font-weight:400}
-.k02-original th{font-weight:700}
+.k02-original,.k04-original,.k07-original{font-family:"Times New Roman",serif;color:#111;background:#fff;padding:12px;max-width:1220px;overflow:auto}
+.k02-original table,.k04-original table,.k07-original table{width:100%;border-collapse:collapse;table-layout:fixed;margin:0}
+.k02-original td,.k02-original th,.k04-original td,.k04-original th,.k07-original td,.k07-original th{border:1px solid #111;text-align:center;vertical-align:middle;padding:4px 5px;font-size:14px;line-height:1.12;background:#fff;color:#111;font-weight:400}
+.k02-original th,.k04-original th,.k07-original th{font-weight:700}
 .k02-company{width:31%;font-weight:700!important;font-size:20px!important;line-height:1.12!important}
 .k02-title{width:44%;font-weight:700!important;font-size:18px!important;line-height:1.45!important}
 .k02-meta{width:25%;text-align:left!important;vertical-align:top!important;font-size:17px!important;line-height:1.6!important}
@@ -157,8 +157,8 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k02-table tbody td{height:28px}.k02-table .blank-row td{height:28px}.cell-input{width:72px;max-width:90%;border:1px solid #cbd5e1;border-radius:6px;padding:4px;text-align:center;background:#fff}
 @media print{
   @page{size:A4 landscape;margin:7mm}
-  .k02-original{padding:0;max-width:none;overflow:visible;box-shadow:none!important;border-radius:0!important}
-  .k02-original td,.k02-original th{font-size:11pt;padding:3px 4px}
+  .k02-original,.k04-original,.k07-original{padding:0;max-width:none;overflow:visible;box-shadow:none!important;border-radius:0!important}
+  .k02-original td,.k02-original th,.k04-original td,.k04-original th,.k07-original td,.k07-original th{font-size:11pt;padding:3px 4px}
   .k02-company{font-size:13pt!important}.k02-title{font-size:13pt!important}.k02-meta{font-size:11pt!important}.k02-note{font-size:10.5pt!important}.k02-version{font-size:11pt!important}
 }
 

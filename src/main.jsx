@@ -5,6 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04Docs, buildSyntheticK07Docs, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn } from './haccpFormsEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -222,6 +223,9 @@ function App() {
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState('')
   const [k02Overrides, setK02Overrides] = useState({})
+  const [k04Overrides, setK04Overrides] = useState({})
+  const [k07Overrides, setK07Overrides] = useState({})
+  const [manualHaccpForm, setManualHaccpForm] = useState({})
   const [k03FormsRaw, setK03FormsRaw] = useState([])
   const [k03Overrides, setK03Overrides] = useState({})
   const [k03AssortmentFilter, setK03AssortmentFilter] = useState('all')
@@ -275,6 +279,9 @@ function App() {
     ['K02', 'K02 – Magazynowanie surowca (CP2)', 'Komory surowca, temperatury i status P/N'],
     ['K03', 'K03 – Identyfikacja partii produktu', 'PZ użyte do konkretnego WZ, zgodnie z FIFO'],
     ['K04', 'K04 – Magazynowanie produktu gotowego (CP3/CCP1)', 'Produkty gotowe, pulpy i komory/beczki'],
+    ['K04.1', 'K04.1 – Magazynowanie podczas transportu', 'Kontrola temperatury i opakowania w transporcie'],
+    ['K05', 'K05 – Towary wycofane', 'Rejestr wycofań partii i działań korygujących'],
+    ['K06', 'K06 – Ocena jakości produktu', 'Ocena sensoryczna partii gotowej / po produkcji'],
     ['K07', 'K07 – Kontrola sita / identyfikowalność', 'Kontrola przed przerobem oraz śledzenie partii']
   ]
 
@@ -284,9 +291,11 @@ function App() {
     { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna i ręczna edycja. OCR faktur odłożony na później.' },
     { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
     { code: 'K03', name: 'Identyfikacja partii produktu', status: 'w realizacji', note: 'Jeden formularz = jeden WZ. PZ po lewej, WZ po prawej, sumy zgodne z FIFO.' },
-    { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'do wykonania', note: 'CP3/CCP1, po domknięciu K02/K03.' },
-    { code: 'K05', name: 'Towary wycofane', status: 'do wykonania', note: 'Po podstawowych kartach magazynowych.' },
-    { code: 'K06', name: 'Ocena jakości produktu', status: 'do wykonania', note: 'Po module produkcji/przerobu.' },
+    { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'w realizacji', note: 'Miesięczna kartoteka dzienna per komora CP3/CCP1 – jak K02.' },
+    { code: 'K04.1', name: 'Transport produktu', status: 'w realizacji', note: 'Ręczne wpisy transportu – druk/Excel.' },
+    { code: 'K05', name: 'Towary wycofane', status: 'w realizacji', note: 'Ręczny rejestr wycofań.' },
+    { code: 'K06', name: 'Ocena jakości produktu', status: 'w realizacji', note: 'Auto z produkcji + ręczna edycja P/N.' },
+    { code: 'K07', name: 'Kontrola sita CCP1', status: 'w realizacji', note: 'Dzienna kartoteka sita na linii przerobu.' },
     { code: 'Raporty', name: 'R00–R13', status: 'do wykonania', note: 'Po kartach K.' },
     { code: 'Wykazy/Protokoły', name: 'W01–W10 / PR01–PR08', status: 'do wykonania', note: 'Po raportach podstawowych.' }
   ]
@@ -354,6 +363,9 @@ function App() {
     })
   }
 
+
+  const syntheticK04Docs = useMemo(() => buildSyntheticK04Docs(haccpDocs, k04Overrides), [haccpDocs, k04Overrides])
+  const syntheticK07Docs = useMemo(() => buildSyntheticK07Docs(haccpDocs, k07Overrides), [haccpDocs, k07Overrides])
 
   const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
 
@@ -456,6 +468,30 @@ function App() {
     setMessage(`Ustawiono podpis dla ${docs.length} formularzy K03. Możesz zmienić pojedynczy formularz w edycji.`)
   }
 
+  function setK04Override(doc, field, value) {
+    if (!doc?.id) return
+    setK04Overrides(prev => ({
+      ...prev,
+      [doc.id]: {
+        ...(prev[doc.id] || {}),
+        [field]: value,
+        uwagi: field === 'uwagi' ? formNormalizePn(value) : (prev[doc.id]?.uwagi ?? doc.data?.uwagi ?? 'P')
+      }
+    }))
+  }
+
+  function setK07Override(doc, field, value) {
+    if (!doc?.id) return
+    setK07Overrides(prev => ({
+      ...prev,
+      [doc.id]: {
+        ...(prev[doc.id] || {}),
+        [field]: value,
+        uwagi: field === 'uwagi' ? formNormalizePn(value) : (prev[doc.id]?.uwagi ?? doc.data?.uwagi ?? 'P')
+      }
+    }))
+  }
+
   function setK02Override(doc, field, value) {
     if (!doc?.id) return
     setK02Overrides(prev => {
@@ -497,7 +533,11 @@ function App() {
 
   const haccpDocsForFilter = useMemo(() => {
     const q = normalizeText(haccpSearch)
-    const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs) : (docsFilter === 'K03' ? syntheticK03Docs : haccpDocs)
+    const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs)
+      : docsFilter === 'K03' ? syntheticK03Docs
+      : docsFilter === 'K04' ? syntheticK04Docs
+      : docsFilter === 'K07' ? syntheticK07Docs
+      : haccpDocs
     return sourceDocs
       .filter(d => d.document_type === docsFilter)
       .filter(d => {
@@ -517,7 +557,7 @@ function App() {
         if (!q) return true
         return normalizeText(`${d.lot_no || ''} ${d.product_name || ''} ${d.supplier_name || ''} ${d.document_no || ''} ${d.chamber_code || ''}`).includes(q)
       })
-  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, k03AssortmentFilter, k03YearFilter, k03MonthFilter])
+  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, syntheticK04Docs, syntheticK07Docs, k03AssortmentFilter, k03YearFilter, k03MonthFilter])
 
 
   function docInSelectedPeriod(doc) {
@@ -578,9 +618,15 @@ function App() {
       // Czyli np. Jabłko przemysłowe ma własną kartę, Wiśnia własną kartę itd.
       const key = doc.document_type === 'K01'
         ? `${doc.document_type}|${period}|${product}`
-        : (doc.document_type === 'K03'
+        : doc.document_type === 'K03'
           ? `${doc.document_type}|${doc.id}|${doc.document_no || 'brak-wz'}`
-          : `${doc.document_type}|${period}|${product}|${chamber}`)
+          : ['K05', 'K06', 'K04.1', 'K07'].includes(doc.document_type)
+            ? `${doc.document_type}|${period}`
+            : doc.document_type === 'K02'
+              ? `${doc.document_type}|${period}`
+              : doc.document_type === 'K04'
+                ? `${doc.document_type}|${period}|${chamber}`
+                : `${doc.document_type}|${period}|${product}|${chamber}`
       if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product, chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
@@ -623,6 +669,9 @@ function App() {
     if (doc.document_type === 'K03') {
       return haccpMonthlyGroups.find(g => g.type === 'K03' && g.docs.some(d => d.id === doc.id)) || null
     }
+    if (['K05', 'K06', 'K04.1', 'K07'].includes(doc.document_type)) {
+      return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period) || null
+    }
     const product = doc.product_name || 'Bez produktu'
     const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
     return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period && g.product === product && g.chamber === chamber) || null
@@ -630,16 +679,22 @@ function App() {
 
   function haccpCount(type) {
     if (type === 'K03') return syntheticK03Docs.length
+    if (type === 'K04') return syntheticK04Docs.length
+    if (type === 'K07') return syntheticK07Docs.length
     return haccpDocs.filter(d => d.document_type === type).length
   }
 
   function haccpNonconformityCount(type) {
     if (type === 'K03') return syntheticK03Docs.filter(d => d.status === 'N').length
+    if (type === 'K04') return syntheticK04Docs.filter(d => d.status === 'N').length
+    if (type === 'K07') return syntheticK07Docs.filter(d => d.status === 'N').length
     return haccpDocs.filter(d => d.document_type === type && d.status === 'N').length
   }
 
   function haccpPendingCount(type) {
     if (type === 'K03') return syntheticK03Docs.filter(d => !d.signed_by_operator).length
+    if (type === 'K04') return syntheticK04Docs.filter(d => !d.signed_by_operator).length
+    if (type === 'K07') return syntheticK07Docs.filter(d => !d.signed_by_operator).length
     return haccpDocs.filter(d => d.document_type === type && !d.signed_by_operator).length
   }
 
@@ -990,7 +1045,12 @@ function App() {
         if (ok) await freezeK03Document(doc, 'Kartoteka zamrożona automatycznie przed drukiem')
       }
     }
-    const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : (group.type === 'K03' ? buildK03MonthlyHtml(group) : buildK02MonthlyHtml(group))
+    const html = group.type === 'K01' ? buildK01MonthlyHtml(group)
+      : group.type === 'K03' ? buildK03MonthlyHtml(group)
+      : group.type === 'K04' ? buildK04MonthlyHtml(group, escapeHtml)
+      : group.type === 'K07' ? buildK07MonthlyHtml(group, escapeHtml)
+      : MANUAL_HACCP_FORMS[group.type] ? buildManualMonthlyHtml(group, escapeHtml, MANUAL_HACCP_FORMS[group.type])
+      : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
   }
 
@@ -1008,6 +1068,12 @@ function App() {
       rows.push(['Karta K02 - Karta kontroli parametrów magazynowania surowców (CP2)', '', '', '', '', `Okres: ${periodLabel(group)}`])
       rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
       docs.forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina || '09:15', doc.data?.temperatura_chlodnia_1 || '2', doc.data?.temperatura_chlodnia_2 || '2', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
+    } else if (group.type === 'K04') {
+      rows.push(...buildK04ExcelRows(group))
+    } else if (group.type === 'K07') {
+      rows.push(...buildK07ExcelRows(group))
+    } else if (MANUAL_HACCP_FORMS[group.type]) {
+      rows.push(...buildManualExcelRows(group, MANUAL_HACCP_FORMS[group.type]))
     } else if (group.type === 'K03') {
       const doc = (docs || [])[0]
       if (doc) rows.push(...buildK03ExcelRows(doc))
@@ -1156,6 +1222,111 @@ function App() {
       </div>
     }
 
+    if (group.type === 'K04') {
+      const maxRows = Math.max(16, docs.length)
+      const chamber = group.chamber || docs[0]?.chamber_code || 'CP3'
+      return <div className="monthly-paper k02-original k04-original">
+        <table className="k02-head"><tbody>
+          <tr>
+            <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+            <td className="k02-title"><b>Karta K04 - Karta kontroli parametrów<br/>magazynowania produktów gotowych (CP3/CCP1)</b></td>
+            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Komora:</b> {chamber}</td>
+          </tr>
+          <tr>
+            <td className="k02-note">{chamber.startsWith('CCP') ? '- Temp. beczki CCP1 (pulpa): ok. -18°C (±2°C).' : '- Temp. CP3: 0–2°C dla produktu świeżego.'}</td>
+            <td className="k02-version">Wersja I/2024</td>
+          </tr>
+        </tbody></table>
+        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>nr 1 [°C]</th><th>Temperatura<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
+          {Array.from({length: maxRows}).map((_,i) => {
+            const baseDoc = docs[i]
+            if (!baseDoc) return <tr className="blank-row" key={`k04-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const doc = getLiveK04Doc(baseDoc, k04Overrides)
+            const godzina = doc.data?.godzina || '09:15'
+            const temp1 = doc.data?.temperatura_chlodnia_1 || ''
+            const temp2 = doc.data?.temperatura_chlodnia_2 || ''
+            const signed = doc.data?.podpis_kontrolujacego || doc.signed_by_operator || ''
+            const uwagi = formNormalizePn(doc.data?.uwagi || 'P')
+            return <tr key={doc.id}>
+              <td>{doc.document_date}</td>
+              <td><input className="cell-input no-print" value={godzina} onChange={e=>setK04Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
+              <td><input className="cell-input no-print" value={temp1} onChange={e=>setK04Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
+              <td><input className="cell-input no-print" value={temp2} onChange={e=>setK04Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
+              <td><select className="mini-select no-print" value={signed} onChange={e=>setK04Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
+              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK04Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+            </tr>
+          })}
+        </tbody></table>
+        <p className="hint no-print">K04: dzienna kontrola temperatury w komorze {chamber}. Wpisy generowane automatycznie, gdy w bazie są partie produktu gotowego w CP3/CCP1.</p>
+      </div>
+    }
+
+    if (group.type === 'K07') {
+      const maxRows = Math.max(16, docs.length)
+      return <div className="monthly-paper k02-original k07-original">
+        <table className="k02-head"><tbody>
+          <tr>
+            <td className="k02-company" rowSpan="2"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+            <td className="k02-title"><b>Karta K07 - Karta kontroli stanu sita<br/>na linii do przerobu na pulę (CCP1)</b></td>
+            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}</td>
+          </tr>
+        </tbody></table>
+        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Stan sita<br/>(P/N)*</th><th>Sito całe<br/>(P/N)*</th><th>Partia / produkt</th><th>Podpis</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
+          {Array.from({length: maxRows}).map((_,i) => {
+            const baseDoc = docs[i]
+            if (!baseDoc) return <tr className="blank-row" key={`k07-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const doc = getLiveK07Doc(baseDoc, k07Overrides)
+            const godzina = doc.data?.godzina || '09:15'
+            const stan = formNormalizePn(doc.data?.stan_sita || 'P')
+            const cale = formNormalizePn(doc.data?.sito_cale || 'P')
+            const partia = doc.data?.partia || doc.lot_no || ''
+            const signed = doc.data?.podpis_kontrolujacego || doc.signed_by_operator || ''
+            const uwagi = formNormalizePn(doc.data?.uwagi || 'P')
+            return <tr key={doc.id}>
+              <td>{doc.document_date}</td>
+              <td><input className="cell-input no-print" value={godzina} onChange={e=>setK07Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
+              <td className={stan==='N'?'pn-n':''}><select className="mini-select no-print" value={stan} onChange={e=>setK07Override(doc,'stan_sita',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{stan}</span></td>
+              <td className={cale==='N'?'pn-n':''}><select className="mini-select no-print" value={cale} onChange={e=>setK07Override(doc,'sito_cale',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{cale}</span></td>
+              <td><input className="cell-input no-print" value={partia} onChange={e=>setK07Override(doc,'partia',e.target.value)} /><span className="print-only">{partia}</span></td>
+              <td><select className="mini-select no-print" value={signed} onChange={e=>setK07Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
+              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK07Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+            </tr>
+          })}
+        </tbody></table>
+        <p className="hint no-print">K07: codzienna kontrola sita na linii CCP1. Wpisy generowane, gdy w bazie są partie w beczkach CCP1.</p>
+      </div>
+    }
+
+    if (MANUAL_HACCP_FORMS[group.type]) {
+      const cfg = MANUAL_HACCP_FORMS[group.type]
+      const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa'])
+      return <div className="monthly-paper k011-original">
+        <table className="k011-head"><tbody><tr><td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td className="k011-title"><b>{cfg.title}</b></td><td className="k011-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}</td></tr></tbody></table>
+        <table className="k011-table"><thead><tr>{cfg.columns.map(c => <th key={c.key}>{c.label}</th>)}</tr></thead><tbody>
+          {docs.map((doc, i) => <tr key={doc.id}>
+            {cfg.columns.map(c => {
+              if (c.key === 'lp') return <td key={c.key}>{i + 1}</td>
+              const dataKey = c.key === 'podpis' ? null : (c.key === 'temperatura_transport' ? 'temperatura_transport' : c.key === 'powod' ? 'powod_wycofania' : c.key === 'dzialanie' ? 'dzialanie' : c.key === 'wyglad' ? 'wyglad_zapach' : c.key)
+              if (dataKey && pnFields.has(dataKey)) {
+                const val = formNormalizePn(doc.data?.[dataKey] || 'P')
+                return <td key={c.key} className={val === 'N' ? 'pn-n' : ''}>
+                  <select className="mini-select no-print" value={val} onChange={e => editHaccpRowField(doc, dataKey, c.label, e.target.value, { directValue: e.target.value, pn: true })}><option value="P">P</option><option value="N">N</option></select>
+                  <span className="print-only">{val}</span>
+                </td>
+              }
+              if (c.key === 'podpis') {
+                return <td key={c.key}>
+                  <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => setDocumentEmployeeFromGroup(doc, e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                  <span className="print-only">{doc.signed_by_operator || ''}</span>
+                </td>
+              }
+              return <td key={c.key} className={c.key === 'product_name' || c.key === 'powod' ? 'left' : ''}>{c.value(doc, i)}</td>
+            })}
+          </tr>)}
+        </tbody></table>
+      </div>
+    }
+
     if (group.type === 'K03') {
       const doc = docs[0]
       if (!doc) return <div className="monthly-paper">Brak danych K03.</div>
@@ -1222,6 +1393,158 @@ function App() {
     } catch (err) {
       setAuxRows([])
     }
+  }
+
+  function getDefaultManualHaccpForm(type) {
+    const cfg = MANUAL_HACCP_FORMS[type]
+    if (!cfg) return { type }
+    const form = { id: null, type }
+    for (const f of cfg.fields) {
+      if (f.key === 'signed_by') form.signed_by = ''
+      else if (f.type === 'pn') form[f.key] = 'P'
+      else if (f.type === 'date') form[f.key] = new Date().toISOString().slice(0, 10)
+      else form[f.key] = ''
+    }
+    return form
+  }
+
+  function resetManualHaccpForm(type) {
+    setManualHaccpForm(getDefaultManualHaccpForm(type || docsFilter))
+  }
+
+  async function saveManualHaccpEntry() {
+    const type = manualHaccpForm.type || docsFilter
+    const cfg = MANUAL_HACCP_FORMS[type]
+    if (!cfg || !supabase) return
+    for (const f of cfg.fields) {
+      if (!f.required || f.key === 'signed_by') continue
+      if (!String(manualHaccpForm[f.key] ?? '').trim()) {
+        setMessage(`${type}: uzupełnij pole „${f.label}".`)
+        return
+      }
+    }
+    const data = {}
+    let status = 'P'
+    for (const f of cfg.fields) {
+      if (f.key === 'signed_by') continue
+      if (!f.data) continue
+      const val = f.type === 'pn' ? formNormalizePn(manualHaccpForm[f.key]) : String(manualHaccpForm[f.key] ?? '').trim()
+      data[f.key] = val
+      if (f.type === 'pn' && val === 'N') status = 'N'
+    }
+    const payload = {
+      document_type: type,
+      document_date: manualHaccpForm.document_date,
+      product_name: manualHaccpForm.product_name || null,
+      lot_no: manualHaccpForm.lot_no || null,
+      qty: manualHaccpForm.qty !== '' && manualHaccpForm.qty != null ? Number(manualHaccpForm.qty) : 0,
+      document_no: `${type}/${manualHaccpForm.document_date || 'brak'}/${manualHaccpForm.lot_no || 'brak'}`,
+      chamber_code: type === 'K04.1' ? 'TRANSPORT' : null,
+      status,
+      data,
+      signed_by_operator: manualHaccpForm.signed_by || null,
+      document_version: 'I/2024',
+      updated_at: new Date().toISOString()
+    }
+    try {
+      if (manualHaccpForm.id) {
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', manualHaccpForm.id)
+        if (error) throw error
+        setMessage(`${type}: zapisano zmiany wpisu.`)
+      } else {
+        const { error } = await supabase.from('haccp_documents').insert(payload)
+        if (error) throw error
+        setMessage(`${type}: dodano wpis do kartoteki miesięcznej.`)
+      }
+      resetManualHaccpForm(type)
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`Błąd zapisu ${type}: ${err.message}`)
+    }
+  }
+
+  function editManualHaccpEntry(doc) {
+    const cfg = MANUAL_HACCP_FORMS[doc.document_type]
+    if (!cfg) return
+    const form = { id: doc.id, type: doc.document_type }
+    for (const f of cfg.fields) {
+      if (f.key === 'signed_by') form.signed_by = doc.signed_by_operator || ''
+      else if (f.data) form[f.key] = f.type === 'pn' ? formNormalizePn(doc.data?.[f.key]) : (doc.data?.[f.key] ?? '')
+      else form[f.key] = doc[f.key] ?? (f.type === 'date' ? '' : '')
+    }
+    setManualHaccpForm(form)
+  }
+
+  async function deleteManualHaccpEntry(doc) {
+    if (!supabase || !doc?.id) return
+    if (!window.confirm(`Usunąć wpis ${doc.document_type}: ${doc.product_name || doc.lot_no || ''}?`)) return
+    try {
+      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+      if (error) throw error
+      if (manualHaccpForm.id === doc.id) resetManualHaccpForm(doc.document_type)
+      await loadHaccpDocs()
+      setMessage(`${doc.document_type}: usunięto wpis.`)
+    } catch (err) {
+      setMessage(`Błąd usuwania: ${err.message}`)
+    }
+  }
+
+  function renderManualFormField(f) {
+    const value = manualHaccpForm[f.key] ?? (f.type === 'pn' ? 'P' : f.type === 'date' ? new Date().toISOString().slice(0, 10) : '')
+    if (f.type === 'employee') {
+      return <label key={f.key}>{f.label}
+        <select value={manualHaccpForm.signed_by || ''} onChange={e => setManualHaccpForm(prev => ({ ...prev, signed_by: e.target.value }))}>
+          <option value="">Wybierz pracownika</option>
+          {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+        </select>
+      </label>
+    }
+    if (f.type === 'pn') {
+      return <label key={f.key}>{f.label}
+        <select value={value} onChange={e => setManualHaccpForm(prev => ({ ...prev, [f.key]: e.target.value }))}>
+          <option value="P">P</option><option value="N">N</option>
+        </select>
+      </label>
+    }
+    if (f.type === 'date') {
+      return <label key={f.key}>{f.label}<input type="date" value={value} onChange={e => setManualHaccpForm(prev => ({ ...prev, [f.key]: e.target.value }))} /></label>
+    }
+    if (f.type === 'number') {
+      return <label key={f.key}>{f.label}<input type="number" step="0.01" value={value} onChange={e => setManualHaccpForm(prev => ({ ...prev, [f.key]: e.target.value }))} /></label>
+    }
+    return <label key={f.key}>{f.label}<input value={value} onChange={e => setManualHaccpForm(prev => ({ ...prev, [f.key]: e.target.value }))} /></label>
+  }
+
+  function renderManualHaccpEntrySection() {
+    const type = docsFilter
+    const cfg = MANUAL_HACCP_FORMS[type]
+    if (!cfg) return null
+    const periodDocs = haccpPeriodDocs.filter(d => d.document_type === type)
+    return <>
+      <div className="card inner-card no-print">
+        <h3>{manualHaccpForm.id ? `Edytuj wpis ${type}` : `Dodaj wpis – ${cfg.title}`}</h3>
+        {type === 'K06' && <p className="hint">Wpisy K06 tworzą się też automatycznie z produkcji (migracja SQL v35). Poniżej możesz dodać ręcznie lub edytować ocenę P/N istniejących partii.</p>}
+        {type === 'K05' && <p className="hint">Rejestruj każde wycofanie partii – wpisy trafiają do kartoteki miesięcznej wybranego okresu.</p>}
+        {type === 'K04.1' && <p className="hint">Kontrola temperatury i opakowania podczas transportu – wpis na każdy transport / partię.</p>}
+        <div className="form-grid compact">{cfg.fields.map(renderManualFormField)}</div>
+        <div className="actions">
+          <button onClick={saveManualHaccpEntry}>{manualHaccpForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button>
+          <button className="secondary" onClick={() => resetManualHaccpForm(type)}>Wyczyść</button>
+        </div>
+      </div>
+      <h3 className="no-print">Wpisy w wybranym okresie ({periodDocs.length})</h3>
+      {periodDocs.length === 0 && <p className="hint">Brak wpisów w wybranym miesiącu / zakresie. Dodaj pierwszy wpis powyżej.</p>}
+      {periodDocs.length > 0 && <div className="table-wrap small no-print"><table>
+        <thead><tr>{cfg.columns.filter(c => c.key !== 'lp').map(c => <th key={c.key}>{c.label}</th>)}<th>Akcje</th></tr></thead>
+        <tbody>{periodDocs.map((doc, i) => <tr key={doc.id}>
+          {cfg.columns.filter(c => c.key !== 'lp').map(c => <td key={c.key}>{c.value(doc, i)}</td>)}
+          <td className="row-actions">
+            <button className="mini secondary" onClick={() => editManualHaccpEntry(doc)}>Edytuj</button>
+            {!doc.lot_id && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
+          </td>
+        </tr>)}</tbody>
+      </table></div>}
+    </>
   }
 
   function resetAuxForm() {
@@ -3141,9 +3464,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v27 · K03 {K03_ENGINE_VERSION}</b> – jeden formularz = jeden WZ. Zgodne kartoteki można <b>zamrozić</b> (automatycznie przy druku). FIFO uzupełnia tylko braki – nie zmienia zamrożonych.</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v35 · K03 {K03_ENGINE_VERSION} · K04–K07 {HACCP_FORMS_VERSION}</b> – K04/K07 dzienne (syntetyczne), K04.1/K05/K06 ręczne wpisy, K03 jeden WZ = jedna kartoteka.</p></div></div>
       <div className="haccp-card-grid">
-        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData() }}>
+        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData(); if (MANUAL_HACCP_FORMS[code]) resetManualHaccpForm(code) }}>
           <b>{title}</b><small>{desc}</small>
           <span><b>{haccpCount(code)}</b> dokumentów · <b>{haccpNonconformityCount(code)}</b> N · <b>{haccpPendingCount(code)}</b> bez podpisu</span>
         </button>)}
@@ -3201,14 +3524,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </div>
       </>}
       {docsFilter === 'K01.1' && renderK011Section()}
+      {MANUAL_HACCP_FORMS[docsFilter] && renderManualHaccpEntrySection()}
       {docsFilter !== 'K01.1' && <>
-      <div className="doc-progress">{['K01','K02','K03','K04','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
+      <div className="doc-progress">{['K01','K02','K03','K04','K04.1','K05','K06','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
       <h3>{docsFilter === 'K03' ? 'Formularze K03 – jedna sprzedaż (WZ) = jedna kartoteka' : 'Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat'}</h3>
       <p className="hint">{docsFilter === 'K03'
         ? <>Wybierz asortyment, rok i miesiąc powyżej, potem kliknij <b>Kartoteka</b> przy wybranym WZ. Suma PZ po lewej musi równać się ilości WZ po prawej.</>
         : <> <b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</>}</p>
       {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak formularzy K03 na liście. {k03Diag.wzDocs > 0 ? `W bazie jest ${k03Diag.wzDocs} WZ – kliknij „Odśwież kartoteki” lub „Uzupełnij braki FIFO”.` : ' Zaimportuj Excel z WZ → Zapisz do Supabase → Odśwież kartoteki.'}</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak kartotek K04. System generuje je automatycznie, gdy w bazie są partie produktu gotowego w komorach CP3 lub CCP1 (migracja SQL v20). Kliknij „Odśwież kartoteki”.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak kartotek K07. Wpisy dzienne powstają, gdy w bazie są partie w beczkach CCP1 (migracja SQL v20). Kliknij „Odśwież kartoteki”.</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && docsFilter !== 'K04' && docsFilter !== 'K07' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
         <thead><tr>
           <th>Kartoteka</th>
