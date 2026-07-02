@@ -2246,78 +2246,34 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   async function loadPzManagementData() {
     if (!supabase) return
     try {
-      const { data: lotsRaw, error: lotsErr } = await supabase
-        .from('lots')
-        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, source_operation_id, product_id, product_group, created_at')
+      const { data: rowsRaw, error: rowsErr } = await supabase
+        .from('pz_fifo_overview')
+        .select('*')
         .order('production_date', { ascending: true })
         .order('created_at', { ascending: true })
         .limit(10000)
-      if (lotsErr) throw lotsErr
-      const lots = lotsRaw || []
-      const sourceOperationIds = Array.from(new Set(lots.map(l => l.source_operation_id).filter(Boolean)))
-      const productIds = Array.from(new Set(lots.map(l => l.product_id).filter(Boolean)))
+      if (rowsErr) throw rowsErr
 
-      let operations = []
-      for (let i = 0; i < sourceOperationIds.length; i += 1000) {
-        const chunk = sourceOperationIds.slice(i, i + 1000)
-        if (!chunk.length) continue
-        const { data, error } = await supabase.from('operations').select('id, operation_type, operation_date, document_no, contractor_id, created_at').in('id', chunk)
-        if (error) throw error
-        operations = operations.concat(data || [])
-      }
-      const operationMap = new Map(operations.map(o => [o.id, o]))
-
-      let products = []
-      for (let i = 0; i < productIds.length; i += 1000) {
-        const chunk = productIds.slice(i, i + 1000)
-        if (!chunk.length) continue
-        const { data, error } = await supabase.from('products').select('id, name, code, product_group').in('id', chunk)
-        if (error) throw error
-        products = products.concat(data || [])
-      }
-      const productMap = new Map(products.map(p => [p.id, p]))
-
-      const contractorIds = Array.from(new Set(operations.map(o => o.contractor_id).filter(Boolean)))
-      let contractors = []
-      for (let i = 0; i < contractorIds.length; i += 1000) {
-        const chunk = contractorIds.slice(i, i + 1000)
-        if (!chunk.length) continue
-        const { data, error } = await supabase.from('contractors').select('id, name').in('id', chunk)
-        if (error) throw error
-        contractors = contractors.concat(data || [])
-      }
-      const contractorMap = new Map(contractors.map(c => [c.id, c]))
-
-      const lotIds = lots.map(l => l.id).filter(Boolean)
-      let allocations = []
-      for (let i = 0; i < lotIds.length; i += 1000) {
-        const chunk = lotIds.slice(i, i + 1000)
-        if (!chunk.length) continue
-        const { data, error } = await supabase.from('fifo_allocations').select('source_lot_id, qty').in('source_lot_id', chunk)
-        if (error) throw error
-        allocations = allocations.concat(data || [])
-      }
-      const allocatedByLot = new Map()
-      for (const a of allocations) allocatedByLot.set(a.source_lot_id, (allocatedByLot.get(a.source_lot_id) || 0) + (Number(a.qty) || 0))
-
-      const rows = lots.filter(l => operationMap.get(l.source_operation_id)?.operation_type === 'przyjecie').map(l => {
-        const op = operationMap.get(l.source_operation_id) || {}
-        const product = productMap.get(l.product_id) || {}
-        const allocated = allocatedByLot.get(l.id) || 0
-        const initial = Number(l.initial_qty || 0)
-        const remaining = Math.max(0, initial - allocated)
-        let statusKey = 'wolna', statusLabel = 'Nieprzypisana'
-        if (allocated >= initial - 0.001 && initial > 0) { statusKey = 'wykorzystana'; statusLabel = 'Wykorzystana' }
-        else if (allocated > 0) { statusKey = 'czesciowo'; statusLabel = 'Częściowo' }
-        return { ...l, document_no: op.document_no || '', operation_date: op.operation_date || l.production_date || '', supplier_name: contractorMap.get(op.contractor_id)?.name || '', product_name: product.name || '', product_code: product.code || '', product_group: l.product_group || product.product_group || productGroupForName(product.name), allocated_qty: allocated, calculated_remaining_qty: remaining, status_key: statusKey, status_label: statusLabel }
+      const rows = (rowsRaw || []).map(r => {
+        const initial = Number(r.initial_qty || 0)
+        const allocated = Number(r.allocated_qty || 0)
+        const remaining = Math.max(0, Number(r.calculated_remaining_qty ?? (initial - allocated)))
+        let statusKey = r.status_key || 'wolna'
+        let statusLabel = r.status_label || 'Nieprzypisana'
+        if (!r.status_key) {
+          if (allocated >= initial - 0.001 && initial > 0) { statusKey = 'wykorzystana'; statusLabel = 'Wykorzystana' }
+          else if (allocated > 0) { statusKey = 'czesciowo'; statusLabel = 'Częściowo' }
+        }
+        return { ...r, initial_qty: initial, allocated_qty: allocated, calculated_remaining_qty: remaining, status_key: statusKey, status_label: statusLabel }
       })
       setPzRows(rows)
 
       const { data: hist, error: histErr } = await supabase.from('pz_fifo_change_log').select('*').order('created_at', { ascending: false }).limit(200)
       if (!histErr) setPzHistoryRows(hist || [])
+      setMessage(rows.length ? `Wczytano PZ: ${rows.length}.` : 'Nie znaleziono PZ do wyświetlenia.')
     } catch (err) {
       console.error('PZ management load error', err)
-      setMessage(`Błąd odczytu zakładki PZ: ${err?.message || String(err)}. Uruchom SQL v31, jeśli tabela historii jeszcze nie istnieje.`)
+      setMessage(`Błąd odczytu zakładki PZ: ${err?.message || String(err)}. Uruchom SQL v31.1.`)
     }
   }
 
