@@ -175,3 +175,8 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k03-table .sum-cell { text-align:right; font-weight:bold; }
 .haccp-warning { margin-top:8px; padding:8px 10px; border:1px solid #a33; background:#fff0f0; color:#900; font-weight:bold; }
 @media print { .k03-original td, .k03-original th { font-size:10pt; padding:4px; } }
+.inline-warning { margin: 12px 0; }
+.pz-date-input { min-width: 130px; }
+.pz-status-wolna { background: #eef2ff; color: #3730a3; }
+.pz-status-czesciowo { background: #fef3c7; color: #92400e; }
+.pz-status-wykorzystana { background: #dcfce7; color: #166534; }

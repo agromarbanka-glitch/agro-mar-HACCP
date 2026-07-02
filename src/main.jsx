@@ -215,6 +215,12 @@ function App() {
   const [auxForm, setAuxForm] = useState({ delivery_date: new Date().toISOString().slice(0,10), item_name: '', supplier_invoice: '', vehicle_hygiene: 'P', qty: '', lot_no: '', notes: '', signed_by: '' })
   const [selectedAuxCard, setSelectedAuxCard] = useState(null)
   const [auxPdfName, setAuxPdfName] = useState('')
+  const [pzRows, setPzRows] = useState([])
+  const [pzHistoryRows, setPzHistoryRows] = useState([])
+  const [pzEditDates, setPzEditDates] = useState({})
+  const [pzSearch, setPzSearch] = useState('')
+  const [pzStatusFilter, setPzStatusFilter] = useState('all')
+  const [fifoKartotekiDirty, setFifoKartotekiDirty] = useState(false)
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -228,6 +234,15 @@ function App() {
       return normalizeText(`${l.lot_no} ${l.products?.name || ''} ${l.product_group || ''} ${l.chamber?.code || ''}`).includes(q)
     }).slice(0, 250)
   }, [activeLots, lotSearch])
+
+  const visiblePzRows = useMemo(() => {
+    const q = normalizeText(pzSearch)
+    return (pzRows || []).filter(r => {
+      if (pzStatusFilter !== 'all' && r.status_key !== pzStatusFilter) return false
+      if (!q) return true
+      return normalizeText(`${r.lot_no} ${r.document_no} ${r.product_name} ${r.product_group} ${r.supplier_name}`).includes(q)
+    }).slice(0, 1000)
+  }, [pzRows, pzSearch, pzStatusFilter])
 
   const HACCPCARDS = [
     ['K01', 'K01 – Przyjęcie surowca (CP1)', 'Dostawy PZ/MM, ocena surowca i pojazdu'],
@@ -1411,6 +1426,7 @@ function App() {
       loadEmployees()
       loadAuxMaterials()
       loadK03TraceData()
+      loadPzManagementData()
     }
   }, [])
 
@@ -2226,6 +2242,146 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (next !== null) setK01Supplier(doc, next)
   }
 
+
+  async function loadPzManagementData() {
+    if (!supabase) return
+    try {
+      const { data: lotsRaw, error: lotsErr } = await supabase
+        .from('lots')
+        .select('id, lot_no, production_date, initial_qty, remaining_qty, status, source_operation_id, product_id, product_group, created_at')
+        .order('production_date', { ascending: true })
+        .order('created_at', { ascending: true })
+        .limit(10000)
+      if (lotsErr) throw lotsErr
+      const lots = lotsRaw || []
+      const sourceOperationIds = Array.from(new Set(lots.map(l => l.source_operation_id).filter(Boolean)))
+      const productIds = Array.from(new Set(lots.map(l => l.product_id).filter(Boolean)))
+
+      let operations = []
+      for (let i = 0; i < sourceOperationIds.length; i += 1000) {
+        const chunk = sourceOperationIds.slice(i, i + 1000)
+        if (!chunk.length) continue
+        const { data, error } = await supabase.from('operations').select('id, operation_type, operation_date, document_no, contractor_id, created_at').in('id', chunk)
+        if (error) throw error
+        operations = operations.concat(data || [])
+      }
+      const operationMap = new Map(operations.map(o => [o.id, o]))
+
+      let products = []
+      for (let i = 0; i < productIds.length; i += 1000) {
+        const chunk = productIds.slice(i, i + 1000)
+        if (!chunk.length) continue
+        const { data, error } = await supabase.from('products').select('id, name, code, product_group').in('id', chunk)
+        if (error) throw error
+        products = products.concat(data || [])
+      }
+      const productMap = new Map(products.map(p => [p.id, p]))
+
+      const contractorIds = Array.from(new Set(operations.map(o => o.contractor_id).filter(Boolean)))
+      let contractors = []
+      for (let i = 0; i < contractorIds.length; i += 1000) {
+        const chunk = contractorIds.slice(i, i + 1000)
+        if (!chunk.length) continue
+        const { data, error } = await supabase.from('contractors').select('id, name').in('id', chunk)
+        if (error) throw error
+        contractors = contractors.concat(data || [])
+      }
+      const contractorMap = new Map(contractors.map(c => [c.id, c]))
+
+      const lotIds = lots.map(l => l.id).filter(Boolean)
+      let allocations = []
+      for (let i = 0; i < lotIds.length; i += 1000) {
+        const chunk = lotIds.slice(i, i + 1000)
+        if (!chunk.length) continue
+        const { data, error } = await supabase.from('fifo_allocations').select('source_lot_id, qty').in('source_lot_id', chunk)
+        if (error) throw error
+        allocations = allocations.concat(data || [])
+      }
+      const allocatedByLot = new Map()
+      for (const a of allocations) allocatedByLot.set(a.source_lot_id, (allocatedByLot.get(a.source_lot_id) || 0) + (Number(a.qty) || 0))
+
+      const rows = lots.filter(l => operationMap.get(l.source_operation_id)?.operation_type === 'przyjecie').map(l => {
+        const op = operationMap.get(l.source_operation_id) || {}
+        const product = productMap.get(l.product_id) || {}
+        const allocated = allocatedByLot.get(l.id) || 0
+        const initial = Number(l.initial_qty || 0)
+        const remaining = Math.max(0, initial - allocated)
+        let statusKey = 'wolna', statusLabel = 'Nieprzypisana'
+        if (allocated >= initial - 0.001 && initial > 0) { statusKey = 'wykorzystana'; statusLabel = 'Wykorzystana' }
+        else if (allocated > 0) { statusKey = 'czesciowo'; statusLabel = 'Częściowo' }
+        return { ...l, document_no: op.document_no || '', operation_date: op.operation_date || l.production_date || '', supplier_name: contractorMap.get(op.contractor_id)?.name || '', product_name: product.name || '', product_code: product.code || '', product_group: l.product_group || product.product_group || productGroupForName(product.name), allocated_qty: allocated, calculated_remaining_qty: remaining, status_key: statusKey, status_label: statusLabel }
+      })
+      setPzRows(rows)
+
+      const { data: hist, error: histErr } = await supabase.from('pz_fifo_change_log').select('*').order('created_at', { ascending: false }).limit(200)
+      if (!histErr) setPzHistoryRows(hist || [])
+    } catch (err) {
+      console.error('PZ management load error', err)
+      setMessage(`Błąd odczytu zakładki PZ: ${err?.message || String(err)}. Uruchom SQL v31, jeśli tabela historii jeszcze nie istnieje.`)
+    }
+  }
+
+  async function savePzDate(row) {
+    if (!supabase || !row?.id) return
+    const newDate = pzEditDates[row.id] || String(row.production_date || row.operation_date || '').slice(0, 10)
+    const oldDate = String(row.production_date || row.operation_date || '').slice(0, 10)
+    if (!newDate || newDate === oldDate) { setMessage('Data PZ bez zmian.'); return }
+    const reason = window.prompt(`Podaj powód zmiany daty PZ ${row.document_no || row.lot_no}:`, 'Korekta daty PZ/FIFO')
+    if (reason === null) return
+    if (!window.confirm(`Zmienić datę PZ ${row.document_no || row.lot_no} z ${oldDate} na ${newDate}?`)) return
+    try {
+      const { error: lotErr } = await supabase.from('lots').update({ production_date: newDate }).eq('id', row.id)
+      if (lotErr) throw lotErr
+      if (row.source_operation_id) {
+        const { error: opErr } = await supabase.from('operations').update({ operation_date: newDate }).eq('id', row.source_operation_id)
+        if (opErr) throw opErr
+      }
+      await supabase.from('pz_fifo_change_log').insert({ lot_id: row.id, source_operation_id: row.source_operation_id, document_no: row.document_no, old_date: oldDate, new_date: newDate, change_reason: reason || 'Korekta daty PZ/FIFO', changed_by: 'admin', action_type: 'change_date' })
+      const { error: rpcErr } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
+      if (rpcErr) throw rpcErr
+      setFifoKartotekiDirty(true)
+      setMessage('Zmieniono datę PZ i przeliczono FIFO. Kartoteki nie zostały jeszcze odświeżone – kliknij „Odśwież kartoteki”.')
+      await loadPzManagementData(); await loadFifoData()
+    } catch (err) { setMessage(`Błąd zmiany daty PZ: ${err?.message || String(err)}`) }
+  }
+
+  async function recalculateFifoFromPzTab() {
+    if (!supabase) return
+    if (!window.confirm('Przeliczyć FIFO od początku? System nie będzie używał PZ z datą późniejszą niż WZ.')) return
+    try {
+      const { error } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
+      if (error) throw error
+      setFifoKartotekiDirty(true)
+      setMessage('FIFO przeliczone. Kartoteki wymagają odświeżenia.')
+      await loadPzManagementData(); await loadFifoData(); await loadK03TraceData()
+    } catch (err) { setMessage(`Błąd przeliczenia FIFO: ${err?.message || String(err)}`) }
+  }
+
+  async function refreshHaccpAfterFifo() {
+    await loadHaccpDocs(); await loadK03TraceData(); await loadFifoData(); await loadPzManagementData()
+    setFifoKartotekiDirty(false)
+    setMessage('Kartoteki odświeżone po zmianach FIFO.')
+  }
+
+  async function undoPzChange(change) {
+    if (!supabase || !change?.lot_id || !change?.old_date) return
+    if (!window.confirm(`Cofnąć zmianę PZ ${change.document_no || ''}: ${change.new_date} → ${change.old_date}?`)) return
+    try {
+      const { error: lotErr } = await supabase.from('lots').update({ production_date: change.old_date }).eq('id', change.lot_id)
+      if (lotErr) throw lotErr
+      if (change.source_operation_id) {
+        const { error: opErr } = await supabase.from('operations').update({ operation_date: change.old_date }).eq('id', change.source_operation_id)
+        if (opErr) throw opErr
+      }
+      await supabase.from('pz_fifo_change_log').insert({ lot_id: change.lot_id, source_operation_id: change.source_operation_id, document_no: change.document_no, old_date: change.new_date, new_date: change.old_date, change_reason: `Cofnięcie zmiany ${change.id || ''}`, changed_by: 'admin', action_type: 'undo_date_change' })
+      const { error } = await supabase.rpc('recalculate_fifo_strict_by_group_date')
+      if (error) throw error
+      setFifoKartotekiDirty(true)
+      setMessage('Cofnięto zmianę i przeliczono FIFO. Kartoteki wymagają odświeżenia.')
+      await loadPzManagementData(); await loadFifoData()
+    } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
+  }
+
   async function loadHaccpDocs() {
     if (!supabase) return
     try {
@@ -2245,6 +2401,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   const tabs = [
     ['dashboard', 'Start', LayoutDashboard],
     ['importy', 'Importy Excel', Upload],
+    ['pz', 'PZ / FIFO', Database],
     ['magazyn', 'Magazyn', Warehouse],
     ['produkcja', 'Produkcja / Przerób', Package],
     ['kartoteki', 'Kartoteki HACCP', ClipboardList],
@@ -2484,6 +2641,20 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </tr>)}</tbody>
       </table></div></>}
     </section>
+    </>}
+
+
+    {activeTab === 'pz' && <>
+    <section className="card">
+      <div className="section-title"><Database/><div><h2>PZ – Zarządzanie FIFO</h2><p>Ręczna korekta dat PZ bez ponownego importu. Po zmianie FIFO przelicza się od początku, ale kartoteki odświeżasz osobnym przyciskiem.</p></div></div>
+      {fifoKartotekiDirty && <div className="warning inline-warning"><AlertTriangle size={18}/><div><b>Zmieniono dane FIFO.</b> Kartoteki mogą pokazywać stary układ. Kliknij „Odśwież kartoteki”.</div></div>}
+      {message && <p className="message">{message}</p>}
+      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab}><RefreshCcw size={16}/> Przelicz FIFO</button><button className="secondary" onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> Odśwież kartoteki</button></div>
+      <div className="summary"><span>PZ razem: <b>{pzRows.length}</b></span><span>Nieprzypisane: <b>{pzRows.filter(r => r.status_key === 'wolna').length}</b></span><span>Częściowo: <b>{pzRows.filter(r => r.status_key === 'czesciowo').length}</b></span><span>Wykorzystane: <b>{pzRows.filter(r => r.status_key === 'wykorzystana').length}</b></span></div>
+      <div className="form-grid compact"><label>Szukaj PZ / partii / produktu<input value={pzSearch} onChange={e => setPzSearch(e.target.value)} placeholder="np. PZ/001 albo Jab/001 albo truskawka" /></label><label>Status<select value={pzStatusFilter} onChange={e => setPzStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="wolna">Nieprzypisane</option><option value="czesciowo">Częściowo</option><option value="wykorzystana">Wykorzystane</option></select></label></div>
+      <div className="table-wrap small"><table><thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Asortyment</th><th>Grupa</th><th>Ilość PZ</th><th>Przypisano</th><th>Pozostało</th><th>Status</th><th>Akcje</th></tr></thead><tbody>{visiblePzRows.map(row => { const editDate = pzEditDates[row.id] ?? String(row.production_date || row.operation_date || '').slice(0, 10); return <tr key={row.id}><td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setPzEditDates(prev => ({ ...prev, [row.id]: e.target.value }))} /></td><td><b>{row.document_no || '-'}</b></td><td>{row.lot_no}</td><td>{row.product_name}</td><td>{row.product_group}</td><td>{Number(row.initial_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.allocated_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.calculated_remaining_qty || 0).toLocaleString('pl-PL')}</td><td><span className={`pill pz-status-${row.status_key}`}>{row.status_label}</span></td><td className="row-actions"><button className="mini secondary" onClick={() => savePzDate(row)}>Zapisz datę</button></td></tr> })}</tbody></table></div>
+    </section>
+    <section className="card"><div className="section-title"><ArrowRightLeft/><div><h2>Historia zmian PZ/FIFO</h2><p>Każda zmiana daty PZ jest zapisana. Możesz cofnąć wybraną zmianę jednym przyciskiem.</p></div></div>{pzHistoryRows.length === 0 && <p className="hint">Brak historii albo nie uruchomiono jeszcze SQL v31.</p>}{pzHistoryRows.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Data zmiany</th><th>PZ</th><th>Stara data</th><th>Nowa data</th><th>Akcja</th><th>Powód</th><th>Cofnij</th></tr></thead><tbody>{pzHistoryRows.map(h => <tr key={h.id}><td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td><td><b>{h.document_no || '-'}</b></td><td>{h.old_date || '-'}</td><td>{h.new_date || '-'}</td><td>{h.action_type || 'change_date'}</td><td>{h.change_reason || '-'}</td><td><button className="mini secondary" onClick={() => undoPzChange(h)}>Cofnij</button></td></tr>)}</tbody></table></div>}</section>
     </>}
 
 
