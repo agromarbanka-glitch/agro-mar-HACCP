@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.2'
+export const K03_ENGINE_VERSION = '3.3'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -601,4 +601,115 @@ export function mergeK03Overrides(forms, overrides = {}) {
       data: { ...doc.data, saleRows }
     }
   })
+}
+
+export async function loadK03Snapshots(client) {
+  if (!client) return []
+  try {
+    const { data, error } = await client
+      .from('haccp_documents')
+      .select('id, document_type, operation_id, document_no, document_date, product_name, lot_no, qty, status, data, signed_by_operator, created_at, updated_at')
+      .eq('document_type', 'K03')
+      .limit(10000)
+    if (error) throw error
+    return data || []
+  } catch {
+    return []
+  }
+}
+
+export function mergeK03Snapshots(forms, snapshots = []) {
+  const byKey = new Map()
+  for (const snap of snapshots) {
+    const key = snap?.data?.k03_key || snap?.data?.form_id
+    if (key) byKey.set(key, snap)
+  }
+  return (forms || []).map(form => {
+    const snap = byKey.get(form.id)
+    if (!snap) return form
+    const signed = snap.signed_by_operator || form.signed_by_operator || ''
+    const frozen = snap.data?.frozen === true
+    if (frozen && Array.isArray(snap.data?.rawRows)) {
+      return {
+        ...form,
+        haccp_doc_id: snap.id,
+        frozen: true,
+        frozen_at: snap.data?.frozen_at || snap.updated_at,
+        lot_no: snap.lot_no || form.lot_no,
+        signed_by_operator: signed,
+        status: snap.status || form.status,
+        data: {
+          ...form.data,
+          ...snap.data,
+          rawRows: snap.data.rawRows,
+          saleRows: (snap.data.saleRows || form.data?.saleRows || []).map(r => ({ ...r, signed_by: signed })),
+          rawTotal: snap.data.rawTotal ?? form.data?.rawTotal,
+          quantitiesMatch: snap.data.quantitiesMatch ?? form.data?.quantitiesMatch,
+          shortage: snap.data.shortage ?? form.data?.shortage
+        }
+      }
+    }
+    return {
+      ...form,
+      haccp_doc_id: snap.id,
+      signed_by_operator: signed,
+      data: {
+        ...form.data,
+        saleRows: (form.data?.saleRows || []).map(r => ({ ...r, signed_by: signed }))
+      }
+    }
+  })
+}
+
+export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 'operator' } = {}) {
+  if (!client || !doc?.id) return null
+  const payload = {
+    document_type: 'K03',
+    operation_id: doc.data?.sale_operation_id || null,
+    document_date: doc.document_date,
+    product_name: doc.product_name,
+    lot_no: doc.lot_no,
+    document_no: doc.document_no,
+    qty: doc.qty,
+    status: doc.status,
+    signed_by_operator: doc.signed_by_operator || '',
+    data: {
+      ...(doc.data || {}),
+      k03_key: doc.id,
+      form_id: doc.id,
+      frozen: freeze,
+      frozen_at: freeze ? new Date().toISOString() : (doc.data?.frozen_at || null),
+      rawRows: doc.data?.rawRows || [],
+      saleRows: doc.data?.saleRows || [],
+      product_group: doc.product_group || doc.data?.product_group
+    },
+    updated_at: new Date().toISOString()
+  }
+
+  const { data: existingRows, error: findErr } = await client
+    .from('haccp_documents')
+    .select('id, data')
+    .eq('document_type', 'K03')
+    .limit(10000)
+  if (findErr) throw findErr
+  const existing = (existingRows || []).find(r => r.data?.k03_key === doc.id)
+
+  if (existing?.id) {
+    if (existing.data?.frozen === true && !freeze) {
+      payload.data.frozen = true
+      payload.data.frozen_at = existing.data?.frozen_at
+      payload.data.rawRows = existing.data?.rawRows || payload.data.rawRows
+    }
+    const { error } = await client.from('haccp_documents').update(payload).eq('id', existing.id)
+    if (error) throw error
+    return existing.id
+  }
+
+  const { data, error } = await client
+    .from('haccp_documents')
+    .insert({ ...payload, created_by: userRole })
+    .select('id')
+    .single()
+  if (error) throw error
+  return data?.id
 }

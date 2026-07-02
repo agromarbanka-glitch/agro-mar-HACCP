@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
+import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -230,6 +231,8 @@ function App() {
   const [k03Diag, setK03Diag] = useState({ wzDocs: 0, saleLines: 0, forms: 0, allocations: 0 })
   const [k03Loading, setK03Loading] = useState(false)
   const [k03PanelNote, setK03PanelNote] = useState('')
+  const [k03Snapshots, setK03Snapshots] = useState([])
+  const [fifoChangeLog, setFifoChangeLog] = useState([])
   const [fifoRecalculating, setFifoRecalculating] = useState(false)
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
@@ -363,6 +366,64 @@ function App() {
       if (!group?.docs?.some(d => d.id === doc.id)) return prev
       return { ...prev, group: { ...group, docs: group.docs.map(d => d.id === doc.id ? { ...d, signed_by_operator: employeeName, data: { ...(d.data || {}), saleRows: (d.data?.saleRows || []).map(r => ({ ...r, signed_by: employeeName })) } } : d) } }
     })
+    const nextDoc = {
+      ...doc,
+      signed_by_operator: employeeName,
+      data: {
+        ...(doc.data || {}),
+        saleRows: (doc.data?.saleRows || []).map(r => ({ ...r, signed_by: employeeName }))
+      }
+    }
+    if (supabase) {
+      saveK03Snapshot(supabase, nextDoc, { freeze: doc.frozen === true, userRole: userRole }).catch(err => {
+        console.warn('K03 signature save', err)
+      })
+    }
+  }
+
+  async function freezeK03Document(doc, reason = 'Zamrożenie po wydruku/zatwierdzeniu') {
+    if (!doc?.id) return false
+    if (doc.frozen) return true
+    const shortage = Number(doc.data?.shortage || 0)
+    const quantitiesOk = doc.data?.quantitiesMatch !== false && shortage <= 0
+    if (!quantitiesOk) {
+      setMessage('Nie można zamrożyć – formularz ma braki PZ lub niezgodność sum.')
+      return false
+    }
+    if (!supabase) {
+      setMessage('Brak bazy – zamrożenie wymaga Supabase.')
+      return false
+    }
+    try {
+      await saveK03Snapshot(supabase, doc, { freeze: true, userRole: userRole })
+      await loadK03SnapshotsOnly()
+      await loadK03TraceData()
+      setMessage(`${reason}. Formularz WZ ${doc.document_no || ''} jest zablokowany przed zmianami FIFO.`)
+      return true
+    } catch (err) {
+      setMessage(`Błąd zamrażania K03: ${err?.message || String(err)}`)
+      return false
+    }
+  }
+
+  async function loadK03SnapshotsOnly() {
+    if (!supabase) return
+    const snaps = await loadK03Snapshots(supabase)
+    setK03Snapshots(snaps)
+  }
+
+  async function loadFifoChangeLog() {
+    if (!supabase) return
+    try {
+      const { data, error } = await supabase
+        .from('fifo_allocation_change_log')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100)
+      if (!error) setFifoChangeLog(data || [])
+    } catch {
+      setFifoChangeLog([])
+    }
   }
 
   function setEmployeeForVisibleK03Forms(employeeName, onlyEmpty = false) {
@@ -385,6 +446,13 @@ function App() {
       }
       return next
     })
+    if (supabase) {
+      for (const doc of docs) {
+        if (onlyEmpty && doc.signed_by_operator) continue
+        const nextDoc = { ...doc, signed_by_operator: employeeName, data: { ...(doc.data || {}), saleRows: (doc.data?.saleRows || []).map(r => ({ ...r, signed_by: employeeName })) } }
+        saveK03Snapshot(supabase, nextDoc, { freeze: doc.frozen === true, userRole: userRole }).catch(() => {})
+      }
+    }
     setMessage(`Ustawiono podpis dla ${docs.length} formularzy K03. Możesz zmienić pojedynczy formularz w edycji.`)
   }
 
@@ -912,10 +980,17 @@ function App() {
     return buildK03PrintHtml(doc)
   }
 
-  function printHaccpGroup(group) {
+  async function printHaccpGroup(group) {
     if (!group) return
+    if (group.type === 'K03') {
+      const doc = (group.docs || [])[0]
+      if (doc && !doc.frozen) {
+        const shortage = Number(doc.data?.shortage || 0)
+        const ok = doc.data?.quantitiesMatch !== false && shortage <= 0
+        if (ok) await freezeK03Document(doc, 'Kartoteka zamrożona automatycznie przed drukiem')
+      }
+    }
     const html = group.type === 'K01' ? buildK01MonthlyHtml(group) : (group.type === 'K03' ? buildK03MonthlyHtml(group) : buildK02MonthlyHtml(group))
-    // Drukujemy zawartość przez ukryty iframe, a nie przez puste okno. To naprawia białą kartkę w podglądzie druku.
     printHtmlInIframe(html)
   }
 
@@ -1094,7 +1169,7 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <span className="hint">Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = {paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = {paper.saleTotal.toLocaleString('pl-PL')} kg.</span>
+          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ.' : 'Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = {paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = {paper.saleTotal.toLocaleString('pl-PL')} kg.'}</span>
         </div>
         <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {paper.year}<br/><b>Miesiąc:</b> {paper.month}<br/><b>Strona:</b></td></tr></tbody></table>
         <table className="k03-fields"><tbody><tr><td><b>Nazwa produktu:</b> {paper.productName}</td><td><b>Data sprzedaży (WZ):</b> {paper.wzDate}</td></tr><tr><td><b>Numer WZ:</b> {paper.wzNo}</td><td><b>Ilość WZ (kg):</b> {paper.saleTotal.toLocaleString('pl-PL')}</td></tr><tr><td><b>Nadany numer partii wyrobu gotowego:</b> {paper.lotNo || '-'}</td><td><b>Odbiorca:</b> {paper.receiver || '-'}</td></tr></tbody></table>
@@ -1467,7 +1542,11 @@ function App() {
     if (!doc) return null
     if (doc.groupPreview) {
       const group = haccpMonthlyGroups.find(g => g.key === doc.group?.key) || doc.group
-      return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print"><button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
+      return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print">
+        {group.type === 'K03' && (group.docs || [])[0] && <>
+          {(group.docs[0].frozen ? <span className="status ok">Zamrożony – FIFO nie zmieni tej kartoteki</span> : <button className="secondary" onClick={() => freezeK03Document(group.docs[0], 'Kartoteka zamrożona ręcznie')}>Zamroź kartotekę</button>)}
+        </>}
+        <button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
       <div className="haccp-modal" onClick={e => e.stopPropagation()}>
@@ -1497,45 +1576,89 @@ function App() {
       loadEmployees()
       loadAuxMaterials()
       loadPzManagementData()
-      setFifoRecalculating(true)
-      try {
-        const fifoResult = await recalculateFifoEngine()
-        if (fifoResult.ok) {
-          await loadFifoData()
-          await loadK03TraceData()
-          await loadPzManagementData()
-          if ((fifoResult.shortages || []).length) {
-            setMessage(`FIFO przeliczone (${fifoResult.mode}). Brak PZ dla ${fifoResult.shortages.length} pozycji WZ – sprawdź K03.`)
-          }
-        } else {
-          await loadK03TraceData()
-        }
-      } catch (err) {
-        await loadK03TraceData()
-        setMessage(`Uwaga: nie udało się przeliczyć FIFO przy starcie: ${err?.message || String(err)}`)
-      } finally {
-        setFifoRecalculating(false)
-      }
+      await loadK03SnapshotsOnly()
+      await loadK03TraceData()
+      await loadFifoChangeLog()
     })()
   }, [])
 
-  async function runFifoRecalculate(showConfirm = true) {
+  async function runFifoIncremental(showConfirm = true) {
     if (!supabase) {
       setMessage('Brak konfiguracji Supabase.')
       return null
     }
-    if (showConfirm && !window.confirm('Przeliczyć FIFO od początku? WZ zostaną rozliczone chronologicznie. PZ użyte będą tylko z datą ≤ data WZ. To zwolni komory po wydaniach.')) return null
+    const frozenKeys = frozenKeysFromSnapshots(k03Snapshots)
+    const stats = await countIncompleteSales(supabase, frozenKeys).catch(() => ({ incomplete: 0, complete: 0, frozen: frozenKeys.size }))
+    if (showConfirm && !window.confirm(
+      `Uzupełnić braki FIFO?\n\n` +
+      `• Pominięte (kompletne): ${stats.complete}\n` +
+      `• Zamrożone (z wydruku): ${stats.frozen}\n` +
+      `• Do uzupełnienia: ${stats.incomplete}\n\n` +
+      `Wcześniejsze zgodne i zamrożone kartoteki K03 nie zostaną zmienione.`
+    )) return null
+
     setFifoRecalculating(true)
     try {
-      const fifoResult = await recalculateFifoEngine()
+      const fifoResult = await recalculateFifoIncremental(supabase, { frozenKeys })
       if (!fifoResult.ok) throw new Error('Przeliczenie FIFO nie powiodło się.')
       await loadFifoData()
       await loadK03TraceData()
       await loadPzManagementData()
+      await loadFifoChangeLog()
       setFifoKartotekiDirty(false)
       const shortageCount = (fifoResult.shortages || []).length
-      const shortageMsg = shortageCount ? ` Brak PZ dla ${shortageCount} pozycji WZ.` : ''
-      setMessage(`FIFO przeliczone (${fifoResult.mode}). Komory i K03 odświeżone.${shortageMsg}`)
+      setMessage(
+        `FIFO uzupełnione (${fifoResult.mode}). Przetworzono ${fifoResult.processed} WZ, ` +
+        `pominięto ${fifoResult.skippedComplete} kompletnych i ${fifoResult.skippedFrozen} zamrożonych.` +
+        (shortageCount ? ` Brak PZ dla ${shortageCount} pozycji.` : '')
+      )
+      return fifoResult
+    } catch (err) {
+      setMessage(`Błąd uzupełniania FIFO: ${err?.message || String(err)}`)
+      return null
+    } finally {
+      setFifoRecalculating(false)
+    }
+  }
+
+  async function runFifoFullRecalculate(showConfirm = true) {
+    if (!supabase) {
+      setMessage('Brak konfiguracji Supabase.')
+      return null
+    }
+    const frozenKeys = frozenKeysFromSnapshots(k03Snapshots)
+    const frozenOpIds = frozenOperationIdsFromSnapshots(k03Snapshots)
+    const frozenCount = frozenKeys.size
+
+    if (showConfirm) {
+      const msg = frozenCount
+        ? `Pełne przeliczenie FIFO (z ochroną ${frozenCount} zamrożonych K03).\n\n` +
+          `Zamrożone wydruki NIE zmienią przypisanych PZ.\n` +
+          `Pozostałe WZ zostaną przeliczone od nowa.\n\nKontynuować?`
+        : `Przeliczyć wszystkie WZ od nowa?\n\nKompletne rozliczenia zostaną przeliczone ponownie (brak zamrożonych K03).`
+      if (!window.confirm(msg)) return null
+    }
+
+    setFifoRecalculating(true)
+    try {
+      const fifoResult = await recalculateFifoFullProtected(supabase, {
+        frozenKeys,
+        frozenOperationIds: frozenOpIds,
+        changedBy: userRole,
+        reason: 'Pełne przeliczenie z ochładką K03'
+      })
+      if (!fifoResult.ok) throw new Error('Przeliczenie FIFO nie powiodło się.')
+      await loadFifoData()
+      await loadK03TraceData()
+      await loadPzManagementData()
+      await loadFifoChangeLog()
+      setFifoKartotekiDirty(false)
+      const shortageCount = (fifoResult.shortages || []).length
+      setMessage(
+        `Pełne FIFO (${fifoResult.mode}). Przeliczono ${fifoResult.processed} WZ, ` +
+        `chroniono ${fifoResult.frozenProtected} zamrożonych.` +
+        (shortageCount ? ` Brak PZ: ${shortageCount} pozycji.` : '')
+      )
       return fifoResult
     } catch (err) {
       setMessage(`Błąd przeliczenia FIFO: ${err?.message || String(err)}`)
@@ -1543,6 +1666,11 @@ function App() {
     } finally {
       setFifoRecalculating(false)
     }
+  }
+
+  /** @deprecated alias – używa trybu przyrostowego */
+  async function runFifoRecalculate(showConfirm = true) {
+    return runFifoIncremental(showConfirm)
   }
 
   async function handleFile(e) {
@@ -1921,6 +2049,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         forms = result.forms || []
         diag = result.diag || diag
         note = result.message || ''
+        const snaps = await loadK03Snapshots(supabase)
+        setK03Snapshots(snaps)
+        forms = mergeK03Snapshots(forms, snaps)
+        const frozenCount = snaps.filter(s => s.data?.frozen).length
+        if (frozenCount) note = `${note ? note + ' ' : ''}${frozenCount} formularzy K03 zamrożonych (z wydruku) – FIFO ich nie zmienia.`
       } else {
         note = 'Brak pliku .env z danymi bazy – K03 pokaże WZ z wczytanego Excela (jeśli jest).'
       }
@@ -2527,15 +2660,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         if (opErr) throw opErr
       }
       await supabase.from('pz_fifo_change_log').insert({ lot_id: row.id, source_operation_id: row.source_operation_id, document_no: row.document_no, old_date: oldDate, new_date: newDate, change_reason: reason || 'Korekta daty PZ/FIFO', changed_by: 'admin', action_type: 'change_date' })
-      await runFifoRecalculate(false)
-      setFifoKartotekiDirty(true)
-      setMessage('Zmieniono datę PZ i przeliczono FIFO. K03 i komory zostały odświeżone.')
+      const frozenN = k03Snapshots.filter(s => s.data?.frozen).length
+      await runFifoIncremental(false)
+      setMessage(`Zmieniono datę PZ. Uzupełniono braki FIFO (bez zmiany ${frozenN} zamrożonych K03). Sprawdź kartoteki, jeśli data dotyczyła wydrukowanych formularzy.`)
       await loadPzManagementData()
     } catch (err) { setMessage(`Błąd zmiany daty PZ: ${err?.message || String(err)}`) }
   }
 
   async function recalculateFifoFromPzTab() {
-    await runFifoRecalculate(true)
+    await runFifoIncremental(true)
+  }
+
+  async function recalculateFifoFullFromPzTab() {
+    await runFifoFullRecalculate(true)
   }
 
   async function refreshHaccpAfterFifo() {
@@ -2555,9 +2692,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         if (opErr) throw opErr
       }
       await supabase.from('pz_fifo_change_log').insert({ lot_id: change.lot_id, source_operation_id: change.source_operation_id, document_no: change.document_no, old_date: change.new_date, new_date: change.old_date, change_reason: `Cofnięcie zmiany ${change.id || ''}`, changed_by: 'admin', action_type: 'undo_date_change' })
-      await runFifoRecalculate(false)
-      setFifoKartotekiDirty(true)
-      setMessage('Cofnięto zmianę i przeliczono FIFO. K03 i komory odświeżone.')
+      await runFifoIncremental(false)
+      setMessage('Cofnięto zmianę daty PZ. Uzupełniono braki FIFO (zamrożone K03 bez zmian).')
       await loadPzManagementData()
     } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
   }
@@ -2693,7 +2829,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       let shortageCount = 0
       let shortageKg = 0
       try {
-        const fifoResult = await recalculateFifoEngine()
+        const snaps = supabase ? await loadK03Snapshots(supabase) : []
+        const frozenKeys = frozenKeysFromSnapshots(snaps)
+        const fifoResult = await recalculateFifoIncremental(supabase, { frozenKeys })
         if (fifoResult.ok) {
           fifoAllocations = fifoResult.allocationCount ?? rozchodItems
           shortageCount = (fifoResult.shortages || []).length
@@ -2711,6 +2849,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       await loadK03TraceData()
       await loadImports()
       await loadHaccpDocs()
+      await loadK03SnapshotsOnly()
+      await loadFifoChangeLog()
     } catch (err) {
       setMessage(`Błąd zapisu do Supabase: ${err.message}`)
     }
@@ -2839,12 +2979,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Database/><div><h2>PZ – Zarządzanie FIFO</h2><p>Ręczna korekta dat PZ bez ponownego importu. Po zmianie FIFO przelicza się od początku, ale kartoteki odświeżasz osobnym przyciskiem.</p></div></div>
       {fifoKartotekiDirty && <div className="warning inline-warning"><AlertTriangle size={18}/><div><b>Zmieniono dane FIFO.</b> Kartoteki mogą pokazywać stary układ. Kliknij „Odśwież kartoteki”.</div></div>}
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab}><RefreshCcw size={16}/> Przelicz FIFO</button><button className="secondary" onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> Odśwież kartoteki</button></div>
+      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={recalculateFifoFullFromPzTab} disabled={fifoRecalculating}>Pełne FIFO (admin)</button><button className="secondary" onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> Odśwież kartoteki</button></div>
       <div className="summary"><span>PZ razem: <b>{pzRows.length}</b></span><span>Nieprzypisane: <b>{pzRows.filter(r => r.status_key === 'wolna').length}</b></span><span>Częściowo: <b>{pzRows.filter(r => r.status_key === 'czesciowo').length}</b></span><span>Wykorzystane: <b>{pzRows.filter(r => r.status_key === 'wykorzystana').length}</b></span></div>
       <div className="form-grid compact"><label>Szukaj PZ / partii / produktu<input value={pzSearch} onChange={e => setPzSearch(e.target.value)} placeholder="np. PZ/001 albo Jab/001 albo truskawka" /></label><label>Status<select value={pzStatusFilter} onChange={e => setPzStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="wolna">Nieprzypisane</option><option value="czesciowo">Częściowo</option><option value="wykorzystana">Wykorzystane</option></select></label></div>
       <div className="table-wrap small"><table><thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Asortyment</th><th>Grupa</th><th>Ilość PZ</th><th>Przypisano</th><th>Pozostało</th><th>Status</th><th>Akcje</th></tr></thead><tbody>{visiblePzRows.map(row => { const editDate = pzEditDates[row.id] ?? String(row.production_date || row.operation_date || '').slice(0, 10); return <tr key={row.id}><td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setPzEditDates(prev => ({ ...prev, [row.id]: e.target.value }))} /></td><td><b>{row.document_no || '-'}</b></td><td>{row.lot_no}</td><td>{row.product_name}</td><td>{row.product_group}</td><td>{Number(row.initial_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.allocated_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.calculated_remaining_qty || 0).toLocaleString('pl-PL')}</td><td><span className={`pill pz-status-${row.status_key}`}>{row.status_label}</span></td><td className="row-actions"><button className="mini secondary" onClick={() => savePzDate(row)}>Zapisz datę</button></td></tr> })}</tbody></table></div>
     </section>
     <section className="card"><div className="section-title"><ArrowRightLeft/><div><h2>Historia zmian PZ/FIFO</h2><p>Każda zmiana daty PZ jest zapisana. Możesz cofnąć wybraną zmianę jednym przyciskiem.</p></div></div>{pzHistoryRows.length === 0 && <p className="hint">Brak historii albo nie uruchomiono jeszcze SQL v31.</p>}{pzHistoryRows.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Data zmiany</th><th>PZ</th><th>Stara data</th><th>Nowa data</th><th>Akcja</th><th>Powód</th><th>Cofnij</th></tr></thead><tbody>{pzHistoryRows.map(h => <tr key={h.id}><td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td><td><b>{h.document_no || '-'}</b></td><td>{h.old_date || '-'}</td><td>{h.new_date || '-'}</td><td>{h.action_type || 'change_date'}</td><td>{h.change_reason || '-'}</td><td><button className="mini secondary" onClick={() => undoPzChange(h)}>Cofnij</button></td></tr>)}</tbody></table></div>}</section>
+    <section className="card"><div className="section-title"><Database/><div><h2>Historia przeliczeń FIFO</h2><p>Pełne przeliczenia i operacje admina (wymaga SQL v34).</p></div></div>{fifoChangeLog.length === 0 && <p className="hint">Brak wpisów – uruchom migrację <b>2026-v34-fifo-incremental-k03-freeze.sql</b> w Supabase.</p>}{fifoChangeLog.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Data</th><th>Typ</th><th>WZ</th><th>Powód</th><th>Szczegóły</th></tr></thead><tbody>{fifoChangeLog.map(h => <tr key={h.id}><td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td><td>{h.change_type || '-'}</td><td>{h.wz_no || h.k03_key || '-'}</td><td>{h.change_reason || '-'}</td><td className="hint">{h.after_data ? JSON.stringify(h.after_data).slice(0, 120) : '-'}</td></tr>)}</tbody></table></div>}</section>
     </>}
 
 
@@ -3000,7 +3141,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'kartoteki' && <>
     <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v27 · K03 {K03_ENGINE_VERSION}</b> – jeden formularz = jeden WZ. Po lewej PZ, po prawej WZ. K03 pokazuje <b>wszystkie WZ</b> (filtr daty go nie dotyczy).</p></div></div>
+      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v27 · K03 {K03_ENGINE_VERSION}</b> – jeden formularz = jeden WZ. Zgodne kartoteki można <b>zamrozić</b> (automatycznie przy druku). FIFO uzupełnia tylko braki – nie zmienia zamrożonych.</p></div></div>
       <div className="haccp-card-grid">
         {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData() }}>
           <b>{title}</b><small>{desc}</small>
@@ -3016,7 +3157,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         {haccpPeriodMode === 'month' && <label>Miesiąc<input type="month" value={haccpMonth} onChange={e => setHaccpMonth(e.target.value)} /></label>}
         {haccpPeriodMode === 'range' && <><label>Od<input type="date" value={haccpFrom} onChange={e => setHaccpFrom(e.target.value)} /></label><label>Do<input type="date" value={haccpTo} onChange={e => setHaccpTo(e.target.value)} /></label></>}
       </div>}
-      <div className="actions"><button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData() }}><RefreshCcw size={16}/> Odśwież kartoteki</button>{docsFilter === 'K03' && <button onClick={() => runFifoRecalculate(true)} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'Przeliczanie FIFO...' : 'Przelicz FIFO (wydania WZ)'}</button>}</div>
+      <div className="actions"><button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData() }}><RefreshCcw size={16}/> Odśwież kartoteki</button>{docsFilter === 'K03' && <><button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO (admin)</button></>}</div>
       {docsFilter === 'K03' && <>
         <div className="k03-status-box">
           <strong>K03 – status (wersja {K03_ENGINE_VERSION})</strong>
@@ -3026,7 +3167,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <b> {syntheticK03Docs.length}</b> formularzy na liście
             {k03Diag.source ? ` · źródło: ${k03Diag.source}` : ''}
           </p>
-          <p className="hint">Jeśli u góry strony widzisz „v26” zamiast „<b>v27 · K03 {K03_ENGINE_VERSION}</b>” – masz starą wersję. Zamknij aplikację i uruchom ponownie z folderu projektu (patrz instrukcja poniżej).</p>
+          <p className="hint">Przy starcie aplikacja <b>nie przelicza FIFO</b> – pokazuje zapis w bazie. Zamrożone K03 (po druku) są chronione. Uruchom migrację SQL <b>v34</b> w Supabase, aby włączyć historię zmian FIFO.</p>
         </div>
         <div className="haccp-tabs k03-tabs">
           {K03_ASSORTMENT_TABS.map(([code, label]) => {
@@ -3066,12 +3207,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <p className="hint">{docsFilter === 'K03'
         ? <>Wybierz asortyment, rok i miesiąc powyżej, potem kliknij <b>Kartoteka</b> przy wybranym WZ. Suma PZ po lewej musi równać się ilości WZ po prawej.</>
         : <> <b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</>}</p>
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak formularzy K03 na liście. {k03Diag.wzDocs > 0 ? `W bazie jest ${k03Diag.wzDocs} WZ – kliknij „Odśwież kartoteki” lub „Przelicz FIFO”.` : ' Zaimportuj Excel z WZ → Zapisz do Supabase → Odśwież kartoteki.'}</p>}
+      {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak formularzy K03 na liście. {k03Diag.wzDocs > 0 ? `W bazie jest ${k03Diag.wzDocs} WZ – kliknij „Odśwież kartoteki” lub „Uzupełnij braki FIFO”.` : ' Zaimportuj Excel z WZ → Zapisz do Supabase → Odśwież kartoteki.'}</p>}
       {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
       {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
         <thead><tr>
           <th>Kartoteka</th>
-          {docsFilter === 'K03' ? <><th>Data WZ</th><th>Nr WZ</th><th>Partia</th><th>Asortyment</th><th>Ilość WZ</th><th>Suma PZ</th><th>FIFO</th><th>Niezgodności</th></> : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th></>}
+          {docsFilter === 'K03' ? <><th>Data WZ</th><th>Nr WZ</th><th>Partia</th><th>Asortyment</th><th>Ilość WZ</th><th>Suma PZ</th><th>Status</th><th>FIFO</th><th>Niezgodności</th></> : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th></>}
           <th>Akcje</th>
         </tr></thead>
         <tbody>{haccpMonthlyGroups.map(g => {
@@ -3088,6 +3229,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <td>{doc.product_name || g.product}</td>
               <td>{saleQty.toLocaleString('pl-PL')} kg</td>
               <td>{pzQty.toLocaleString('pl-PL')} kg</td>
+              <td>{doc.frozen ? <span className="status ok">Zamrożony</span> : <span className="hint">Roboczy</span>}</td>
               <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : 'BRAK'}</span></td>
               <td>{doc.status === 'N' ? 1 : 0}</td>
               <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td>
