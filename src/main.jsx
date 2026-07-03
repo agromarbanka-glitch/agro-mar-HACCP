@@ -7,6 +7,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
+import { WYKAZY_CARDS, WYKAZY_FORMS, WYKAZY_ENGINE_VERSION, buildWykazGroups, wykazPeriodLabel } from './wykazyEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -233,8 +234,10 @@ function App() {
   const [importPreview, setImportPreview] = useState([])
   const [haccpDocs, setHaccpDocs] = useState([])
   const [docsFilter, setDocsFilter] = useState('K01')
+  const [docsWykazFilter, setDocsWykazFilter] = useState('W01')
   const [docsHubSection, setDocsHubSection] = useState('kartoteki')
   const [docsFlyoutOpen, setDocsFlyoutOpen] = useState(false)
+  const [docsWykazFlyoutOpen, setDocsWykazFlyoutOpen] = useState(false)
   const [docsDateFrom, setDocsDateFrom] = useState('')
   const [docsDateTo, setDocsDateTo] = useState('')
   const [docsWorkflowFilter, setDocsWorkflowFilter] = useState('all')
@@ -322,6 +325,14 @@ function App() {
   ]
 
 
+  function activeDocsCode() {
+    return docsHubSection === 'wykazy' ? docsWykazFilter : docsFilter
+  }
+
+  function getDocFormCfg(type) {
+    return MANUAL_HACCP_FORMS[type] || WYKAZY_FORMS[type] || null
+  }
+
   const MODULE_STATUS = [
     { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
     { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna i ręczna edycja. OCR faktur odłożony na później.' },
@@ -333,7 +344,8 @@ function App() {
     { code: 'K06', name: 'Ocena jakości produktu', status: 'w realizacji', note: 'Auto z produkcji + ręczna edycja P/N.' },
     { code: 'K07', name: 'Kontrola sita CCP1', status: 'w realizacji', note: 'Dzienna kartoteka sita na linii przerobu.' },
     { code: 'Raporty', name: 'R00–R13', status: 'do wykonania', note: 'Po kartach K.' },
-    { code: 'Wykazy/Protokoły', name: 'W01–W10 / PR01–PR08', status: 'do wykonania', note: 'Po raportach podstawowych.' }
+    { code: 'Wykazy', name: 'W01–W10', status: 'robocze', note: 'Kartoteki wykazów – wpisy ręczne, druk i Excel.' },
+    { code: 'Protokoły', name: 'PR01–PR08', status: 'do wykonania', note: 'Po wykazach.' }
   ]
 
   const BACKLOG = [
@@ -548,6 +560,52 @@ function App() {
         <label>Szukaj<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="numer, nazwa…" /></label>
       </div>
       <p className="hint sidebar-hint">Po dodaniu dokumentów filtry będą działać tak samo jak w kartotekach.</p>
+    </aside>
+  }
+
+  function selectWykaz(code) {
+    setDocsWykazFilter(code)
+    setDocsHubSection('wykazy')
+    setDocsWykazFlyoutOpen(false)
+    resetManualHaccpForm(code)
+  }
+
+  function renderDocsWykazSidebar(filterStats = {}) {
+    const cfg = WYKAZY_FORMS[docsWykazFilter]
+    return <aside className="docs-sidebar">
+      <div className="docs-sidebar-head">
+        <span className="docs-sidebar-k">{docsWykazFilter}</span>
+        <small>{WYKAZY_CARDS.find(c => c[0] === docsWykazFilter)?.[2] || ''}</small>
+      </div>
+      <div className="docs-sidebar-block">
+        <h4>Zakres dat</h4>
+        {renderDocsDateFilters()}
+      </div>
+      <div className="docs-sidebar-block">
+        <h4>Szukaj</h4>
+        <label>Szukaj<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="nazwa, dostawca, symbol…" /></label>
+        <label>Status P/N
+          <select value={haccpStatusFilter} onChange={e => setHaccpStatusFilter(e.target.value)}>
+            <option value="all">Wszystkie</option>
+            <option value="P">P – prawidłowe</option>
+            <option value="N">N – niezgodność</option>
+          </select>
+        </label>
+      </div>
+      {cfg && <p className="hint sidebar-hint">
+        {cfg.periodMode === 'register' ? 'Rejestr ciągły – wpisy z całego okresu (filtr dat opcjonalny).' :
+          cfg.periodMode === 'year' ? 'Kartoteki roczne – grupowanie wg roku daty wpisu.' :
+            'Kartoteki miesięczne – grupowanie wg miesiąca daty wpisu.'}
+      </p>}
+      <div className="docs-sidebar-counter">
+        <span className="docs-counter-main"><strong>{filterStats.filteredDocs ?? 0}</strong> z <strong>{filterStats.totalDocs ?? 0}</strong></span>
+        <span className="docs-counter-label">wpisów w wykazie</span>
+        {filterStats.filtersActive && <span className="docs-counter-badge">Filtry aktywne</span>}
+      </div>
+      <div className="docs-sidebar-stats">
+        <span><b>{filterStats.filteredGroups ?? 0}</b> kartotek</span>
+        <span><b>{filterStats.filteredDocs ?? 0}</b> wpisów widocznych</span>
+      </div>
     </aside>
   }
 
@@ -1177,6 +1235,40 @@ function App() {
     }
   }, [haccpDocsForFilter, haccpMonthlyGroups, filteredWzQueueLines, wzQueueLines, docsFilter, docsDateFrom, docsDateTo, docsWorkflowFilter, haccpSearch, haccpStatusFilter, k03AssortmentFilter, syntheticK03Docs, syntheticK04Docs, syntheticK07Docs, mergedK06Docs, haccpDocs])
 
+  const wykazDocsForFilter = useMemo(() => {
+    const q = normalizeText(haccpSearch)
+    return (haccpDocs || [])
+      .filter(d => d.document_type === docsWykazFilter)
+      .filter(d => matchesDocsDateRange(d.document_date))
+      .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
+      .filter(d => {
+        if (!q) return true
+        const data = d.data || {}
+        return normalizeText([
+          d.product_name, d.supplier_name, d.lot_no, d.document_no,
+          data.employee_name, data.item_name, data.supplier_name, data.procedure_title,
+          data.procedure_code, data.device_name, data.area, data.topic, data.assortment
+        ].join(' ')).includes(q)
+      })
+  }, [haccpDocs, docsWykazFilter, docsDateFrom, docsDateTo, haccpSearch, haccpStatusFilter])
+
+  const wykazGroups = useMemo(() => {
+    const cfg = WYKAZY_FORMS[docsWykazFilter]
+    if (!cfg) return []
+    return buildWykazGroups(wykazDocsForFilter, docsWykazFilter, cfg)
+  }, [wykazDocsForFilter, docsWykazFilter])
+
+  const wykazFilterStats = useMemo(() => {
+    const total = (haccpDocs || []).filter(d => d.document_type === docsWykazFilter).length
+    const filtersActive = Boolean(docsDateFrom || docsDateTo || haccpSearch.trim() || haccpStatusFilter !== 'all')
+    return {
+      filteredDocs: wykazDocsForFilter.length,
+      totalDocs: total,
+      filteredGroups: wykazGroups.length,
+      filtersActive
+    }
+  }, [wykazDocsForFilter, wykazGroups, docsWykazFilter, haccpDocs, docsDateFrom, docsDateTo, haccpSearch, haccpStatusFilter])
+
   function buildK01MonthlyGroupForPeriod(period) {
     const docs = haccpDocs
       .filter(d => d.document_type === 'K01')
@@ -1591,7 +1683,7 @@ function App() {
       : group.type === 'K03' ? buildK03MonthlyHtml(group)
       : group.type === 'K04' ? buildK04MonthlyHtml(group, escapeHtml)
       : group.type === 'K07' ? buildK07MonthlyHtml(group, escapeHtml)
-      : MANUAL_HACCP_FORMS[group.type] ? buildManualMonthlyHtml(group, escapeHtml, MANUAL_HACCP_FORMS[group.type])
+      : getDocFormCfg(group.type) ? buildManualMonthlyHtml(group, escapeHtml, getDocFormCfg(group.type))
       : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
   }
@@ -1614,8 +1706,8 @@ function App() {
       rows.push(...buildK04ExcelRows(group))
     } else if (group.type === 'K07') {
       rows.push(...buildK07ExcelRows(group))
-    } else if (MANUAL_HACCP_FORMS[group.type]) {
-      rows.push(...buildManualExcelRows(group, MANUAL_HACCP_FORMS[group.type]))
+    } else if (getDocFormCfg(group.type)) {
+      rows.push(...buildManualExcelRows(group, getDocFormCfg(group.type)))
     } else if (group.type === 'K03') {
       const doc = (docs || [])[0]
       if (doc) rows.push(...buildK03ExcelRows(doc))
@@ -1863,10 +1955,13 @@ function App() {
       </div>
     }
 
-    if (MANUAL_HACCP_FORMS[group.type]) {
-      const cfg = MANUAL_HACCP_FORMS[group.type]
-      const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa'])
+    if (getDocFormCfg(group.type)) {
+      const cfg = getDocFormCfg(group.type)
+      const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa', 'status', 'approval', 'rating', 'result', 'active'])
       const isK06 = group.type === 'K06'
+      const periodMeta = cfg.periodMode === 'year'
+        ? <><b>Rok:</b> {String(group.period || '').slice(0, 4)}</>
+        : <><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}</>
       return <div className="monthly-paper k011-original">
         {isK06 && <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
           <label>Podpis oceniającego (zbiorczo)
@@ -1878,7 +1973,7 @@ function App() {
           <button className="secondary" onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, true)}>Uzupełnij puste</button>
         </div>}
-        <table className="k011-head"><tbody><tr><td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td className="k011-title"><b>{cfg.title}</b></td><td className="k011-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}</td></tr></tbody></table>
+        <table className="k011-head"><tbody><tr><td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td className="k011-title"><b>{cfg.title}</b></td><td className="k011-meta">{periodMeta}</td></tr></tbody></table>
         <table className="k011-table"><thead><tr>{cfg.columns.map(c => <th key={c.key}>{c.label}</th>)}</tr></thead><tbody>
           {docs.map((doc, i) => <tr key={doc.id}>
             {cfg.columns.map(c => {
@@ -1973,7 +2068,7 @@ function App() {
   }
 
   function getDefaultManualHaccpForm(type) {
-    const cfg = MANUAL_HACCP_FORMS[type]
+    const cfg = getDocFormCfg(type)
     if (!cfg) return { type }
     const form = { id: null, type }
     for (const f of cfg.fields) {
@@ -1990,8 +2085,8 @@ function App() {
   }
 
   async function saveManualHaccpEntry() {
-    const type = manualHaccpForm.type || docsFilter
-    const cfg = MANUAL_HACCP_FORMS[type]
+    const type = manualHaccpForm.type || activeDocsCode()
+    const cfg = getDocFormCfg(type)
     if (!cfg || !supabase) return
     for (const f of cfg.fields) {
       if (!f.required || f.key === 'signed_by') continue
@@ -2012,10 +2107,11 @@ function App() {
     const payload = {
       document_type: type,
       document_date: manualHaccpForm.document_date,
-      product_name: manualHaccpForm.product_name || null,
-      lot_no: manualHaccpForm.lot_no || null,
+      product_name: manualHaccpForm.product_name || data.employee_name || data.item_name || data.procedure_title || data.device_name || data.assortment || data.sample_type || data.scope || data.area || null,
+      lot_no: manualHaccpForm.lot_no || data.serial_no || data.procedure_code || null,
+      supplier_name: manualHaccpForm.supplier_name || data.supplier_name || data.producer || null,
       qty: manualHaccpForm.qty !== '' && manualHaccpForm.qty != null ? Number(manualHaccpForm.qty) : 0,
-      document_no: `${type}/${manualHaccpForm.document_date || 'brak'}/${manualHaccpForm.lot_no || 'brak'}`,
+      document_no: `${type}/${manualHaccpForm.document_date || 'brak'}/${data.procedure_code || data.employee_name || data.item_name || 'wpis'}`.slice(0, 120),
       chamber_code: type === 'K04.1' ? 'TRANSPORT' : null,
       status,
       data,
@@ -2041,7 +2137,7 @@ function App() {
   }
 
   function editManualHaccpEntry(doc) {
-    const cfg = MANUAL_HACCP_FORMS[doc.document_type]
+    const cfg = getDocFormCfg(doc.document_type)
     if (!cfg) return
     const form = { id: doc.id, type: doc.document_type }
     for (const f of cfg.fields) {
@@ -2093,16 +2189,16 @@ function App() {
   }
 
   function printManualHaccpPeriod(type, docs) {
-    const cfg = MANUAL_HACCP_FORMS[type]
+    const cfg = getDocFormCfg(type)
     if (!cfg || !docs.length) { setMessage('Brak wpisów do wydruku.'); return }
-    const period = String(docs[0]?.document_date || haccpMonth).slice(0, 7)
+    const period = String(docs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
     printHtmlInIframe(buildManualMonthlyHtml({ type, period, docs }, escapeHtml, cfg))
   }
 
   function exportManualHaccpPeriodExcel(type, docs) {
-    const cfg = MANUAL_HACCP_FORMS[type]
+    const cfg = getDocFormCfg(type)
     if (!cfg || !docs.length) { setMessage('Brak wpisów do Excel.'); return }
-    const period = String(docs[0]?.document_date || haccpMonth).slice(0, 7)
+    const period = String(docs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
     const rows = buildManualExcelRows({ type, period, docs }, cfg)
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.aoa_to_sheet(rows)
@@ -2112,12 +2208,12 @@ function App() {
   }
 
   function renderManualPaperPreview(type, periodDocs) {
-    const cfg = MANUAL_HACCP_FORMS[type]
+    const cfg = getDocFormCfg(type)
     if (!cfg) return null
-    const period = String(periodDocs[0]?.document_date || haccpMonth).slice(0, 7)
+    const period = String(periodDocs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
     const year = period.slice(0, 4)
-    const month = period.slice(5, 7)
-    const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa'])
+    const month = cfg.periodMode === 'year' ? '—' : period.slice(5, 7)
+    const pnFields = new Set(['stan_opakowania', 'wyglad_zapach', 'smak', 'barwa', 'status', 'approval', 'rating', 'result', 'active'])
     const pnKeyMap = { wyglad: 'wyglad_zapach', powod: 'powod_wycofania', dzialanie: 'dzialanie' }
     const maxRows = Math.max(type === 'K06' ? periodDocs.length : 12, periodDocs.length)
     const blanks = Math.max(0, maxRows - periodDocs.length)
@@ -2126,7 +2222,7 @@ function App() {
         <button className="secondary" onClick={() => printManualHaccpPeriod(type, periodDocs)}><Printer size={16}/> Druk/PDF – {type}</button>
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel(type, periodDocs)}>Pobierz Excel</button>
       </div>
-      <h3>Podgląd kartoteki {type} – {year}-{month} ({periodDocs.length} wpisów)</h3>
+      <h3>Podgląd kartoteki {type} – {cfg.periodMode === 'year' ? year : `${year}-${month}`} ({periodDocs.length} wpisów)</h3>
       <div className="k011-original haccp-paper">
         <table className="k011-head"><tbody><tr>
           <td className="k011-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598<br/>Wersja I/2024</b></td>
@@ -2172,14 +2268,16 @@ function App() {
   }
 
   function renderManualHaccpEntrySection() {
-    const type = docsFilter
-    const cfg = MANUAL_HACCP_FORMS[type]
+    const type = activeDocsCode()
+    const cfg = getDocFormCfg(type)
     if (!cfg) return null
-    const periodDocs = haccpPeriodDocs.filter(d => d.document_type === type)
+    const sourceDocs = docsHubSection === 'wykazy' ? wykazDocsForFilter : haccpPeriodDocs
+    const periodDocs = sourceDocs.filter(d => d.document_type === type)
     const autoCount = periodDocs.filter(d => d.synthetic || d.data?.auto_source).length
     return <>
       <div className="card inner-card no-print">
         <h3>{manualHaccpForm.id ? `Edytuj wpis ${type}` : `Dodaj wpis – ${cfg.title}`}</h3>
+        {type.startsWith('W') && <p className="hint">Wykaz {type} – wpisy ręczne. Po zapisie pojawią się w kartotece poniżej. Wydruk i Excel dostępne z podglądu kartoteki.</p>}
         {type === 'K06' && <p className="hint">K06 uzupełnia się automatycznie z magazynu CP3 i produkcji (P domyślnie). {autoCount > 0 ? `W tym okresie: ${autoCount} wpisów auto.` : 'Kliknij „Odśwież magazyn partii”, potem „Odśwież kartoteki”.'} Jabłko przemysłowe nie trafia do K06 – jedzie prosto do sprzedaży.</p>}
         {type === 'K05' && <p className="hint">Rejestr wycofań – wpis ręczny na każde wycofanie partii. Poniżej podgląd kartoteki jak na papierze.</p>}
         {type === 'K04.1' && <p className="hint"><b>Transport / sprzedaż bez magazynowania CP3</b> – m.in. jabłko przemysłowe prosto na samochód. Uzupełnij temperaturę, opakowanie P/N i podpis.</p>}
@@ -4055,7 +4153,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION}</div>
+      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · Wykazy {WYKAZY_ENGINE_VERSION}</div>
     </header>
 
     <section className="warning">
@@ -4372,6 +4470,40 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               </div>
             )
           }
+          if (key === 'wykazy') {
+            return (
+              <div
+                key={key}
+                className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
+                onMouseEnter={() => setDocsWykazFlyoutOpen(true)}
+                onMouseLeave={() => setDocsWykazFlyoutOpen(false)}
+              >
+                <button
+                  type="button"
+                  className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''}`}
+                  onClick={() => { setDocsHubSection(key); setDocsWykazFlyoutOpen(v => !v) }}
+                >
+                  <b>{label}</b><small>{desc}</small>
+                </button>
+                {docsWykazFlyoutOpen && (
+                  <div className="docs-k-flyout">
+                    {WYKAZY_CARDS.map(([code, title, cardDesc]) => (
+                      <button
+                        key={code}
+                        type="button"
+                        className={docsWykazFilter === code && docsHubSection === 'wykazy' ? 'active' : ''}
+                        onClick={() => selectWykaz(code)}
+                      >
+                        <b>{code}</b>
+                        <span>{title.replace(/^W[0-9]+ – /, '')}</span>
+                        <small>{cardDesc}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          }
           return (
             <button key={key} type="button" className={docsHubSection === key ? 'docs-hub-tab active' : 'docs-hub-tab'} onClick={() => setDocsHubSection(key)}>
               <b>{label}</b><small>{desc}</small>
@@ -4380,7 +4512,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         })}
       </nav>
 
-      {docsHubSection !== 'kartoteki' && (
+      {docsHubSection !== 'kartoteki' && docsHubSection !== 'wykazy' && (
         <div className="docs-layout">
           {renderDocsHubPlaceholderSidebar(docsHubSection)}
           <div className="docs-main">
@@ -4392,12 +4524,54 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 </div>
               </div>
               <div className="doc-progress">{DOCS.filter((_, i) => {
-                if (docsHubSection === 'wykazy') return i === 4
                 if (docsHubSection === 'formularze') return i === 2
                 if (docsHubSection === 'protokoly') return i === 3
                 if (docsHubSection === 'specyfikacje') return i === 7
                 return false
               }).map(d => <span key={d[0]} className="pill">{d[1]}</span>)}</div>
+            </section>
+          </div>
+        </div>
+      )}
+
+      {docsHubSection === 'wykazy' && (
+        <div className="docs-layout">
+          {renderDocsWykazSidebar(wykazFilterStats)}
+          <div className="docs-main">
+            <section className="card docs-panel" id="wykazy-haccp">
+              <div className="docs-main-head">
+                <div>
+                  <h3>{WYKAZY_CARDS.find(c => c[0] === docsWykazFilter)?.[1] || docsWykazFilter}</h3>
+                  <p className="hint">{WYKAZY_CARDS.find(c => c[0] === docsWykazFilter)?.[2]}</p>
+                </div>
+                <div className="actions docs-actions">
+                  <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
+                </div>
+              </div>
+
+              {getDocFormCfg(docsWykazFilter) && renderManualHaccpEntrySection()}
+
+              {wykazGroups.length === 0 && <p className="hint">Brak wpisów w tym wykazie. Dodaj pierwszy wpis powyżej.</p>}
+
+              {wykazGroups.length > 0 && <>
+                <h3>Lista kartotek {docsWykazFilter}</h3>
+                <div className="table-wrap docs-table-wrap"><table className="docs-table">
+                  <thead><tr><th>Okres / rejestr</th><th>Wpisy</th><th>N</th><th>Akcje</th></tr></thead>
+                  <tbody>{wykazGroups.map(g => {
+                    const cfg = WYKAZY_FORMS[g.type]
+                    return <tr key={g.key}>
+                      <td><b>{wykazPeriodLabel(g, cfg)}</b></td>
+                      <td>{g.docs.length}</td>
+                      <td>{g.docs.filter(d => d.status === 'N').length || '—'}</td>
+                      <td className="row-actions">
+                        <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
+                        <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
+                        <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                      </td>
+                    </tr>
+                  })}</tbody>
+                </table></div>
+              </>}
             </section>
           </div>
         </div>
@@ -4470,7 +4644,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </>}
 
         {docsFilter === 'K01.1' && renderK011Section()}
-        {MANUAL_HACCP_FORMS[docsFilter] && renderManualHaccpEntrySection()}
+        {getDocFormCfg(docsFilter) && docsHubSection === 'kartoteki' && renderManualHaccpEntrySection()}
 
         {!['K01.1', 'K04.1', 'K05'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
