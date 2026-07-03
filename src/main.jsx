@@ -12,7 +12,7 @@ import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
 import { getHaccpDocForm, buildHubDocGroups, hubPeriodLabel, buildDocumentHtml } from './haccpDocRegistry'
-import { importK011FromPdfFile, K011_PDF_IMPORT_VERSION } from './k011PdfImport'
+import { importPdfForDocType, PDF_IMPORT_VERSION, PDF_IMPORT_DOC_TYPES } from './pdfImportEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -294,6 +294,11 @@ function App() {
   const [auxPdfPreview, setAuxPdfPreview] = useState('')
   const [auxPdfImporting, setAuxPdfImporting] = useState(false)
   const [auxPdfInputKey, setAuxPdfInputKey] = useState(0)
+  const [k011PdfLineItems, setK011PdfLineItems] = useState([])
+  const [manualPdfName, setManualPdfName] = useState('')
+  const [manualPdfPreview, setManualPdfPreview] = useState('')
+  const [manualPdfImporting, setManualPdfImporting] = useState(false)
+  const [manualPdfInputKey, setManualPdfInputKey] = useState(0)
   const [pzRows, setPzRows] = useState([])
   const [pzHistoryRows, setPzHistoryRows] = useState([])
   const [pzEditDates, setPzEditDates] = useState({})
@@ -369,7 +374,7 @@ function App() {
 
   const MODULE_STATUS = [
     { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
-    { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna, import PDF faktur (v' + K011_PDF_IMPORT_VERSION + ').' },
+    { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Import PDF faktur v' + PDF_IMPORT_VERSION + ' – podgląd i zapis.' },
     { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
     { code: 'K03', name: 'Identyfikacja partii produktu', status: 'w realizacji', note: 'Jeden formularz = jeden WZ. PZ po lewej, WZ po prawej, sumy zgodne z FIFO.' },
     { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'w realizacji', note: 'Miesięczna kartoteka dzienna per komora CP3/CCP1 – jak K02.' },
@@ -2171,7 +2176,8 @@ function App() {
   }
 
   function resetManualHaccpForm(type) {
-    setManualHaccpForm(getDefaultManualHaccpForm(type || docsFilter))
+    resetManualPdfState()
+    setManualHaccpForm(getDefaultManualHaccpForm(type || activeDocsCode()))
   }
 
   async function saveManualHaccpEntry() {
@@ -2399,10 +2405,23 @@ function App() {
     const periodDocs = sourceDocs.filter(d => d.document_type === type)
     const autoCount = periodDocs.filter(d => d.synthetic || d.data?.auto_source).length
     const hubLabel = { wykazy: 'Wykaz', formularze: 'Formularz', protokoly: 'Protokół', specyfikacje: 'Specyfikacja' }[docsHubSection] || ''
+    const pdfCfg = PDF_IMPORT_DOC_TYPES[type]
     return <>
       <div className="card inner-card no-print">
         <h3>{manualHaccpForm.id ? `Edytuj wpis ${type}` : `Dodaj wpis – ${cfg.title}`}</h3>
-        {hubLabel && <p className="hint">{hubLabel} {type} – układ zgodny ze wzorem Word. Logika automatyczna będzie dodawana etapami.</p>}
+        {hubLabel && <p className="hint">{hubLabel} {type} – układ zgodny ze wzorem Word.</p>}
+        {pdfCfg && <>
+          <label className="full-width">Import PDF ({pdfCfg.label})
+            <input key={manualPdfInputKey} type="file" accept="application/pdf,.pdf" disabled={manualPdfImporting}
+              onChange={e => handleManualPdfFile(e, type)} />
+          </label>
+          {manualPdfImporting && <p className="hint">Trwa odczyt PDF…</p>}
+          {manualPdfName && <p className="hint">PDF: <b>{manualPdfName}</b></p>}
+          {manualPdfPreview && <details className="k011-pdf-preview" open>
+            <summary>Podgląd tekstu z PDF</summary>
+            <pre className="pdf-text-preview">{manualPdfPreview}</pre>
+          </details>}
+        </>}
         {type === 'K06' && <p className="hint">K06 uzupełnia się automatycznie z magazynu CP3 i produkcji (P domyślnie). {autoCount > 0 ? `W tym okresie: ${autoCount} wpisów auto.` : 'Kliknij „Odśwież magazyn partii”, potem „Odśwież kartoteki”.'} Jabłko przemysłowe nie trafia do K06 – jedzie prosto do sprzedaży.</p>}
         {type === 'K05' && <p className="hint">Rejestr wycofań – wpis ręczny na każde wycofanie partii. Poniżej podgląd kartoteki jak na papierze.</p>}
         {type === 'K04.1' && <p className="hint"><b>Transport / sprzedaż bez magazynowania CP3</b> – m.in. jabłko przemysłowe prosto na samochód. Uzupełnij temperaturę, opakowanie P/N i podpis.</p>}
@@ -2465,25 +2484,49 @@ function App() {
     setAuxForm({ delivery_date: new Date().toISOString().slice(0,10), item_name: '', supplier_invoice: '', vehicle_hygiene: 'P', qty: '', lot_no: '', notes: '', signed_by: '' })
     setAuxPdfName('')
     setAuxPdfPreview('')
+    setK011PdfLineItems([])
     setAuxPdfInputKey(k => k + 1)
   }
 
+  function normalizeAuxFormForSave(form, pdfName = '', lineItems = []) {
+    const delivery_date = String(form.delivery_date || '').trim()
+    let item_name = String(form.item_name || '').trim()
+    let supplier_invoice = String(form.supplier_invoice || '').trim()
+    if (!item_name && lineItems[0]?.name) item_name = lineItems[0].name
+    if (!item_name && pdfName) item_name = pdfName.replace(/\.pdf$/i, '').slice(0, 120)
+    if (!supplier_invoice && pdfName) supplier_invoice = pdfName.replace(/\.pdf$/i, '').slice(0, 120)
+    return { ...form, delivery_date, item_name, supplier_invoice }
+  }
+
   async function saveAuxMaterial() {
-    if (!supabase) return
-    if (!auxForm.delivery_date || !auxForm.item_name || !auxForm.supplier_invoice) {
-      setMessage('K01.1: uzupełnij datę, nazwę towaru i dostawcę/nr faktury.')
+    if (!supabase) {
+      setMessage('K01.1: brak połączenia z bazą (Supabase).')
+      return
+    }
+    const norm = normalizeAuxFormForSave(auxForm, auxPdfName, k011PdfLineItems)
+    if (!norm.delivery_date) {
+      setMessage('K01.1: podaj datę dostawy.')
+      return
+    }
+    if (!norm.item_name) {
+      setMessage('K01.1: podaj nazwę towaru – PDF mógł odczytać dane niepełnie (sprawdź podgląd tekstu).')
+      return
+    }
+    if (!norm.supplier_invoice) {
+      setMessage('K01.1: podaj dostawcę / nr faktury – uzupełnij ręcznie pole „Dostawca / nr faktury".')
       return
     }
     const payload = {
-      delivery_date: auxForm.delivery_date,
-      item_name: auxForm.item_name,
-      supplier_invoice: auxForm.supplier_invoice,
-      vehicle_hygiene: auxForm.vehicle_hygiene || 'P',
-      qty: auxForm.qty || null,
-      lot_no: auxForm.lot_no || null,
-      notes: auxForm.notes || null,
-      signed_by: auxForm.signed_by || null,
-      source_filename: auxPdfName || null
+      delivery_date: norm.delivery_date,
+      item_name: norm.item_name,
+      supplier_invoice: norm.supplier_invoice,
+      vehicle_hygiene: norm.vehicle_hygiene || 'P',
+      qty: norm.qty || null,
+      lot_no: norm.lot_no || null,
+      notes: norm.notes || null,
+      signed_by: norm.signed_by || null,
+      source_filename: auxPdfName || null,
+      updated_at: new Date().toISOString()
     }
     try {
       if (auxForm.id) {
@@ -2498,7 +2541,46 @@ function App() {
       resetAuxForm()
       await loadAuxMaterials()
     } catch (err) {
-      setMessage(`Błąd zapisu K01.1: ${err.message}`)
+      setMessage(`Błąd zapisu K01.1: ${err.message}. Jeśli widzisz „relation does not exist", uruchom migrację SQL haccp_aux_materials w Supabase.`)
+    }
+  }
+
+  async function saveAuxMaterialsBatchFromPdf() {
+    if (!supabase) {
+      setMessage('K01.1: brak połączenia z bazą.')
+      return
+    }
+    if (!k011PdfLineItems.length) {
+      setMessage('K01.1: brak wielu pozycji z PDF – użyj zwykłego zapisu.')
+      return
+    }
+    const norm = normalizeAuxFormForSave(auxForm, auxPdfName, k011PdfLineItems)
+    if (!norm.delivery_date) {
+      setMessage('K01.1: podaj datę dostawy przed zapisem pozycji z faktury.')
+      return
+    }
+    const supplierBase = norm.supplier_invoice || auxPdfName?.replace(/\.pdf$/i, '') || 'PDF'
+    try {
+      for (const item of k011PdfLineItems) {
+        const { error } = await supabase.from('haccp_aux_materials').insert({
+          delivery_date: norm.delivery_date,
+          item_name: item.name,
+          supplier_invoice: supplierBase,
+          vehicle_hygiene: norm.vehicle_hygiene || 'P',
+          qty: item.qty || norm.qty || null,
+          lot_no: norm.lot_no || null,
+          notes: norm.notes || (auxPdfName ? `PDF: ${auxPdfName}` : null),
+          signed_by: norm.signed_by || null,
+          source_filename: auxPdfName || null,
+          updated_at: new Date().toISOString()
+        })
+        if (error) throw error
+      }
+      setMessage(`K01.1: zapisano ${k011PdfLineItems.length} pozycji z faktury PDF.`)
+      resetAuxForm()
+      await loadAuxMaterials()
+    } catch (err) {
+      setMessage(`Błąd zapisu wsadowego K01.1: ${err.message}`)
     }
   }
 
@@ -2543,32 +2625,58 @@ function App() {
     setAuxPdfName(file.name)
     setAuxPdfImporting(true)
     setAuxPdfPreview('')
+    setK011PdfLineItems([])
     setMessage('K01.1: odczytuję fakturę PDF...')
     try {
-      const { text, parsed, updates } = await importK011FromPdfFile(file)
-      const preview = String(text || '').trim().slice(0, 2500)
-      setAuxPdfPreview(preview)
-      setAuxForm(prev => ({
-        ...prev,
-        ...updates,
-        notes: prev.notes || (Object.keys(updates).length ? `PDF: ${file.name}` : `PDF (słaby odczyt): ${file.name}`)
-      }))
+      const { text, parsed, updates, lineItems } = await importPdfForDocType('K01.1', file)
+      setAuxPdfPreview(String(text || '').trim().slice(0, 3000))
+      const items = lineItems?.length ? lineItems : (parsed.itemName ? [{ name: parsed.itemName, qty: parsed.qty }] : [])
+      setK011PdfLineItems(items)
+      setAuxForm(prev => ({ ...prev, ...updates, notes: prev.notes || `PDF: ${file.name}` }))
       const filled = Object.keys(updates).length
-      if (filled >= 2) {
-        setMessage(`K01.1: odczytano PDF (${filled} pól). Sprawdź dane poniżej i zapisz pozycję.`)
-      } else if (filled === 1) {
-        setMessage(`K01.1: częściowy odczyt PDF (1 pole). Uzupełnij resztę ręcznie – podgląd tekstu poniżej.`)
+      if (filled >= 1 && items.length > 1) {
+        setMessage(`K01.1: odczytano ${filled} pól i ${items.length} pozycji. Sprawdź formularz lub „Zapisz wszystkie pozycje z faktury".`)
+      } else if (filled >= 1) {
+        setMessage(`K01.1: odczytano ${filled} pól – popraw i kliknij „Dodaj do kartoteki".`)
       } else if (parsed.textLength < 40) {
-        setMessage('K01.1: PDF wygląda na skan lub obraz – brak tekstu do odczytu. Wpisz dane ręcznie albo użyj PDF z warstwą tekstową (nie skan).')
+        setMessage('K01.1: skan PDF bez tekstu – wpisz dane ręcznie.')
       } else {
-        setMessage('K01.1: tekst z PDF jest, ale faktura ma nietypowy układ. Użyj podglądu odczytu i uzupełnij pola ręcznie.')
+        setMessage('K01.1: tekst jest, układ nietypowy – uzupełnij pola ręcznie (podgląd poniżej).')
       }
     } catch (err) {
       setAuxPdfPreview('')
-      setMessage(`K01.1: błąd odczytu PDF: ${err?.message || String(err)}. Uzupełnij dane ręcznie.`)
+      setK011PdfLineItems([])
+      setMessage(`K01.1: błąd PDF – ${err?.message || String(err)}`)
     } finally {
       setAuxPdfImporting(false)
     }
+  }
+
+  async function handleManualPdfFile(e, docType) {
+    const file = e.target.files?.[0]
+    if (!file || !PDF_IMPORT_DOC_TYPES[docType]) return
+    setManualPdfName(file.name)
+    setManualPdfImporting(true)
+    setManualPdfPreview('')
+    setMessage(`${docType}: odczytuję PDF…`)
+    try {
+      const { text, updates } = await importPdfForDocType(docType, file)
+      setManualPdfPreview(String(text || '').slice(0, 3000))
+      setManualHaccpForm(prev => ({ ...prev, type: docType, ...updates, notes: prev.notes || `PDF: ${file.name}` }))
+      const filled = Object.keys(updates).length
+      setMessage(filled ? `${docType}: uzupełniono ${filled} pól – sprawdź i zapisz.` : `${docType}: słaby odczyt – uzupełnij ręcznie.`)
+    } catch (err) {
+      setManualPdfPreview('')
+      setMessage(`${docType}: błąd PDF – ${err?.message || String(err)}`)
+    } finally {
+      setManualPdfImporting(false)
+    }
+  }
+
+  function resetManualPdfState() {
+    setManualPdfName('')
+    setManualPdfPreview('')
+    setManualPdfInputKey(k => k + 1)
   }
 
   function buildK011Rows(rows, editable = false) {

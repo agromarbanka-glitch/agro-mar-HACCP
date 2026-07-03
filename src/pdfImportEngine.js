@@ -1,0 +1,430 @@
+/**
+ * Import PDF → pola formularzy (K01.1, W04, W05)
+ */
+import { getDocument } from 'pdfjs-dist'
+
+export const PDF_IMPORT_VERSION = '1.2'
+
+export const PDF_IMPORT_DOC_TYPES = {
+  'K01.1': { label: 'faktura zakupowa', accept: '.pdf,application/pdf' },
+  W04: { label: 'karta / atest środka czystości', accept: '.pdf,application/pdf' },
+  W05: { label: 'raport laboratoryjny', accept: '.pdf,application/pdf' }
+}
+
+const AGRO_MAR_NIP = '7171839598'
+
+function normalizeText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+export function polishDateToIso(value) {
+  const text = String(value || '').trim()
+  const m = text.match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/)
+  if (!m) return ''
+  const d = Number(m[1])
+  const mo = Number(m[2])
+  if (d < 1 || d > 31 || mo < 1 || mo > 12) return ''
+  return `${m[3]}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+}
+
+function mergeTextItems(items) {
+  if (!items?.length) return ''
+  const sorted = [...items].sort((a, b) => {
+    const yA = a.transform?.[5] ?? 0
+    const yB = b.transform?.[5] ?? 0
+    if (Math.abs(yA - yB) > 4) return yB - yA
+    return (a.transform?.[4] ?? 0) - (b.transform?.[4] ?? 0)
+  })
+  const lines = []
+  let bucket = []
+  let lastY = null
+  for (const item of sorted) {
+    const str = String(item.str || '').trim()
+    if (!str) continue
+    const y = item.transform?.[5] ?? 0
+    if (lastY === null || Math.abs(y - lastY) <= 4) {
+      bucket.push(str)
+      lastY = lastY ?? y
+    } else {
+      if (bucket.length) lines.push(bucket.join(' '))
+      bucket = [str]
+      lastY = y
+    }
+  }
+  if (bucket.length) lines.push(bucket.join(' '))
+  return lines.join('\n')
+}
+
+function decodePdfStreamFallback(buffer) {
+  const raw = new TextDecoder('latin1').decode(buffer)
+  const chunks = []
+  const tjRegex = /\(([^()\\]{1,300})\)\s*Tj/g
+  let m
+  while ((m = tjRegex.exec(raw)) !== null) {
+    const t = m[1]
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '')
+      .replace(/\\\(/g, '(')
+      .replace(/\\\)/g, ')')
+      .replace(/\\\\/g, '\\')
+    if (t.trim()) chunks.push(t.trim())
+  }
+  if (chunks.length > 20) return chunks.join('\n')
+  return raw
+    .replace(/\(([^()]{1,120})\)\s*Tj/g, '\n$1\n')
+    .replace(/[^\x09\x0A\x0D\x20-\x7EĄĆĘŁŃÓŚŹŻąćęłńóśźż]+/g, ' ')
+}
+
+export async function extractPdfText(file) {
+  const buffer = await file.arrayBuffer()
+  try {
+    const pdf = await getDocument({ data: buffer, disableWorker: true, useWorkerFetch: false, isEvalSupported: false }).promise
+    const parts = []
+    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+      const page = await pdf.getPage(pageNo)
+      const content = await page.getTextContent()
+      parts.push(mergeTextItems(content.items))
+    }
+    const text = parts.join('\n\n').trim()
+    if (text.replace(/\s/g, '').length >= 20) return text
+  } catch {
+    /* fallback */
+  }
+  return decodePdfStreamFallback(buffer)
+}
+
+function expandCollapsedText(text) {
+  let t = String(text || '').replace(/\r/g, '')
+  if (t.split('\n').filter(l => l.trim()).length >= 8) return t
+  return t
+    .replace(/\s+(Sprzedawca|Nabywca|Odbiorca|Wystawca|Dostawca|Lp\.|Faktura\s*VAT|Faktura|Data wystawienia|Data sprzedaży|Data dostawy|NIP|AGRO-MAR|Nr\s*faktury)/gi, '\n$1')
+    .replace(/\s+(Badany parametr|Parametr|Wynik|Nr\s*raportu|Nr\s*protoko|Laboratorium|AGROLAB|Oświadczenie| próbk)/gi, '\n$1')
+    .replace(/\s+(Nazwa\s+(?:towaru|produktu|środka|preparatu)|Producent|Ważne\s+do|Data\s+ważności)/gi, '\n$1')
+}
+
+function toLines(text) {
+  return expandCollapsedText(text)
+    .split('\n')
+    .map(l => l.replace(/\s{2,}/g, ' ').trim())
+    .filter(Boolean)
+}
+
+function labelValue(lines, labels) {
+  for (const line of lines) {
+    for (const label of labels) {
+      const re = new RegExp(`^${label}\\s*[:\\-]\\s*(.+)$`, 'i')
+      const m = line.match(re)
+      if (m?.[1]?.trim()) return m[1].trim().slice(0, 160)
+    }
+  }
+  return ''
+}
+
+function firstLineAfter(lines, labels, skip = []) {
+  for (let i = 0; i < lines.length; i++) {
+    const n = normalizeText(lines[i])
+    if (!labels.some(l => n.includes(normalizeText(l)))) continue
+    for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
+      const c = lines[j]
+      if (!c || c.length < 2) continue
+      const cn = normalizeText(c)
+      if (skip.some(s => s.test(cn))) continue
+      if (/^[0-9\s,./-]+$/.test(c)) continue
+      if (/^nip\s*[:.]?\s*\d/i.test(c)) continue
+      return c.replace(/^(nazwa|firma|sprzedawca|dostawca|wystawca)\s*[:\-]?\s*/i, '').trim().slice(0, 160)
+    }
+  }
+  return ''
+}
+
+function findInvoiceNumber(text, fileName = '') {
+  const patterns = [
+    /(?:faktura\s*(?:vat)?|fv|nr\s*faktury|numer\s*faktury)\s*(?:nr|numer)?\s*[:#.\-]?\s*([A-Z0-9][A-Z0-9/_.\-]{2,40})/i,
+    /\b(FV[\s\/.\-][A-Z0-9/_.\-]{2,40})\b/i,
+    /\b([0-9]{1,4}\/[0-9]{1,6}\/[A-Z0-9]{2,10})\b/i
+  ]
+  for (const re of patterns) {
+    const m = text.match(re)
+    if (m?.[1]) return m[1].replace(/[;,.]\s*$/g, '').trim()
+  }
+  const fromName = fileName.match(/(?:FV|faktura)[\s._-]*([0-9A-Z/_.-]{3,40})/i)
+  return fromName?.[1]?.replace(/\.pdf$/i, '') || ''
+}
+
+function findDate(text, labels) {
+  for (const label of labels) {
+    const re = new RegExp(`${label}\\s*[:\\-]?\\s*(\\d{1,2}[.\\-/]\\d{1,2}[.\\-/]\\d{4})`, 'i')
+    const m = text.match(re)
+    const iso = polishDateToIso(m?.[1])
+    if (iso) return iso
+  }
+  const all = [...text.matchAll(/(\d{1,2}[.\-/]\d{1,2}[.\-/](20\d{2}))/g)]
+  for (const m of all) {
+    const iso = polishDateToIso(m[1])
+    if (iso) return iso
+  }
+  return ''
+}
+
+function findSeller(lines, text) {
+  const skip = [/nip/, /regon/, /konto/, /bank/, /tel/, /fax/, /www/, /agro-mar/, /7171839598/, /nabywca/, /odbiorca/]
+  let v = labelValue(lines, ['Sprzedawca', 'Dostawca', 'Wystawca'])
+  if (v && !skip.some(s => s.test(normalizeText(v)))) return v.slice(0, 120)
+
+  v = firstLineAfter(lines, ['Sprzedawca', 'Dostawca', 'Wystawca', 'Sprzedający'], skip)
+  if (v) return v.slice(0, 120)
+
+  const nips = [...text.matchAll(/NIP\s*[:\s]*(\d{10}|\d{3}[-\s]?\d{3}[-\s]?\d{2}[-\s]?\d{2})/gi)]
+  for (const m of nips) {
+    const nip = m[1].replace(/\D/g, '')
+    if (nip === AGRO_MAR_NIP) continue
+    const idx = text.indexOf(m[0])
+    const ctx = text.slice(Math.max(0, idx - 280), idx)
+    const ctxLines = toLines(ctx)
+    for (let i = ctxLines.length - 1; i >= 0; i--) {
+      const line = ctxLines[i]
+      if (line.length >= 3 && line.length <= 100 && !/^(ul\.|tel|bank|nip|regon)/i.test(line) && !/^\d+$/.test(line)) {
+        return line.slice(0, 120)
+      }
+    }
+  }
+  return ''
+}
+
+const QTY_RE = /(\d+(?:[\s ]?\d{3})*(?:[,.]\d+)?)\s*(szt\.?|kg|g|opak\.?|rol\.?|mb|m2|m²|kpl\.?|pcs|l\b|litr\.?)/i
+const MATERIAL_RE = /(karton|worek|worki|skrzyn|beczk|etykiet|foli|opakow|palet|ta[sś]m|wiadr|pojemnik|nakr[eę]tk|butel|słoik|stretch|tektur|papier|regranulat|pokryw|sito|lin\b|taśm)/i
+const SKIP_ROW = /(razem|suma|vat|netto|brutto|do zaplaty|wartosc|lp\.|nazwa towaru|j\.?\s*m\.?|pkwi|gtu|rabat|transport)/i
+
+function parseInvoiceLineItems(lines, flatText) {
+  const items = []
+  const rowRe = /(?:^|\n)\s*(\d{1,3})[\s.)-]+(.{4,100}?)\s+(\d+(?:[,.]\d+)?)\s*(szt\.?|kg|g|opak\.?|kpl\.?|rol\.?|mb|m2|m²|l\b)/gi
+  let rm
+  while ((rm = rowRe.exec(flatText)) !== null) {
+    const name = rm[2].replace(/\s{2,}/g, ' ').trim()
+    if (SKIP_ROW.test(normalizeText(name)) || name.length < 3) continue
+    items.push({
+      name: name.slice(0, 120),
+      qty: `${rm[3].replace(',', '.')} ${rm[4].replace('.', '')}`
+    })
+  }
+
+  if (items.length) return items
+
+  for (const line of lines) {
+    if (SKIP_ROW.test(line) || line.length < 4) continue
+    const q = line.match(QTY_RE)
+    if (!q && !MATERIAL_RE.test(line)) continue
+    let name = line
+      .replace(QTY_RE, '')
+      .replace(/^\d+[\s.)-]+/, '')
+      .replace(/\s+\d+[,.]\d{2}\s*$/, '')
+      .trim()
+    if (name.length < 3) continue
+    items.push({
+      name: name.slice(0, 120),
+      qty: q ? `${q[1].replace(/\s/g, '').replace(',', '.')} ${q[2].replace('.', '')}` : ''
+    })
+  }
+  return items
+}
+
+export function parseK011Invoice(text, fileName = '') {
+  const flat = String(text || '')
+  const lines = toLines(flat)
+  const invoiceNo = findInvoiceNumber(flat, fileName)
+  const deliveryDate = findDate(flat, ['data wystawienia', 'data dostawy', 'data sprzedaży', 'data sprzedazy', 'data dokumentu'])
+  const supplier = findSeller(lines, flat)
+  const lineItems = parseInvoiceLineItems(lines, flat)
+  const primary = lineItems[0] || {}
+
+  let itemName = primary.name || ''
+  if (!itemName) {
+    const guess = lines.find(l => MATERIAL_RE.test(l) && l.length >= 4 && l.length <= 120 && !SKIP_ROW.test(l))
+    if (guess) itemName = guess.replace(/^\d+[\s.)-]+/, '').trim().slice(0, 120)
+  }
+  if (!itemName) {
+    itemName = labelValue(lines, ['Nazwa towaru', 'Nazwa artykułu', 'Nazwa']) || ''
+  }
+
+  const supplierInvoice = [supplier, invoiceNo].filter(Boolean).join(' / ')
+    || (invoiceNo ? invoiceNo : '')
+    || (supplier ? supplier : '')
+    || fileName.replace(/\.pdf$/i, '')
+
+  return {
+    deliveryDate,
+    invoiceNo,
+    supplier,
+    itemName,
+    qty: primary.qty || '',
+    supplierInvoice,
+    lineItems,
+    textLength: flat.replace(/\s/g, '').length
+  }
+}
+
+export function buildK011FormUpdates(parsed) {
+  const updates = {}
+  if (parsed.deliveryDate) updates.delivery_date = parsed.deliveryDate
+  if (parsed.itemName) updates.item_name = parsed.itemName
+  if (parsed.supplierInvoice) updates.supplier_invoice = parsed.supplierInvoice
+  if (parsed.qty) updates.qty = parsed.qty
+  return updates
+}
+
+export function parseW04CleaningDoc(text, fileName = '') {
+  const lines = toLines(text)
+  const flat = String(text || '')
+  const itemName = labelValue(lines, ['Nazwa produktu', 'Nazwa preparatu', 'Nazwa środka', 'Produkt', 'Nazwa'])
+    || lines.find(l => /(dezynfek|czyszcz|detergent|środek|srodek|sanit|alkohol|chlor|pian)/i.test(l) && l.length <= 100)?.slice(0, 120)
+    || fileName.replace(/\.pdf$/i, '')
+  const producer = labelValue(lines, ['Producent', 'Wytwórca', 'Dostawca', 'Importer'])
+    || firstLineAfter(lines, ['Producent', 'Wytwórca'], [/nip/])
+  const purpose = labelValue(lines, ['Przeznaczenie', 'Zastosowanie', 'Charakterystyka'])
+  const validUntil = polishDateToIso(
+    labelValue(lines, ['Data ważności', 'Ważne do', 'Termin ważności'])
+    || (flat.match(/ważn[aey]\s+do\s*[:\-]?\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})/i)?.[1])
+  )
+  const documentDate = findDate(flat, ['data wystawienia', 'data dokumentu', 'data']) || new Date().toISOString().slice(0, 10)
+  const notes = labelValue(lines, ['Nr karty', 'Numer dokumentu', 'Batch', 'Seria']) || `PDF: ${fileName}`
+
+  return { documentDate, itemName, producer, purpose, validUntil, approval: 'P', notes, textLength: flat.replace(/\s/g, '').length }
+}
+
+export function buildW04FormUpdates(parsed) {
+  const u = {}
+  if (parsed.documentDate) u.document_date = parsed.documentDate
+  if (parsed.itemName) u.item_name = parsed.itemName
+  if (parsed.producer) u.producer = parsed.producer
+  if (parsed.purpose) u.purpose = parsed.purpose
+  if (parsed.validUntil) u.valid_until = parsed.validUntil
+  if (parsed.approval) u.approval = parsed.approval
+  if (parsed.notes) u.notes = parsed.notes
+  return u
+}
+
+const LAB_PARAMS = [
+  ['pestycyd', 'Zawartość pestycydów'],
+  ['patulin', 'Patulina'],
+  ['patulina', 'Patulina'],
+  ['pleśn', 'Pleśnie, drożdże'],
+  ['plesni', 'Pleśnie, drożdże'],
+  ['drożd', 'Pleśnie, drożdże'],
+  ['drozd', 'Pleśnie, drożdże'],
+  ['drobnoustro', 'Ogólna liczba drobnoustrojów'],
+  ['mikrobi', 'Ogólna liczba drobnoustrojów'],
+  ['salmonell', 'Salmonella'],
+  ['e\\.\\s*coli', 'E. coli'],
+  ['enterobacter', 'Enterobacteriaceae'],
+  ['środowisk', 'Badania środowiskowe'],
+  ['srodowisk', 'Badania środowiskowe']
+]
+
+const PRODUCT_HINTS = [
+  ['jabłk', 'Jabłka'], ['jabl', 'Jabłka'],
+  ['gruszk', 'Gruszki'],
+  ['malin', 'Maliny / pulpa'], ['porzeczk', 'Porzeczki'],
+  ['truskawk', 'Truskawki'],
+  ['aroni', 'Aronia'], ['wiśni', 'Wiśnie'], ['wisni', 'Wiśnie'],
+  ['środowisk', 'Badania środowiskowe'], ['srodowisk', 'Badania środowiskowe'],
+  ['ręk', 'Badania środowiskowe – ręce'], ['rece', 'Badania środowiskowe – ręce']
+]
+
+export function parseW05LabReport(text, fileName = '') {
+  const flat = String(text || '')
+  const lines = toLines(flat)
+  const nflat = normalizeText(flat)
+
+  let parameter = ''
+  for (const [re, label] of LAB_PARAMS) {
+    if (new RegExp(re, 'i').test(flat)) {
+      parameter = label
+      break
+    }
+  }
+  if (!parameter) parameter = labelValue(lines, ['Badany parametr', 'Parametr', 'Oznaczenie', 'Badanie']) || 'Badanie laboratoryjne'
+
+  let productGroup = labelValue(lines, ['Nazwa próbki', 'Próbka', 'Produkt', 'Materiał', 'Oznaczenie próbki'])
+  if (!productGroup) {
+    for (const [re, label] of PRODUCT_HINTS) {
+      if (new RegExp(re, 'i').test(flat)) {
+        productGroup = label
+        break
+      }
+    }
+  }
+  if (!productGroup) productGroup = fileName.replace(/\.pdf$/i, '').slice(0, 80)
+
+  const documentDate = findDate(flat, ['data wydania', 'data badania', 'data wykonania', 'data raportu', 'data']) || new Date().toISOString().slice(0, 10)
+
+  let resultPn = 'P'
+  if (/(niezgodn|przekroczen|powyżej normy|powyzej normy|wynik niedopuszczaln)/i.test(flat)) resultPn = 'N'
+  if (/(zgodn|wynik prawid|dopuszczaln|nie stwierdzono|brak wykrycia)/i.test(flat)) resultPn = 'P'
+
+  const reportNo = labelValue(lines, ['Nr raportu', 'Numer raportu', 'Nr protokołu', 'Numer protokołu', 'Nr sprawozdania'])
+    || (flat.match(/(?:raport|protok[oó]ł|sprawozdanie)\s*(?:nr|numer)?\s*[:#]?\s*([A-Z0-9/_.-]{3,40})/i)?.[1])
+  const lab = /agrolab/i.test(flat) ? 'AGROLAB Polska Sp. z o.o.' : labelValue(lines, ['Laboratorium', 'Wykonał'])
+
+  const notesParts = []
+  if (reportNo) notesParts.push(`Nr raportu: ${reportNo}`)
+  if (lab) notesParts.push(lab)
+  notesParts.push(`Wynik: ${resultPn === 'P' ? 'zgodny' : 'niezgodny'}`)
+  const notes = notesParts.join(' · ')
+
+  return {
+    documentDate,
+    productGroup,
+    parameter,
+    frequency: 'wg harmonogramu W05',
+    notes,
+    resultPn,
+    reportNo,
+    lab,
+    textLength: flat.replace(/\s/g, '').length
+  }
+}
+
+export function buildW05FormUpdates(parsed) {
+  const u = {}
+  if (parsed.documentDate) u.document_date = parsed.documentDate
+  if (parsed.productGroup) u.product_group = parsed.productGroup
+  if (parsed.parameter) u.parameter = parsed.parameter
+  if (parsed.frequency) u.frequency = parsed.frequency
+  if (parsed.notes) u.notes = parsed.notes
+  return u
+}
+
+export async function importPdfForDocType(docType, file) {
+  const text = await extractPdfText(file)
+  if (docType === 'K01.1') {
+    const parsed = parseK011Invoice(text, file.name)
+    return { text, parsed, updates: buildK011FormUpdates(parsed), lineItems: parsed.lineItems || [] }
+  }
+  if (docType === 'W04') {
+    const parsed = parseW04CleaningDoc(text, file.name)
+    return { text, parsed, updates: buildW04FormUpdates(parsed), lineItems: [] }
+  }
+  if (docType === 'W05') {
+    const parsed = parseW05LabReport(text, file.name)
+    return { text, parsed, updates: buildW05FormUpdates(parsed), lineItems: [] }
+  }
+  throw new Error(`Brak parsera PDF dla ${docType}`)
+}
+
+// Kompatybilność wsteczna
+export const K011_PDF_IMPORT_VERSION = PDF_IMPORT_VERSION
+export async function importK011FromPdfFile(file) {
+  const r = await importPdfForDocType('K01.1', file)
+  return { text: r.text, parsed: r.parsed, updates: r.updates }
+}
+export function parseInvoiceTextForK011(text, fileName = '') {
+  return parseK011Invoice(text, fileName)
+}
+export function buildK011UpdatesFromParse(parsed) {
+  return buildK011FormUpdates(parsed)
+}
