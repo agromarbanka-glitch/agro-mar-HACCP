@@ -14,7 +14,8 @@ import {
 } from './w03Engine'
 import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
-  parseW06FromPdfFile, filterNewW06Parties, w06PartyLabel, w06KindLabel, w06DedupeKey
+  parseW06FromPdfFile, filterNewW06Parties, w06PartyLabel, w06KindLabel, w06DedupeKey,
+  partyToW06NewRow
 } from './w06Engine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
@@ -320,6 +321,7 @@ function App() {
   const [w06PdfPreview, setW06PdfPreview] = useState('')
   const [w06PdfInputKey, setW06PdfInputKey] = useState(0)
   const [w06PdfFileName, setW06PdfFileName] = useState('')
+  const [w06PdfStagedParties, setW06PdfStagedParties] = useState([])
   const [w06NewRow, setW06NewRow] = useState({
     party_type: 'supplier',
     supplier_kind: 'raw',
@@ -2633,6 +2635,17 @@ function App() {
     return `${m[3]}.${m[2]}.${m[1]}`
   }
 
+  async function importW06StagedParties(parties, existing) {
+    const { added, skipped } = filterNewW06Parties(existing, parties)
+    if (!added.length) return { added: 0, skipped: skipped.length }
+    for (const party of added) {
+      const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(party))
+      if (error) throw error
+    }
+    await loadHaccpDocs()
+    return { added: added.length, skipped: skipped.length }
+  }
+
   async function handleW06PdfFiles(e) {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
@@ -2643,6 +2656,7 @@ function App() {
     setW06PdfFileName(files.map(f => f.name).join(', '))
     setW06PdfImporting(true)
     setW06PdfPreview('')
+    setW06PdfStagedParties([])
     setMessage(`W06: odczytuję ${files.length} plik(ów) PDF…`)
     try {
       const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
@@ -2658,8 +2672,9 @@ function App() {
             unreadable.push(file.name + (result.pdfError ? ` (${result.pdfError})` : ''))
             continue
           }
-          if (result.party?.dedupe_key || result.party?.company_name) {
-            parsedParties.push(result.party)
+          const fromFile = result.parties?.length ? result.parties : (result.party ? [result.party] : [])
+          if (fromFile.length) {
+            parsedParties.push(...fromFile)
           } else {
             noParty.push(`${file.name} (${result.kind || '?'})`)
           }
@@ -2672,34 +2687,56 @@ function App() {
         if (unreadable.length) {
           setMessage(`W06: PDF bez czytelnego tekstu (${unreadable.join(', ')}). Eksportuj dokument ponownie z programu (Subiekt/Comarch) lub dodaj ręcznie.`)
         } else if (noParty.length) {
-          setMessage(`W06: odczytano tekst, ale nie rozpoznano kontrahenta w: ${noParty.join('; ')}. Sprawdź podgląd poniżej i uzupełnij ręcznie.`)
+          setMessage(`W06: odczytano tekst, ale nie rozpoznano kontrahentów w: ${noParty.join('; ')}. Sprawdź podgląd poniżej i uzupełnij ręcznie.`)
         } else {
           setMessage('W06: brak danych do dodania.')
         }
         setW06PdfInputKey(k => k + 1)
         return
       }
-      const { added, skipped } = filterNewW06Parties(existing, parsedParties)
-      if (!added.length) {
-        setMessage(`W06: rozpoznano ${parsedParties.length} kontrahent(ów), ale wszyscy są już na liście (duplikaty).`)
-        setW06PdfInputKey(k => k + 1)
-        return
-      }
-      for (const party of added) {
-        const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(party))
-        if (error) throw error
-      }
-      await loadHaccpDocs()
+      setW06PdfStagedParties(parsedParties)
+      const firstRow = partyToW06NewRow(parsedParties[0])
+      if (firstRow) setW06NewRow(firstRow)
+
+      const { added, skipped } = await importW06StagedParties(parsedParties, existing)
       setW06PdfInputKey(k => k + 1)
-      let msg = `W06: dodano ${added.length} nowych kontrahentów`
-      if (skipped.length) msg += `, pominięto ${skipped.length} duplikatów`
-      if (unreadable.length) msg += `. Nieczytelne PDF: ${unreadable.length}`
-      if (noParty.length) msg += `. Bez kontrahenta: ${noParty.length}`
-      setMessage(msg + '.')
+      if (added > 0) {
+        setW06PdfStagedParties(prev => {
+          const keys = new Set(filterNewW06Parties(existing, parsedParties).added.map(p => p.dedupe_key))
+          return prev.filter(p => !keys.has(p.dedupe_key || w06DedupeKey(p)))
+        })
+        let msg = `W06: dodano ${added} kontrahentów do wykazu`
+        if (skipped) msg += `, pominięto ${skipped} duplikatów`
+        if (parsedParties.length > added) msg += `. Rozpoznano łącznie ${parsedParties.length} firm w PDF`
+        setMessage(msg + '.')
+      } else {
+        setMessage(`W06: rozpoznano ${parsedParties.length} firm w PDF – wszystkie są już na liście. Możesz je edytować poniżej lub kliknąć „Dodaj rozpoznane firmy".`)
+      }
+      if (unreadable.length) setMessage(prev => `${prev} Nieczytelne pliki: ${unreadable.length}.`)
+      if (noParty.length) setMessage(prev => `${prev} Pliki bez kontrahenta: ${noParty.length}.`)
     } catch (err) {
       setMessage(`W06: błąd importu PDF – ${err?.message || String(err)}`)
     } finally {
       setW06PdfImporting(false)
+    }
+  }
+
+  async function addW06StagedFromPdf() {
+    if (!supabase || !w06PdfStagedParties.length) {
+      setMessage('W06: brak rozpoznanych firm z PDF – wgraj plik ponownie.')
+      return
+    }
+    try {
+      const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
+      const { added, skipped } = await importW06StagedParties(w06PdfStagedParties, existing)
+      if (added > 0) {
+        setW06PdfStagedParties([])
+        setMessage(`W06: dodano ${added} kontrahentów do wykazu${skipped ? `, pominięto ${skipped} duplikatów` : ''}.`)
+      } else {
+        setMessage(`W06: wszystkie rozpoznane firmy (${w06PdfStagedParties.length}) są już na liście.`)
+      }
+    } catch (err) {
+      setMessage(`W06: błąd dodawania – ${err?.message || String(err)}`)
     }
   }
 
@@ -2803,6 +2840,18 @@ function App() {
           <summary>Podgląd tekstu z ostatniego PDF</summary>
           <pre className="pdf-text-preview">{w06PdfPreview}</pre>
         </details>}
+        {w06PdfStagedParties.length > 0 && <div className="w06-staged no-print">
+          <p className="hint"><b>Rozpoznano z PDF ({w06PdfStagedParties.length}):</b></p>
+          <ul className="w06-staged-list">
+            {w06PdfStagedParties.map((p, i) => <li key={i}>
+              {W06_PARTY_LABELS[p.party_type] || 'Dostawca'} – {p.company_name || p.supplier_name}{p.nip ? `, NIP ${p.nip}` : ''}
+              <button type="button" className="mini secondary" onClick={() => { const row = partyToW06NewRow(p); if (row) setW06NewRow(row) }}>Wstaw do formularza</button>
+            </li>)}
+          </ul>
+          <div className="actions">
+            <button onClick={addW06StagedFromPdf}>Dodaj rozpoznane firmy do wykazu ({w06PdfStagedParties.length})</button>
+          </div>
+        </div>}
       </div>
       <div className="actions no-print" style={{ marginBottom: 12 }}>
         <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
@@ -2881,6 +2930,7 @@ function App() {
           <label>Adres<input value={w06NewRow.address} onChange={e => setW06NewRow(prev => ({ ...prev, address: e.target.value }))} /></label>
           <label>Przykładowy towar<input value={w06NewRow.item_name} onChange={e => setW06NewRow(prev => ({ ...prev, item_name: e.target.value }))} /></label>
         </div>
+        <p className="hint">Po wgraniu PDF pola poniżej uzupełnią się pierwszą rozpoznaną firmą – możesz poprawić i kliknąć „Dodaj do wykazu", albo użyć przycisku „Dodaj rozpoznane firmy" powyżej.</p>
         <div className="actions"><button onClick={addW06Row}>Dodaj do wykazu</button></div>
       </div>
     </>

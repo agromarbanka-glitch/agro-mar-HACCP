@@ -4,7 +4,7 @@
 import { extractPdfData, isReadablePdfText, rebuildTextFromItems } from './pdfImportEngine.js'
 import { isReadableName } from './k011InvoiceParser.js'
 
-export const W06_ENGINE_VERSION = '1.2'
+export const W06_ENGINE_VERSION = '1.3'
 export const AGRO_MAR_NIP = '7171839598'
 
 export const W06_PARTY_LABELS = {
@@ -217,7 +217,142 @@ function guessItemName(text, lines) {
   return guess ? guess.replace(/^\d+[\s.)-]+/, '').trim().slice(0, 120) : ''
 }
 
-export function parseW06FromPdfText(text, fileName = '') {
+function tryExtractNip(raw) {
+  const digits = String(raw || '').replace(/\D/g, '')
+  if (digits.length === 10) return digits
+  if (digits.length > 10) {
+    for (let i = 0; i <= digits.length - 10; i++) {
+      const cand = digits.slice(i, i + 10)
+      if (cand !== AGRO_MAR_NIP) return cand
+    }
+  }
+  return ''
+}
+
+function findNipInSegment(seg) {
+  const labeled = [...seg.matchAll(/NIP\s*([\d\s,.-]{4,20})/gi)]
+  for (const m of labeled) {
+    const nip = tryExtractNip(m[1])
+    if (nip && nip !== AGRO_MAR_NIP) return nip
+  }
+  for (const m of seg.matchAll(/\b(\d{10,11})\b/g)) {
+    const nip = tryExtractNip(m[1])
+    if (nip && nip !== AGRO_MAR_NIP) return nip
+  }
+  return ''
+}
+
+function cleanRegisterName(raw) {
+  return String(raw || '')
+    .replace(/\d[\d\s,]*(?:zł|PLN)/gi, ' ')
+    .replace(/\d{4}-\d{2}-\d{2}/g, ' ')
+    .replace(/\b\d[\d\s,]{3,}\b/g, ' ')
+    .replace(/\s+\d[\d\s,]*(?:zł|PLN).*$/i, '')
+    .replace(/\s+\d{4}-\d{2}-\d{2}.*$/, '')
+    .replace(/\s+(?:RR-|wziąć|nowe dane|bez ceny|Magazyn).*$/i, '')
+    .replace(/\s+Mariusz\s*\.\.\s*Bańka.*$/i, '')
+    .replace(/\s+Bańka\s+Sp\.\s*z\s*o\.?\s*o\.?.*$/i, '')
+    .replace(/\s+AGRO-\s*$/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function extractPartyFromRegisterSegment(seg, docKind, fileName) {
+  const kind = docKind === 'WZ' ? 'WZ' : 'PZ'
+  const dateM = seg.match(/\d{4}-\d{2}-\d{2}/)
+  let rest = dateM ? seg.slice(seg.indexOf(dateM[0]) + dateM[0].length).trim() : seg.replace(/^(?:PZ|WZ|MM)\s+(?:PZ|WZ|MM)\/[^\n]+/i, '').trim()
+
+  rest = rest.replace(/^Magazyn\s+\S+/i, '').trim()
+
+  let name = ''
+  let nip = findNipInSegment(rest)
+
+  if (/GOSPODARSTWO/i.test(rest)) {
+    const gosp = rest.match(/(GOSPODARSTWO[\s\S]{8,160}?OSUCH)/i)
+    if (gosp) name = cleanRegisterName(gosp[1].replace(/\s+/g, ' '))
+  }
+
+  if (!name) {
+    const commaNip = rest.match(/([\p{L}0-9][\p{L}\s.\-'&]{2,90}?),\s*NIP\s*[\d\s,.-]+/iu)
+    if (commaNip) name = cleanRegisterName(commaNip[1])
+  }
+
+  if (!name) {
+    const beforeQty = rest.match(/^([\p{L}][\p{L}\s.\-'&]{3,90}?)(?=\s+\d[\d\s,]{2,})/iu)
+    if (beforeQty) name = cleanRegisterName(beforeQty[1])
+  }
+
+  if (!name) {
+    const gosp = rest.match(/(GOSPODARSTWO[\s\S]{8,140}?OSUCH)/i)
+    if (gosp) name = cleanRegisterName(gosp[1].replace(/\s+/g, ' '))
+  }
+
+  if (!name) {
+    const words = rest.match(/([\p{L}]{2,}\s+[\p{L}]{2,}(?:\s+[\p{L}]{2,}){0,4})/u)
+    if (words) name = cleanRegisterName(words[1])
+  }
+
+  name = cleanRegisterName(name)
+  if (!name || name.length < 3 || isAgromarParty(name, nip)) return null
+
+  const partyType = kind === 'WZ' ? 'recipient' : 'supplier'
+  const party = {
+    party_type: partyType,
+    company_name: name.slice(0, 200),
+    supplier_name: name.slice(0, 200),
+    nip,
+    address: '',
+    item_name: '',
+    supplier_kind: partyType === 'recipient' ? 'recipient' : 'raw',
+    source_doc_kind: kind,
+    source_filename: fileName
+  }
+  party.dedupe_key = w06DedupeKey(party)
+  return party
+}
+
+/** Eksport rejestru PZ/WZ (wiele wierszy: Rodzaj, Dostawca/Odbiorca…) */
+export function parseW06RegisterExport(text, fileName = '') {
+  const flat = String(text || '')
+  if (!/rodzaj|dostawca\s*\/\s*odbiorca|nr\s*faktury/i.test(flat)) return []
+  if (!/\b(PZ|WZ|MM)\s+(PZ|WZ|MM)\//i.test(flat)) return []
+
+  const segments = flat.split(/(?=\b(?:PZ|WZ|MM)\s+(?:PZ|WZ|MM)\/)/i)
+  const parties = []
+  const seen = new Set()
+
+  for (const seg of segments) {
+    const kindM = seg.match(/^\s*(PZ|WZ|MM)\s+/i)
+    if (!kindM) continue
+    const party = extractPartyFromRegisterSegment(seg, kindM[1].toUpperCase(), fileName)
+    if (!party?.dedupe_key) continue
+    if (seen.has(party.dedupe_key)) continue
+    seen.add(party.dedupe_key)
+    parties.push(party)
+  }
+  return parties
+}
+
+export function parseW06PartiesFromPdfText(text, fileName = '') {
+  const registerParties = parseW06RegisterExport(text, fileName)
+  if (registerParties.length) {
+    return {
+      kind: 'rejestr',
+      parties: registerParties,
+      itemName: '',
+      textLength: String(text || '').replace(/\s/g, '').length
+    }
+  }
+  const single = parseW06SingleDocFromPdfText(text, fileName)
+  return {
+    kind: single.kind,
+    parties: single.party ? [single.party] : [],
+    itemName: single.itemName,
+    textLength: single.textLength
+  }
+}
+
+function parseW06SingleDocFromPdfText(text, fileName = '') {
   let kind = detectW06DocKind(text, fileName)
   if (kind === 'unknown') kind = inferKindFromAgromar(text)
   const lines = toLines(text)
@@ -262,6 +397,24 @@ export function parseW06FromPdfText(text, fileName = '') {
   return { kind, party, itemName, textLength: String(text || '').replace(/\s/g, '').length }
 }
 
+/** @deprecated użyj parseW06PartiesFromPdfText */
+export function parseW06FromPdfText(text, fileName = '') {
+  const r = parseW06PartiesFromPdfText(text, fileName)
+  return { kind: r.kind, party: r.parties[0] || null, itemName: r.itemName, textLength: r.textLength }
+}
+
+export function partyToW06NewRow(party) {
+  if (!party) return null
+  return {
+    party_type: party.party_type || 'supplier',
+    supplier_kind: party.supplier_kind || (party.party_type === 'recipient' ? 'recipient' : 'raw'),
+    company_name: party.company_name || party.supplier_name || '',
+    nip: party.nip || '',
+    address: party.address || '',
+    item_name: party.item_name || ''
+  }
+}
+
 export async function parseW06FromPdfFile(file) {
   const { text, itemsByPage, error: pdfError } = await extractPdfData(file)
   let usableText = isReadablePdfText(text) ? text : rebuildTextFromItems(itemsByPage)
@@ -279,8 +432,8 @@ export async function parseW06FromPdfFile(file) {
       pdfError: pdfError || null
     }
   }
-  const parsed = parseW06FromPdfText(usableText, file.name)
-  return { text: usableText, unreadable: false, pdfError: null, ...parsed }
+  const parsed = parseW06PartiesFromPdfText(usableText, file.name)
+  return { text: usableText, unreadable: false, pdfError: null, party: parsed.parties[0] || null, ...parsed }
 }
 
 export function existingW06DedupeKeys(docs) {
