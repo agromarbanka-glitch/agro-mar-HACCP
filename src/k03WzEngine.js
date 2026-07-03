@@ -13,7 +13,82 @@ import {
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.0'
+export const K03_WZ_ENGINE_VERSION = '1.2'
+
+function wzMonthKey(dateStr) {
+  return String(dateStr || '').slice(0, 7)
+}
+
+async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacja K03 z FIFO') {
+  if (line.status === 'pending') return { skipped: 'pending' }
+  if (line.frozen || line.status === 'frozen') return { skipped: 'frozen' }
+  if (!line.operation_id || !line.product_id) throw new Error('Brak powiązania WZ z bazą.')
+
+  const mode = line.workflow?.mode || 'bez_przerobu'
+  const przerobDate = String(line.workflow?.przerob_date || line.workflow?.fifo_cutoff_date || '').slice(0, 10)
+  const wzDate = String(line.wz_date || '').slice(0, 10)
+  const cutoffDate = mode === 'przerob' ? przerobDate : wzDate
+  if (!cutoffDate || cutoffDate === '0000-01-01') throw new Error('Brak daty granicznej (WZ / przerób).')
+  if (mode === 'przerob' && !przerobDate) throw new Error('Brak daty przerobu w zapisie K03.')
+
+  const k03Key = line.formId || `K03-${line.key}`
+  const fifoResult = await persistFifoForSale(client, line.operation_id, line.product_id, cutoffDate, {
+    k03_key: k03Key,
+    change_type: 'k03_resync_fifo',
+    change_reason: logReason,
+    changed_by: changedBy
+  })
+
+  const productMap = new Map()
+  if (line.product_id) {
+    productMap.set(line.product_id, { name: line.product_name, product_group: line.product_group })
+  }
+
+  const workflow = line.workflow || {
+    mode,
+    przerob_date: mode === 'przerob' ? przerobDate : null,
+    fifo_cutoff_date: cutoffDate
+  }
+
+  let doc = buildK03FormDoc(
+    {
+      key: line.key,
+      operation_id: line.operation_id,
+      product_id: line.product_id,
+      raw_product_name: line.product_name,
+      qty: line.qty,
+      op: { document_no: line.document_no, operation_date: line.wz_date, contractor_id: null }
+    },
+    fifoResult.pzRows,
+    productMap,
+    new Map(),
+    'baza',
+    { fifoCutoffDate: cutoffDate, workflow, lotNo: line.k03Form?.lot_no || workflow.lot_no || '' }
+  )
+
+  const saleQty = Number(line.qty || 0)
+  const rawTotal = fifoResult.pzRows.reduce((s, r) => s + Number(r.qty || 0), 0)
+  const shortage = Number(fifoResult.shortage || 0)
+  const mismatch = shortage > 0.0005 || Math.abs(rawTotal - saleQty) >= 0.001
+
+  doc = {
+    ...doc,
+    lot_no: line.k03Form?.lot_no || workflow.lot_no || doc.lot_no,
+    signed_by_operator: line.k03Form?.signed_by_operator || '',
+    status: mismatch ? 'N' : 'P',
+    data: {
+      ...doc.data,
+      shortage,
+      rawTotal,
+      quantitiesMatch: !mismatch,
+      k03_workflow: workflow
+    }
+  }
+
+  const canAutoFreeze = isK03CompleteAndValid(doc)
+  await saveK03Snapshot(client, doc, { freeze: canAutoFreeze, userRole: changedBy })
+  return { ok: true, autoFrozen: canAutoFreeze, doc, shortage }
+}
 
 /** K03 kompletny i prawidłowy – można zamrozić automatycznie. */
 export function isK03CompleteAndValid(doc) {
@@ -255,11 +330,14 @@ export async function generateK03Workflow(client, line, options = {}) {
   const mismatch = Math.abs(rawTotal - saleQty) >= 0.001 || shortage > 0
 
   if (mismatch && !acceptQuantityMismatch) {
+    const futureNote = Number(preview.excludedFuturePzQty || 0) > 0
+      ? ` PZ z datą późniejszą niż ${cutoffDate} (${Number(preview.excludedFuturePzQty).toLocaleString('pl-PL')} kg) nie są przypisywane.`
+      : ''
     return {
       ok: false,
       needConfirm: true,
       preview,
-      message: `Niespójność ilości: WZ ${saleQty.toLocaleString('pl-PL')} kg, PZ ${rawTotal.toLocaleString('pl-PL')} kg${shortage > 0 ? `, brak ${shortage.toLocaleString('pl-PL')} kg` : ''}.`
+      message: `Brak wystarczającego surowca na dzień ${cutoffDate}: WZ ${saleQty.toLocaleString('pl-PL')} kg, przypisano PZ ${rawTotal.toLocaleString('pl-PL')} kg${shortage > 0 ? `, brakuje ${shortage.toLocaleString('pl-PL')} kg` : ''}.${futureNote}`
     }
   }
 
@@ -352,6 +430,98 @@ export async function generateK03Workflow(client, line, options = {}) {
   }
 
   return { ok: true, doc, workflow, fifoResult, autoFrozen: canAutoFreeze }
+}
+
+/**
+ * Przelicza otwarte (niezamrożone) K03 wg aktualnych reguł FIFO i daty granicznej.
+ * Zamrożone K03 pomija – wymagają ręcznego odmrożenia.
+ */
+export async function resyncOpenK03FromFifo(client, options = {}) {
+  const changedBy = options.changedBy || 'operator'
+  const { lines } = await loadWzQueue(client)
+  const results = { updated: 0, skippedFrozen: 0, skippedPending: 0, errors: [] }
+
+  for (const line of lines) {
+    try {
+      const r = await resyncK03Line(client, line, changedBy)
+      if (r.skipped === 'pending') {
+        results.skippedPending++
+        continue
+      }
+      if (r.skipped === 'frozen') {
+        results.skippedFrozen++
+        continue
+      }
+      results.updated++
+    } catch (err) {
+      results.errors.push(`${line.document_no || line.key}: ${err?.message || String(err)}`)
+    }
+  }
+
+  return { ok: true, ...results }
+}
+
+/**
+ * Odmraża wszystkie K03 z danego miesiąca (wg daty WZ) i przelicza FIFO + kartoteki.
+ */
+export async function unfreezeAndResyncK03ByWzMonth(client, yearMonth, options = {}) {
+  const month = wzMonthKey(yearMonth)
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('Wybierz miesiąc w formacie RRRR-MM.')
+
+  const changedBy = options.changedBy || 'operator'
+  const reason = options.reason || `Masowe odmrożenie K03 za ${month} – przeliczenie wg daty WZ`
+
+  let { lines } = await loadWzQueue(client)
+  const inMonth = lines.filter(l => wzMonthKey(l.wz_date) === month)
+  const frozenInMonth = inMonth.filter(l => l.frozen || l.status === 'frozen')
+
+  const results = {
+    month,
+    inMonth: inMonth.length,
+    unfrozen: 0,
+    resynced: 0,
+    autoRefrozen: 0,
+    skippedPending: 0,
+    errors: []
+  }
+
+  for (const line of frozenInMonth) {
+    const doc = line.k03Form
+    if (!doc?.id) {
+      results.errors.push(`${line.document_no || line.key}: brak zapisanego K03`)
+      continue
+    }
+    try {
+      await unfreezeK03Workflow(client, doc, reason, changedBy)
+      results.unfrozen++
+    } catch (err) {
+      results.errors.push(`${line.document_no || line.key}: ${err?.message || String(err)}`)
+    }
+  }
+
+  ;({ lines } = await loadWzQueue(client))
+  const toResync = lines.filter(l => wzMonthKey(l.wz_date) === month && l.status !== 'pending')
+  results.skippedPending = lines.filter(l => wzMonthKey(l.wz_date) === month && l.status === 'pending').length
+
+  for (const line of toResync) {
+    try {
+      const r = await resyncK03Line(client, line, changedBy, `Przeliczenie K03 za ${month} po odmrożeniu miesiąca`)
+      if (r.skipped) continue
+      results.resynced++
+      if (r.autoFrozen) results.autoRefrozen++
+    } catch (err) {
+      results.errors.push(`${line.document_no || line.key}: ${err?.message || String(err)}`)
+    }
+  }
+
+  await logK03Workflow(client, {
+    change_type: 'k03_month_unfreeze_resync',
+    change_reason: reason,
+    changed_by: changedBy,
+    after_data: results
+  })
+
+  return { ok: true, ...results }
 }
 
 /** Cofnięcie decyzji K03 (tylko gdy nie zamrożony). */

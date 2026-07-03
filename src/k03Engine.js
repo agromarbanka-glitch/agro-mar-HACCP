@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.4'
+export const K03_ENGINE_VERSION = '3.5'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -273,26 +273,37 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   const receiver = formatK03Receiver(contractorMap.get(op?.contractor_id)?.name || saleLine.receiver_name || '')
   const cutoffDate = String(fifoCutoffDate || wzDate || '').slice(0, 10)
 
-  const rawRowsBase = (pzRows || [])
-    .filter(r => Number(r.qty || 0) > 0)
-    .sort((a, b) =>
-      String(a.pz_date || '').localeCompare(String(b.pz_date || '')) ||
-      String(a.pz_no || '').localeCompare(String(b.pz_no || ''))
-    )
-
-  let invalidFuturePz = false
-  for (const r of rawRowsBase) {
-    const pzDate = String(r.pz_date || '').slice(0, 10)
-    if (pzDate && cutoffDate && cutoffDate !== '0000-01-01' && pzDate > cutoffDate) invalidFuturePz = true
+  const incomingRows = (pzRows || []).filter(r => Number(r.qty || 0) > 0)
+  let excludedFuturePzRows = []
+  let rawRowsBase = incomingRows
+  if (cutoffDate && cutoffDate !== '0000-01-01') {
+    rawRowsBase = []
+    for (const r of incomingRows) {
+      const pzDate = String(r.pz_date || '').slice(0, 10)
+      if (pzDate && pzDate !== '0000-01-01' && pzDate > cutoffDate) {
+        excludedFuturePzRows.push(r)
+      } else {
+        rawRowsBase.push(r)
+      }
+    }
   }
+
+  rawRowsBase = rawRowsBase.sort((a, b) =>
+    String(a.pz_date || '').localeCompare(String(b.pz_date || '')) ||
+    String(a.pz_no || '').localeCompare(String(b.pz_no || ''))
+  )
+
+  const excludedFuturePz = excludedFuturePzRows.length > 0
+  const excludedFuturePzQty = excludedFuturePzRows.reduce((sum, r) => sum + Number(r.qty || 0), 0)
 
   const allocatedTotal = rawRowsBase.reduce((sum, r) => sum + Number(r.qty || 0), 0)
   const shortage = Math.max(0, Math.round((saleQty - allocatedTotal) * 1000) / 1000)
+  const cutoffLabel = cutoffDate !== '0000-01-01' ? cutoffDate : wzDate
   const rawRows = shortage > 0
     ? [...rawRowsBase, {
-      pz_no: source === 'excel' ? 'Zapisz do bazy i przelicz FIFO' : 'BRAK SUROWCA NA DZIEŃ WZ',
-      pz_date: wzDate !== '0000-01-01' ? `≤ ${wzDate}` : '',
-      supplier: source === 'excel' ? '—' : 'uzupełnij PZ lub przelicz FIFO',
+      pz_no: source === 'excel' ? 'Zapisz do bazy i przelicz FIFO' : 'BRAK SUROWCA',
+      pz_date: cutoffLabel && cutoffLabel !== '0000-01-01' ? `≤ ${cutoffLabel}` : '',
+      supplier: source === 'excel' ? '—' : `brakuje ${shortage.toLocaleString('pl-PL')} kg na stanie`,
       qty: shortage,
       source_lot_no: '',
       isShortage: true
@@ -318,7 +329,7 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
     document_no: wzNo,
     chamber_code: '',
     qty: saleQty,
-    status: source === 'excel' || invalidFuturePz || shortage > 0 ? 'N' : 'P',
+    status: source === 'excel' || excludedFuturePz || shortage > 0 ? 'N' : 'P',
     data: {
       wz_no: wzNo,
       wz_date: wzDate,
@@ -331,7 +342,8 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
       saleQty,
       shortage,
       quantitiesMatch,
-      invalidFuturePz,
+      invalidFuturePz: excludedFuturePz,
+      excludedFuturePzQty,
       sale_operation_id: saleLine.operation_id,
       product_id: saleLine.product_id,
       k03_source: source,
@@ -548,10 +560,13 @@ export async function loadK03Forms(client) {
       (s.product_id === alloc.product_id || (!s.product_id && !alloc.product_id))
     )
     const key = sale?.key || saleLineKey(alloc.operation_id, alloc.product_id)
+    const wzDate = String(sale?.op?.operation_date || '').slice(0, 10)
+    const pzDate = String(pzOp.operation_date || lot.production_date || '').slice(0, 10)
+    if (wzDate && wzDate !== '0000-01-01' && pzDate && pzDate !== '0000-01-01' && pzDate > wzDate) continue
     if (!pzBySaleKey.has(key)) pzBySaleKey.set(key, [])
     pzBySaleKey.get(key).push({
       pz_no: pzOp.document_no || lot.lot_no || '',
-      pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
+      pz_date: pzDate,
       supplier: contractorMap.get(pzOp.contractor_id)?.name || '',
       qty,
       source_lot_no: lot.lot_no || ''

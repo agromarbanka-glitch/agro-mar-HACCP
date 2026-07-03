@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import * as XLSX from 'xlsx'
@@ -283,6 +283,7 @@ function App() {
   const [pzSearch, setPzSearch] = useState('')
   const [pzStatusFilter, setPzStatusFilter] = useState('all')
   const [fifoKartotekiDirty, setFifoKartotekiDirty] = useState(false)
+  const [k03BulkMonth, setK03BulkMonth] = useState(new Date().toISOString().slice(0, 7))
   const docsFiltersHydrated = useRef(false)
   const docsFiltersSkipSave = useRef(true)
 
@@ -666,6 +667,17 @@ function App() {
     return items.sort((a, b) => String(b.group.docs[0]?.document_date || '').localeCompare(String(a.group.docs[0]?.document_date || '')))
   }, [syntheticK03Docs])
 
+  const k03BulkMonthStats = useMemo(() => {
+    const month = String(k03BulkMonth || '').slice(0, 7)
+    const inMonth = (wzQueueLines || []).filter(l => String(l.wz_date || '').slice(0, 7) === month)
+    return {
+      total: inMonth.length,
+      frozen: inMonth.filter(l => l.frozen || l.status === 'frozen').length,
+      ready: inMonth.filter(l => !l.frozen && l.status !== 'frozen' && l.status !== 'pending').length,
+      pending: inMonth.filter(l => l.status === 'pending').length
+    }
+  }, [wzQueueLines, k03BulkMonth])
+
   function setK03GroupEmployee(doc, employeeName) {
     if (!doc?.id) return
     setK03Overrides(prev => ({ ...prev, [doc.id]: { ...(prev[doc.id] || {}), signed_by_operator: employeeName } }))
@@ -857,7 +869,7 @@ function App() {
             <label>Numer partii (opcjonalnie – auto jeśli puste)
               <input value={k03WzModal.lotNo} onChange={e => setK03WzModal(m => ({ ...m, lotNo: e.target.value }))} placeholder="np. T/001/2026" />
             </label>
-            <p className="hint">FIFO dobiera PZ do daty przerobu (nie do daty WZ).</p>
+            <p className="hint">FIFO dobiera tylko PZ z datą ≤ data przerobu. Późniejsze PZ nie są przypisywane.</p>
           </>}
           {mode === 'bez_przerobu' && <>
             <label>Czy surowiec był magazynowany (K02)?
@@ -866,7 +878,7 @@ function App() {
                 <option value="tak">Tak – wymaga K02</option>
               </select>
             </label>
-            <p className="hint">Pomija K04/K06. FIFO dobiera PZ do daty WZ. Przy transporcie (np. jabłko przem.) użyj K04.1.</p>
+            <p className="hint">FIFO dobiera tylko PZ z datą ≤ data WZ. Późniejsze PZ nie są przypisywane.</p>
           </>}
         </div>
         <div className="actions">
@@ -877,7 +889,11 @@ function App() {
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
         </div>
         {error && <p className="status danger">{error}</p>}
-        {mismatch && preview && <p className="status danger">Niespójność: WZ {Number(preview.saleQty || 0).toLocaleString('pl-PL')} kg vs PZ {rawTotal.toLocaleString('pl-PL')} kg{Number(preview.shortage || 0) > 0 ? ` (brak ${Number(preview.shortage).toLocaleString('pl-PL')} kg)` : ''}.</p>}
+        {mismatch && preview && <p className="status danger">
+          Brak wystarczającego surowca: WZ {Number(preview.saleQty || 0).toLocaleString('pl-PL')} kg, przypisano PZ {rawTotal.toLocaleString('pl-PL')} kg
+          {Number(preview.shortage || 0) > 0 ? ` – brakuje ${Number(preview.shortage).toLocaleString('pl-PL')} kg` : ''}.
+          {Number(preview.excludedFuturePzQty || 0) > 0 ? ` PZ z późniejszą datą (${Number(preview.excludedFuturePzQty).toLocaleString('pl-PL')} kg) pominięto.` : ''}
+        </p>}
         {preview?.pzRows?.length > 0 && <div className="table-wrap small"><table>
           <thead><tr><th>PZ</th><th>Data</th><th>Dostawca</th><th>Ilość kg</th></tr></thead>
           <tbody>{preview.pzRows.map((r, i) => <tr key={i}><td>{r.pz_no}</td><td>{r.pz_date}</td><td>{r.supplier}</td><td>{Number(r.qty || 0).toLocaleString('pl-PL')}</td></tr>)}</tbody>
@@ -2595,6 +2611,98 @@ function App() {
     }
   }
 
+  async function runUnfreezeMonthK03() {
+    if (!supabase) {
+      setMessage('Brak konfiguracji Supabase.')
+      return null
+    }
+    const month = String(k03BulkMonth || '').slice(0, 7)
+    const { frozen, total, ready, pending } = k03BulkMonthStats
+    if (total === 0) {
+      setMessage(`Brak WZ/K03 z datą WZ w miesiącu ${month}.`)
+      return null
+    }
+    const reason = window.prompt(
+      `Odmrozić i przeliczyć K03 za ${month}?\n\n` +
+      `WZ w miesiącu: ${total}\n` +
+      `Zamrożonych: ${frozen}\n` +
+      `Gotowych (otwartych): ${ready}\n` +
+      `Oczekujących na decyzję: ${pending}\n\n` +
+      `Podaj powód (wymagane):`,
+      `Przeliczenie miesiąca ${month} – korekta PZ/FIFO`
+    )
+    if (!reason?.trim()) {
+      setMessage('Anulowano – brak powodu odmrożenia.')
+      return null
+    }
+    if (!window.confirm(
+      `Potwierdź: odmrożenie ${frozen} kartotek i przeliczenie ${ready + frozen} K03 za ${month} (wg daty WZ).\n\n` +
+      `PZ późniejsze niż data WZ nie będą przypisane. Kompletne K03 zamrożą się ponownie automatycznie.`
+    )) return null
+
+    setFifoRecalculating(true)
+    try {
+      const result = await unfreezeAndResyncK03ByWzMonth(supabase, month, { changedBy: userRole, reason: reason.trim() })
+      await loadFifoData()
+      await loadK03TraceData()
+      await loadHaccpDocs()
+      await loadPzManagementData()
+      await loadFifoChangeLog()
+      const errNote = result.errors?.length ? ` Błędy (${result.errors.length}): ${result.errors.slice(0, 2).join('; ')}` : ''
+      setMessage(
+        `Miesiąc ${month}: odmrożono ${result.unfrozen}, przeliczono ${result.resynced} K03` +
+        (result.autoRefrozen ? `, ponownie zamrożono ${result.autoRefrozen} kompletnych` : '') +
+        (pending ? `, ${pending} WZ nadal oczekuje na decyzję` : '') +
+        `${errNote}`
+      )
+      return result
+    } catch (err) {
+      setMessage(`Błąd przeliczenia miesiąca: ${err?.message || String(err)}`)
+      return null
+    } finally {
+      setFifoRecalculating(false)
+    }
+  }
+
+  async function runResyncOpenK03(showConfirm = true) {
+    if (!supabase) {
+      setMessage('Brak konfiguracji Supabase.')
+      return null
+    }
+    const openCount = (wzQueueLines || []).filter(l => l.status !== 'pending' && !l.frozen && l.status !== 'frozen').length
+    const frozenCount = (wzQueueLines || []).filter(l => l.frozen || l.status === 'frozen').length
+    if (openCount === 0 && frozenCount > 0) {
+      setMessage(`Wszystkie K03 (${frozenCount}) są zamrożone. Odmroź kartotekę, cofnij decyzję i utwórz K03 ponownie.`)
+      return null
+    }
+    if (showConfirm && !window.confirm(
+      `Przeliczyć otwarte K03 wg nowych reguł FIFO?\n\n` +
+      `• Otwarte K03 do aktualizacji: ${openCount}\n` +
+      `• Zamrożone (pominięte): ${frozenCount}\n\n` +
+      `PZ z datą późniejszą niż WZ/przerób nie będą przypisane. Braki pojawią się jako ostrzeżenie.`
+    )) return null
+
+    setFifoRecalculating(true)
+    try {
+      const result = await resyncOpenK03FromFifo(supabase, { changedBy: userRole })
+      await loadFifoData()
+      await loadK03TraceData()
+      await loadHaccpDocs()
+      await loadPzManagementData()
+      await loadFifoChangeLog()
+      const errNote = result.errors?.length ? ` Błędy: ${result.errors.slice(0, 3).join('; ')}` : ''
+      setMessage(
+        `K03 zsynchronizowane: ${result.updated} zaktualizowano, ${result.skippedFrozen} zamrożonych pominięto, ${result.skippedPending} WZ oczekuje.${errNote}`
+      )
+      return result
+    } catch (err) {
+      setMessage(`Błąd synchronizacji K03: ${err?.message || String(err)}`)
+      return null
+    } finally {
+      setFifoRecalculating(false)
+    }
+  }
+
   async function runFifoFullRecalculate(showConfirm = true) {
     if (!supabase) {
       setMessage('Brak konfiguracji Supabase.')
@@ -2903,16 +3011,20 @@ async function recalculateFifoClientSide() {
     const candidateLots = Array.from(lotState.values())
       .filter(lot => {
         const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+        const receiptDate = String(opMap.get(lot.source_operation_id)?.operation_date || lot.production_date || '').slice(0, 10)
         return group === sale.sale_group &&
           Number(lot.remaining_qty || 0) > 0 &&
-          lot.production_date &&
-          String(lot.production_date).slice(0, 10) <= saleDate
+          receiptDate &&
+          receiptDate !== '0000-01-01' &&
+          receiptDate <= saleDate
       })
-      .sort((a, b) =>
-        String(a.production_date || '').localeCompare(String(b.production_date || '')) ||
-        String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
-        String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
-      )
+      .sort((a, b) => {
+        const dateA = String(opMap.get(a.source_operation_id)?.operation_date || a.production_date || '').slice(0, 10)
+        const dateB = String(opMap.get(b.source_operation_id)?.operation_date || b.production_date || '').slice(0, 10)
+        return dateA.localeCompare(dateB) ||
+          String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+          String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
+      })
 
     for (const lot of candidateLots) {
       if (remaining <= 0) break
@@ -2985,17 +3097,33 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   const { data: lots, error } = await supabase
     .from('lots')
-    .select('id, remaining_qty, production_date, created_at, product_group, lot_no, product_id')
+    .select('id, remaining_qty, production_date, created_at, product_group, lot_no, product_id, source_operation_id')
     .gt('remaining_qty', 0)
-    .lte('production_date', operationDate || '9999-12-31')
     .order('production_date', { ascending: true })
     .order('created_at', { ascending: true })
   if (error) throw error
 
+  const sourceOpIds = Array.from(new Set((lots || []).map(l => l.source_operation_id).filter(Boolean)))
+  const sourceOps = sourceOpIds.length
+    ? await fetchSupabaseInChunks('operations', 'id, operation_date', 'id', sourceOpIds)
+    : []
+  const sourceOpMap = new Map(sourceOps.map(o => [o.id, o]))
+  const opDateCutoff = String(operationDate || '9999-12-31').slice(0, 10)
+
   const matchingLots = (lots || []).filter(lot => {
     const lotGroup = lot.product_group
-    if (lotGroup && saleGroup) return lotGroup === saleGroup
-    return lot.product_id === productId
+    const groupMatch = lotGroup && saleGroup ? lotGroup === saleGroup : lot.product_id === productId
+    const receiptDate = String(sourceOpMap.get(lot.source_operation_id)?.operation_date || lot.production_date || '').slice(0, 10)
+    return groupMatch &&
+      receiptDate &&
+      receiptDate !== '0000-01-01' &&
+      receiptDate <= opDateCutoff
+  }).sort((a, b) => {
+    const dateA = String(sourceOpMap.get(a.source_operation_id)?.operation_date || a.production_date || '').slice(0, 10)
+    const dateB = String(sourceOpMap.get(b.source_operation_id)?.operation_date || b.production_date || '').slice(0, 10)
+    return dateA.localeCompare(dateB) ||
+      String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+      String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
   })
 
   for (const lot of matchingLots) {
@@ -3927,7 +4055,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> v27 · K03 {K03_ENGINE_VERSION} · FIFO</div>
+      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION}</div>
     </header>
 
     <section className="warning">
@@ -4289,6 +4417,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <div className="actions docs-actions">
             <button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież</button>
             {docsFilter === 'K03' && <>
+              <button className="secondary" onClick={() => runResyncOpenK03(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'K03…' : 'Napraw otwarte K03'}</button>
               <button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'FIFO…' : 'Uzupełnij FIFO'}</button>
               <button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO</button>
             </>}
@@ -4296,6 +4425,23 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </div>
 
         {docsFilter === 'K03' && <>
+          <section className="card k03-bulk-panel">
+            <div className="section-title"><RefreshCcw size={20}/><div>
+              <h3>Przeliczenie miesiąca K03</h3>
+              <p className="hint">Wg <b>daty WZ</b>. Odmraża zamrożone kartoteki z wybranego miesiąca, przelicza FIFO (tylko PZ do daty WZ lub przerobu) i zapisuje K03 od nowa.</p>
+            </div></div>
+            <div className="k03-bulk-row">
+              <label>Miesiąc (data WZ)
+                <input type="month" value={k03BulkMonth} onChange={e => setK03BulkMonth(e.target.value)} />
+              </label>
+              <button type="button" onClick={() => runUnfreezeMonthK03()} disabled={fifoRecalculating || k03Loading}>
+                {fifoRecalculating ? 'Przeliczanie…' : 'Odmroź miesiąc i przelicz K03'}
+              </button>
+            </div>
+            <p className="hint k03-bulk-stats">
+              W {k03BulkMonth}: <b>{k03BulkMonthStats.total}</b> WZ · <b>{k03BulkMonthStats.frozen}</b> zamrożonych · <b>{k03BulkMonthStats.ready}</b> otwartych · <b>{k03BulkMonthStats.pending}</b> oczekuje
+            </p>
+          </section>
           <details className="docs-k03-wz" open>
             <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje · {syntheticK03Docs.length} K03</summary>
             {filteredWzQueueLines.length === 0 && !k03Loading && <p className="hint">Brak WZ. Import Excel → Zapisz do Supabase.</p>}

@@ -7,6 +7,13 @@ function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
 }
 
+/** Data przyjęcia PZ widoczna w K03 – operation_date dokumentu źródłowego lub production_date partii. */
+export function lotReceiptDate(lot, opMap) {
+  const opDate = opMap?.get?.(lot?.source_operation_id)?.operation_date
+  const prodDate = lot?.production_date
+  return String(opDate || prodDate || '').slice(0, 10)
+}
+
 function isIncomingLotOperation(op) {
   if (!op) return true
   if (op.operation_type === 'przyjecie') return true
@@ -147,19 +154,20 @@ async function loadFifoBaseData(client) {
   }
 }
 
-function candidateLots(lotState, productMap, saleGroup, saleDate) {
-  const date = String(saleDate || '9999-12-31').slice(0, 10)
+function candidateLots(lotState, productMap, saleGroup, cutoffDate, opMap) {
+  const cutoff = String(cutoffDate || '9999-12-31').slice(0, 10)
   return Array.from(lotState.values())
     .filter(lot => {
-      const srcOp = lot.source_operation_id
       const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+      const receiptDate = lotReceiptDate(lot, opMap)
       return group === saleGroup &&
         Number(lot.remaining_qty || 0) > 0 &&
-        lot.production_date &&
-        String(lot.production_date).slice(0, 10) <= date
+        receiptDate &&
+        receiptDate !== '0000-01-01' &&
+        receiptDate <= cutoff
     })
     .sort((a, b) =>
-      String(a.production_date || '').localeCompare(String(b.production_date || '')) ||
+      lotReceiptDate(a, opMap).localeCompare(lotReceiptDate(b, opMap)) ||
       String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
       String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
     )
@@ -192,12 +200,12 @@ function restoreAllocationsToLots(allocations, lotState) {
   }
 }
 
-async function allocateSale(client, sale, lotState, productMap) {
+async function allocateSale(client, sale, lotState, productMap, opMap) {
   let remaining = Number(sale.sale_qty || 0)
   let allocated = 0
   let allocationCount = 0
-  const saleDate = String(sale.sale_date || '9999-12-31').slice(0, 10)
-  const lots = candidateLots(lotState, productMap, sale.sale_group, saleDate)
+  const cutoff = String(sale.sale_date || '9999-12-31').slice(0, 10)
+  const lots = candidateLots(lotState, productMap, sale.sale_group, cutoff, opMap)
 
   for (const lot of lots) {
     if (remaining <= 0) break
@@ -231,11 +239,11 @@ async function allocateSale(client, sale, lotState, productMap) {
   }
 }
 
-function simulateAllocation(sale, lotState, productMap, cutoffDate) {
+function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap) {
   let remaining = Number(sale.sale_qty || 0)
   let allocated = 0
   const allocationRows = []
-  const lots = candidateLots(lotState, productMap, sale.sale_group, cutoffDate)
+  const lots = candidateLots(lotState, productMap, sale.sale_group, cutoffDate, opMap)
 
   for (const lot of lots) {
     if (remaining <= 0.0005) break
@@ -301,17 +309,30 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   if (existing.length) restoreAllocationsToLots(existing, lotState)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
-  const sim = simulateAllocation(sale, lotState, base.productMap, cutoff)
+  const sim = simulateAllocation(sale, lotState, base.productMap, cutoff, base.opMap)
   const pzRows = await enrichAllocationRows(client, sim.allocationRows)
+  const pzRowsValid = pzRows.filter(r => {
+    const pzDate = String(r.pz_date || '').slice(0, 10)
+    return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
+  })
+  const excludedFuturePzQty = pzRows
+    .filter(r => {
+      const pzDate = String(r.pz_date || '').slice(0, 10)
+      return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
+    })
+    .reduce((s, r) => s + Number(r.qty || 0), 0)
+  const allocatedValid = pzRowsValid.reduce((s, r) => s + Number(r.qty || 0), 0)
+  const shortage = Math.max(0, Math.round((Number(sale.sale_qty || 0) - allocatedValid) * 1000) / 1000)
 
   return {
     ok: true,
     saleKey,
     saleQty: Number(sale.sale_qty || 0),
-    allocated: sim.allocated,
-    shortage: sim.shortage,
-    pzRows,
-    cutoffDate: cutoff
+    allocated: allocatedValid,
+    shortage,
+    pzRows: pzRowsValid,
+    cutoffDate: cutoff,
+    excludedFuturePzQty
   }
 }
 
@@ -338,7 +359,7 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const saleForAlloc = { ...sale, sale_date: cutoff }
-  const result = await allocateSale(client, saleForAlloc, base.lotState, base.productMap)
+  const result = await allocateSale(client, saleForAlloc, base.lotState, base.productMap, base.opMap)
 
   const { data: newAllocs, error: allocErr } = await client
     .from('fifo_allocations')
@@ -346,11 +367,39 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
     .eq('operation_id', operationId)
     .eq('product_id', productId)
   if (allocErr) throw allocErr
-  const enrichedPz = await enrichAllocationRows(client, (newAllocs || []).map(a => ({
+  const enrichedPzAll = await enrichAllocationRows(client, (newAllocs || []).map(a => ({
     source_lot_id: a.source_lot_id,
     product_id: a.product_id,
     qty: a.qty
   })))
+  const enrichedPz = enrichedPzAll.filter(r => {
+    const pzDate = String(r.pz_date || '').slice(0, 10)
+    return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
+  })
+  const excludedFuturePzQty = enrichedPzAll
+    .filter(r => {
+      const pzDate = String(r.pz_date || '').slice(0, 10)
+      return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
+    })
+    .reduce((s, r) => s + Number(r.qty || 0), 0)
+  if (excludedFuturePzQty > 0.0005) {
+    const badAllocIds = (newAllocs || []).filter((a, i) => {
+      const pzDate = String(enrichedPzAll[i]?.pz_date || '').slice(0, 10)
+      return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
+    }).map(a => a.id)
+    if (badAllocIds.length) {
+      restoreAllocationsToLots(
+        (newAllocs || []).filter(a => badAllocIds.includes(a.id)),
+        base.lotState
+      )
+      await deleteAllocations(client, badAllocIds)
+      for (const lot of base.lotState.values()) {
+        await persistLot(client, lot)
+      }
+    }
+  }
+  const allocatedValid = enrichedPz.reduce((s, r) => s + Number(r.qty || 0), 0)
+  const shortage = Math.max(0, Math.round((Number(sale.sale_qty || 0) - allocatedValid) * 1000) / 1000)
 
   await logFifoChange(client, {
     wz_no: sale.sale_doc_no,
@@ -360,10 +409,11 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
     change_type: logEntry.change_type || 'k03_fifo_allocated',
     before_data: beforeData,
     after_data: {
-      allocated_qty: result.allocated,
-      shortage: result.shortage,
+      allocated_qty: allocatedValid,
+      shortage,
       cutoff_date: cutoff,
-      allocation_count: result.allocationCount
+      allocation_count: enrichedPz.length,
+      excluded_future_pz_qty: excludedFuturePzQty
     },
     change_reason: logEntry.change_reason || 'Rozliczenie FIFO dla K03',
     changed_by: logEntry.changed_by || 'operator'
@@ -372,9 +422,12 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   return {
     ok: true,
     ...result,
+    allocated: allocatedValid,
+    shortage,
     pzRows: enrichedPz,
     cutoffDate: cutoff,
-    saleQty: Number(sale.sale_qty || 0)
+    saleQty: Number(sale.sale_qty || 0),
+    excludedFuturePzQty
   }
 }
 
@@ -426,7 +479,7 @@ async function logFifoChange(client, entry) {
 export async function recalculateFifoIncremental(client, options = {}) {
   const frozenKeys = options.frozenKeys || new Set()
   const base = await loadFifoBaseData(client)
-  const { sortedSales, allocationsBySaleKey, lotState, productMap } = base
+  const { sortedSales, allocationsBySaleKey, lotState, productMap, opMap } = base
 
   let processed = 0
   let skippedComplete = 0
@@ -457,7 +510,7 @@ export async function recalculateFifoIncremental(client, options = {}) {
       }
     }
 
-    const result = await allocateSale(client, sale, lotState, productMap)
+    const result = await allocateSale(client, sale, lotState, productMap, opMap)
     processed += 1
     allocationCount += result.allocationCount
 
@@ -532,7 +585,7 @@ export async function recalculateFifoFullProtected(client, options = {}) {
       continue
     }
 
-    const result = await allocateSale(client, sale, lotState, productMap)
+    const result = await allocateSale(client, sale, lotState, productMap, opMap)
     processed += 1
     allocationCount += result.allocationCount
 
