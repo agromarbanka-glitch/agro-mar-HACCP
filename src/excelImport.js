@@ -2,15 +2,16 @@ import * as XLSX from 'xlsx'
 
 const REQUIRED = {
   documentType: ['Rodzaj', 'Typ', 'Dokument'],
-  documentNo: ['Nr', 'Numer', 'Nr dokumentu'],
+  documentNo: ['Nr', 'Numer', 'Nr dokumentu', 'Nr faktury', 'Numer faktury', 'Nr Faktury'],
   issueDate: ['Data wystawienia', 'Data', 'Data dokumentu'],
   qty: ['Ilość.1', 'Ilość', 'Ilosc', 'Qty'],
-  productName: ['Produkt/usługa', 'Produkt', 'Towar', 'Nazwa produktu'],
+  productName: ['Produkt/usługa', 'Produkt', 'Towar', 'Nazwa produktu', 'Asortyment', 'Surowiec', 'Nazwa towaru', 'Materiał'],
   // Przy PZ/MM dostawcą NIE jest AGRO-MAR z kolumny „Odbiorca”.
   // Najpierw bierzemy faktycznego dostawcę z kolumn „Dostawca/Nadawca”,
   // a „Odbiorca” zostawiamy dla WZ/FV jako klienta/odbiorcę.
-  supplierName: ['Dostawca', 'Nadawca', 'Dane dostawcy', 'Nazwa dostawcy', 'Sprzedawca', 'Producent', 'Rolnik', 'Wystawca', 'Kontrahent'],
+  supplierName: ['Dostawca', 'Nadawca', 'Dane dostawcy', 'Nazwa dostawcy', 'Sprzedawca', 'Producent', 'Rolnik', 'Wystawca', 'Kontrahent', 'Dostawca / Odbiorca', 'Dostawca/Odbiorca'],
   receiverName: ['Odbiorca', 'Nabywca', 'Dane odbiorcy', 'Nazwa odbiorcy'],
+  nip: ['NIP', 'Nip', 'NIP kontrahenta', 'Nip dostawcy', 'Nip odbiorcy'],
   invoiceNo: ['Faktura', 'Nr faktury', 'Numer faktury'],
   notes: ['Uwagi', 'Opis']
 }
@@ -52,23 +53,24 @@ function isAgromarName(value) {
   return /agro[-\s]?mar|mariusz\s+bańka|mariusz\s+banka/i.test(String(value || ''))
 }
 
+function normalizeNip(value) {
+  const d = String(value || '').replace(/\D/g, '')
+  return d.length === 10 ? d : ''
+}
+
 function pickContractorForRow(row, documentType, documentNo) {
   const text = `${documentType || ''} ${documentNo || ''}`.toUpperCase()
   const supplier = String(pick(row, REQUIRED.supplierName) || '').trim()
   const receiver = String(pick(row, REQUIRED.receiverName) || '').trim()
 
-  // PZ/MM = przyjęcie, więc kontrahent w systemie to faktyczny dostawca.
-  // Jeśli w Excelu kolumna „Odbiorca” zawiera AGRO-MAR, nie używamy jej jako dostawcy.
+  // PZ/MM = przyjęcie → kontrahent to dostawca (kolumna Dostawca lub Dostawca/Odbiorca).
   if (text.includes('PZ') || text.includes('MM')) {
     if (supplier && !isAgromarName(supplier)) return supplier
-    // W PZ/MM kolumna Odbiorca bardzo często oznacza AGRO-MAR, czyli odbiorcę dostawy, a nie dostawcę.
-    // Nie wpisujemy AGRO-MAR jako dostawcy; jeśli faktycznego dostawcy nie ma w eksporcie, zostawiamy puste
-    // i można go uzupełnić w K01 przy konkretnym PZ.
     if (receiver && !isAgromarName(receiver)) return receiver
     return ''
   }
 
-  // WZ/FV/FS = rozchód, więc kontrahentem jest odbiorca/klient.
+  // WZ/FV/FS = rozchód → kontrahent to odbiorca/klient.
   if (receiver && !isAgromarName(receiver)) return receiver
   if (supplier && !isAgromarName(supplier)) return supplier
   return receiver || supplier || ''
@@ -92,11 +94,12 @@ export async function readAgromarExcel(file) {
         qty: parseQty(pick(row, REQUIRED.qty)),
         productName: String(pick(row, REQUIRED.productName)).trim(),
         contractorName: pickContractorForRow(row, documentType, documentNo),
+        nip: normalizeNip(pick(row, REQUIRED.nip)),
         invoiceNo: String(pick(row, REQUIRED.invoiceNo)).trim(),
         notes: String(pick(row, REQUIRED.notes)).trim(),
       }
     })
-    .filter(row => row.documentNo || row.productName || row.qty)
+    .filter(row => row.documentNo || row.productName || row.qty || row.contractorName)
 }
 
 export function classifyOperation(documentType, documentNo) {

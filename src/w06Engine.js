@@ -1,10 +1,11 @@
 /**
- * W06 – kwalifikowani dostawcy i odbiorcy (import PDF PZ/WZ, deduplikacja).
+ * W06 – kwalifikowani dostawcy i odbiorcy (import PDF/Excel PZ/WZ, deduplikacja).
  */
 import { extractPdfData, isReadablePdfText, rebuildTextFromItems } from './pdfImportEngine.js'
 import { isReadableName } from './k011InvoiceParser.js'
+import { readAgromarExcel } from './excelImport.js'
 
-export const W06_ENGINE_VERSION = '1.3'
+export const W06_ENGINE_VERSION = '1.4'
 export const AGRO_MAR_NIP = '7171839598'
 
 export const W06_PARTY_LABELS = {
@@ -426,6 +427,7 @@ export async function parseW06FromPdfFile(file) {
       text: '',
       kind: detectW06DocKind('', file.name),
       party: null,
+      parties: [],
       itemName: '',
       textLength: 0,
       unreadable: true,
@@ -434,6 +436,83 @@ export async function parseW06FromPdfFile(file) {
   }
   const parsed = parseW06PartiesFromPdfText(usableText, file.name)
   return { text: usableText, unreadable: false, pdfError: null, party: parsed.parties[0] || null, ...parsed }
+}
+
+function buildW06ExcelPreview(rows, parties) {
+  const head = `Wierszy w Excelu: ${rows.length}, unikalnych kontrahentów: ${parties.length}\n`
+  const sample = rows.slice(0, 12).map(r =>
+    `${r.documentType || '?'} ${r.documentNo || ''} | ${r.contractorName || '—'} | ${r.productName || '—'}`
+  ).join('\n')
+  return head + sample
+}
+
+/** Grupuje wiersze Excela (PZ/WZ) w unikalnych kontrahentów z asortymentem. */
+export function parseW06PartiesFromExcelRows(rows, fileName = '') {
+  const byKey = new Map()
+
+  for (const row of rows || []) {
+    const name = String(row.contractorName || '').trim()
+    if (!name || isAgromarParty(name)) continue
+
+    const docKind = detectW06DocKind(`${row.documentType || ''} ${row.documentNo || ''}`, fileName)
+    const partyType = docKind === 'WZ' ? 'recipient' : 'supplier'
+    const nip = normalizeNip(row.nip)
+    const dedupeKey = w06DedupeKey({ company_name: name, nip })
+    if (!dedupeKey) continue
+
+    const product = String(row.productName || '').trim()
+    const existing = byKey.get(dedupeKey)
+
+    if (existing) {
+      if (product && !existing._items.includes(product)) {
+        existing._items.push(product)
+        existing.item_name = existing._items.slice(0, 5).join('; ').slice(0, 160)
+      }
+      if (!existing.nip && nip) existing.nip = nip
+      continue
+    }
+
+    byKey.set(dedupeKey, {
+      party_type: partyType,
+      company_name: name.slice(0, 200),
+      supplier_name: name.slice(0, 200),
+      nip,
+      address: '',
+      item_name: product.slice(0, 160),
+      supplier_kind: partyType === 'recipient' ? 'recipient' : 'raw',
+      source_doc_kind: docKind === 'unknown' ? String(row.documentType || 'Excel').slice(0, 12) : docKind,
+      source_filename: fileName,
+      dedupe_key: dedupeKey,
+      _items: product ? [product] : []
+    })
+  }
+
+  const parties = [...byKey.values()].map(({ _items, ...party }) => party)
+  return {
+    kind: 'excel',
+    parties,
+    preview: buildW06ExcelPreview(rows, parties),
+    rowCount: (rows || []).length
+  }
+}
+
+export async function parseW06FromExcelFile(file) {
+  const rows = await readAgromarExcel(file)
+  const parsed = parseW06PartiesFromExcelRows(rows, file.name)
+  return {
+    text: parsed.preview,
+    unreadable: !parsed.parties.length,
+    parties: parsed.parties,
+    party: parsed.parties[0] || null,
+    rowCount: parsed.rowCount,
+    kind: parsed.kind
+  }
+}
+
+export function isW06ExcelFile(file) {
+  const name = String(file?.name || '').toLowerCase()
+  const type = String(file?.type || '').toLowerCase()
+  return /\.xlsx?$/.test(name) || type.includes('spreadsheet') || type.includes('excel')
 }
 
 export function existingW06DedupeKeys(docs) {

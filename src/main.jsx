@@ -14,8 +14,8 @@ import {
 } from './w03Engine'
 import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
-  parseW06FromPdfFile, filterNewW06Parties, w06PartyLabel, w06KindLabel, w06DedupeKey,
-  partyToW06NewRow
+  parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, w06PartyLabel, w06KindLabel, w06DedupeKey,
+  partyToW06NewRow, W06_PARTY_LABELS
 } from './w06Engine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
@@ -2646,7 +2646,7 @@ function App() {
     return { added: added.length, skipped: skipped.length }
   }
 
-  async function handleW06PdfFiles(e) {
+  async function handleW06ImportFiles(e) {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
     if (!supabase) {
@@ -2657,7 +2657,7 @@ function App() {
     setW06PdfImporting(true)
     setW06PdfPreview('')
     setW06PdfStagedParties([])
-    setMessage(`W06: odczytuję ${files.length} plik(ów) PDF…`)
+    setMessage(`W06: odczytuję ${files.length} plik(ów)…`)
     try {
       const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
       const parsedParties = []
@@ -2666,10 +2666,11 @@ function App() {
       const noParty = []
       for (const file of files) {
         try {
-          const result = await parseW06FromPdfFile(file)
+          const isExcel = isW06ExcelFile(file)
+          const result = isExcel ? await parseW06FromExcelFile(file) : await parseW06FromPdfFile(file)
           if (!previewText && result.text) previewText = String(result.text).slice(0, 2500)
           if (result.unreadable) {
-            unreadable.push(file.name + (result.pdfError ? ` (${result.pdfError})` : ''))
+            unreadable.push(`${file.name}${isExcel ? ' (brak kontrahentów w Excelu)' : ''}${result.pdfError ? ` (${result.pdfError})` : ''}`)
             continue
           }
           const fromFile = result.parties?.length ? result.parties : (result.party ? [result.party] : [])
@@ -2682,12 +2683,12 @@ function App() {
           unreadable.push(`${file.name} (${fileErr?.message || 'błąd odczytu'})`)
         }
       }
-      setW06PdfPreview(previewText || (unreadable.length ? 'Nie udało się odczytać tekstu z PDF – użyj pliku z tekstem (nie skan) lub dodaj kontrahenta ręcznie.' : ''))
+      setW06PdfPreview(previewText || (unreadable.length ? 'Nie udało się odczytać danych – sprawdź kolumny: Rodzaj, Dostawca/Odbiorca, Produkt/Towar.' : ''))
       if (!parsedParties.length) {
         if (unreadable.length) {
-          setMessage(`W06: PDF bez czytelnego tekstu (${unreadable.join(', ')}). Eksportuj dokument ponownie z programu (Subiekt/Comarch) lub dodaj ręcznie.`)
+          setMessage(`W06: brak kontrahentów (${unreadable.join(', ')}). Użyj Excela z kolumnami Dostawca i Towar lub dodaj ręcznie.`)
         } else if (noParty.length) {
-          setMessage(`W06: odczytano tekst, ale nie rozpoznano kontrahentów w: ${noParty.join('; ')}. Sprawdź podgląd poniżej i uzupełnij ręcznie.`)
+          setMessage(`W06: odczytano plik, ale nie rozpoznano kontrahentów w: ${noParty.join('; ')}. Sprawdź podgląd poniżej.`)
         } else {
           setMessage('W06: brak danych do dodania.')
         }
@@ -2707,15 +2708,15 @@ function App() {
         })
         let msg = `W06: dodano ${added} kontrahentów do wykazu`
         if (skipped) msg += `, pominięto ${skipped} duplikatów`
-        if (parsedParties.length > added) msg += `. Rozpoznano łącznie ${parsedParties.length} firm w PDF`
+        if (parsedParties.length > added) msg += `. Rozpoznano łącznie ${parsedParties.length} firm`
         setMessage(msg + '.')
       } else {
-        setMessage(`W06: rozpoznano ${parsedParties.length} firm w PDF – wszystkie są już na liście. Możesz je edytować poniżej lub kliknąć „Dodaj rozpoznane firmy".`)
+        setMessage(`W06: rozpoznano ${parsedParties.length} firm – wszystkie są już na liście. Możesz edytować poniżej lub kliknąć „Dodaj rozpoznane firmy".`)
       }
       if (unreadable.length) setMessage(prev => `${prev} Nieczytelne pliki: ${unreadable.length}.`)
       if (noParty.length) setMessage(prev => `${prev} Pliki bez kontrahenta: ${noParty.length}.`)
     } catch (err) {
-      setMessage(`W06: błąd importu PDF – ${err?.message || String(err)}`)
+      setMessage(`W06: błąd importu – ${err?.message || String(err)}`)
     } finally {
       setW06PdfImporting(false)
     }
@@ -2828,23 +2829,25 @@ function App() {
     const w06Docs = sortW06Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W06'))
     return <>
       <div className="card inner-card no-print">
-        <h3>Import PDF – PZ (dostawcy) i WZ (odbiorcy)</h3>
-        <p className="hint">Wgraj jeden lub wiele PDF (PZ, WZ, faktury). Program rozpozna typ dokumentu i doda <b>unikalnych</b> kontrahentów – bez duplikatów. Przy kolejnych plikach pomija firmy już na liście.</p>
-        <label className="full-width">Pliki PDF
-          <input key={w06PdfInputKey} type="file" accept="application/pdf,.pdf" multiple disabled={w06PdfImporting} onChange={handleW06PdfFiles} />
-          <span className="hint">PDF z tekstem (np. PZ/WZ z Subiekta, Comarch) – nie skan/zdjęcie.</span>
+        <h3>Import Excel / PDF – PZ (dostawcy) i WZ (odbiorcy)</h3>
+        <p className="hint">Wgraj <b>Excel</b> (zalecane – kolumny Dostawca/Odbiorca i Towar/Produkt) lub PDF. Program doda <b>unikalnych</b> kontrahentów z asortymentem – bez duplikatów.</p>
+        <label className="full-width">Pliki Excel (.xlsx) lub PDF
+          <input key={w06PdfInputKey} type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/pdf,.pdf" multiple disabled={w06PdfImporting} onChange={handleW06ImportFiles} />
+          <span className="hint">Excel: eksport rejestru PZ/WZ z Subiekta/Comarch (Rodzaj, Dostawca/Odbiorca, Produkt/Towar). PDF: dokumenty z tekstem.</span>
         </label>
-        {w06PdfImporting && <p className="hint">Trwa odczyt PDF…</p>}
+        {w06PdfImporting && <p className="hint">Trwa odczyt pliku…</p>}
         {w06PdfFileName && !w06PdfImporting && <p className="hint">Wybrany plik: <b>{w06PdfFileName}</b></p>}
         {w06PdfPreview && <details className="k011-pdf-preview" open>
-          <summary>Podgląd tekstu z ostatniego PDF</summary>
+          <summary>Podgląd odczytu (pierwsze wiersze)</summary>
           <pre className="pdf-text-preview">{w06PdfPreview}</pre>
         </details>}
         {w06PdfStagedParties.length > 0 && <div className="w06-staged no-print">
-          <p className="hint"><b>Rozpoznano z PDF ({w06PdfStagedParties.length}):</b></p>
+          <p className="hint"><b>Rozpoznano ({w06PdfStagedParties.length}):</b></p>
           <ul className="w06-staged-list">
             {w06PdfStagedParties.map((p, i) => <li key={i}>
-              {W06_PARTY_LABELS[p.party_type] || 'Dostawca'} – {p.company_name || p.supplier_name}{p.nip ? `, NIP ${p.nip}` : ''}
+              {W06_PARTY_LABELS[p.party_type] || 'Dostawca'} – {p.company_name || p.supplier_name}
+              {p.nip ? `, NIP ${p.nip}` : ''}
+              {p.item_name ? ` · towar: ${p.item_name}` : ''}
               <button type="button" className="mini secondary" onClick={() => { const row = partyToW06NewRow(p); if (row) setW06NewRow(row) }}>Wstaw do formularza</button>
             </li>)}
           </ul>
@@ -2870,7 +2873,7 @@ function App() {
             <th className="no-print w06-act">Akcje</th>
           </tr></thead>
           <tbody>
-            {w06Docs.length === 0 && <tr><td colSpan={8} className="hint">Brak wpisów – wgraj PDF PZ/WZ lub dodaj ręcznie poniżej.</td></tr>}
+            {w06Docs.length === 0 && <tr><td colSpan={8} className="hint">Brak wpisów – wgraj Excel/PDF PZ/WZ lub dodaj ręcznie poniżej.</td></tr>}
             {w06Docs.map((doc, i) => {
               const d = doc.data || {}
               return <tr key={doc.id}>
@@ -2930,7 +2933,7 @@ function App() {
           <label>Adres<input value={w06NewRow.address} onChange={e => setW06NewRow(prev => ({ ...prev, address: e.target.value }))} /></label>
           <label>Przykładowy towar<input value={w06NewRow.item_name} onChange={e => setW06NewRow(prev => ({ ...prev, item_name: e.target.value }))} /></label>
         </div>
-        <p className="hint">Po wgraniu PDF pola poniżej uzupełnią się pierwszą rozpoznaną firmą – możesz poprawić i kliknąć „Dodaj do wykazu", albo użyć przycisku „Dodaj rozpoznane firmy" powyżej.</p>
+        <p className="hint">Po wgraniu Excel/PDF pola poniżej uzupełnią się pierwszą rozpoznaną firmą – możesz poprawić i kliknąć „Dodaj do wykazu", albo użyć przycisku „Dodaj rozpoznane firmy" powyżej.</p>
         <div className="actions"><button onClick={addW06Row}>Dodaj do wykazu</button></div>
       </div>
     </>
