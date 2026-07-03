@@ -14,7 +14,7 @@ import {
 } from './w03Engine'
 import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
-  parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, w06PartyLabel, w06KindLabel, w06DedupeKey,
+  parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   partyToW06NewRow, W06_PARTY_LABELS
 } from './w06Engine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
@@ -2646,6 +2646,27 @@ function App() {
     return { added: added.length, skipped: skipped.length }
   }
 
+  async function deleteW06ImportBatch(fileName) {
+    if (!supabase || !fileName) return
+    const toDelete = (haccpDocs || []).filter(d => d.document_type === 'W06' && d.data?.source_filename === fileName)
+    if (!toDelete.length) {
+      setMessage(`W06: brak wpisów z pliku „${fileName}".`)
+      return
+    }
+    if (!window.confirm(`Czy na pewno usunąć ${toDelete.length} wpis(ów) dodanych z pliku:\n„${fileName}"?\n\nTej operacji nie można cofnąć.`)) return
+    try {
+      for (const doc of toDelete) {
+        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setW06PdfStagedParties(prev => prev.filter(p => p.source_filename !== fileName))
+      setMessage(`W06: usunięto ${toDelete.length} wpisów z importu „${fileName}".`)
+    } catch (err) {
+      setMessage(`W06: błąd usuwania importu – ${err?.message || String(err)}`)
+    }
+  }
+
   async function handleW06ImportFiles(e) {
     const files = Array.from(e.target.files || [])
     if (!files.length) return
@@ -2827,6 +2848,7 @@ function App() {
 
   function renderW06Section() {
     const w06Docs = sortW06Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W06'))
+    const w06ImportBatches = listW06ImportBatches(w06Docs)
     return <>
       <div className="card inner-card no-print">
         <h3>Import Excel / PDF – PZ (dostawcy) i WZ (odbiorcy)</h3>
@@ -2854,6 +2876,16 @@ function App() {
           <div className="actions">
             <button onClick={addW06StagedFromPdf}>Dodaj rozpoznane firmy do wykazu ({w06PdfStagedParties.length})</button>
           </div>
+        </div>}
+        {w06ImportBatches.length > 0 && <div className="w06-imports no-print">
+          <p className="hint"><b>Wgrane pliki ({w06ImportBatches.length}):</b></p>
+          <ul className="w06-staged-list">
+            {w06ImportBatches.map(b => <li key={b.name}>
+              <span>{b.name} – <b>{b.count}</b> wpis(ów) na liście</span>
+              <button type="button" className="mini danger" onClick={() => deleteW06ImportBatch(b.name)}>Usuń ten import</button>
+            </li>)}
+          </ul>
+          <p className="hint">Usunięcie importu kasuje z wykazu W06 wszystkie firmy dodane z danego pliku (po potwierdzeniu).</p>
         </div>}
       </div>
       <div className="actions no-print" style={{ marginBottom: 12 }}>

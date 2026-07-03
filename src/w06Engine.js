@@ -5,7 +5,7 @@ import { extractPdfData, isReadablePdfText, rebuildTextFromItems } from './pdfIm
 import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
 
-export const W06_ENGINE_VERSION = '1.4'
+export const W06_ENGINE_VERSION = '1.5'
 export const AGRO_MAR_NIP = '7171839598'
 
 export const W06_PARTY_LABELS = {
@@ -55,11 +55,12 @@ export function detectW06DocKind(text, fileName = '') {
   if (/\bPZ[\s./_-]|\bPZ\b|PRZYJ[EĘ]CIE|PRZYJECIE\s+ZEWN|PRZYJ[EĘ]CIE\s+MAGAZ|DOKUMENT\s+PZ/.test(flat) || fn.includes('PZ')) return 'PZ'
   if (/\bMM[\s./_-]|\bMM\b|PRZESUN[IĘ]CIE/.test(flat) || fn.includes('MM')) return 'PZ'
   if (/\bWZ[\s./_-]|\bWZ\b|WYDANIE|WYDANIE\s+ZEWN|WYDANIE\s+MAGAZ|DOKUMENT\s+WZ/.test(flat) || fn.includes('WZ')) return 'WZ'
+  if (/\bRR\b|FAKTURA\s*VAT\s*RR|RACHUNEK\s*RR|\bRR\//.test(flat) || fn.includes('RR')) return 'WZ'
   if (/\bFS\b|\bFV\b|FAKTURA/.test(flat)) {
     const t = String(text || '')
     if (/nabywca[\s\S]{0,400}?7171839598/i.test(t) || /7171839598[\s\S]{0,400}?nabywca/i.test(t)) return 'PZ'
     if (/sprzedawca[\s\S]{0,400}?7171839598/i.test(t) || /7171839598[\s\S]{0,400}?sprzedawca/i.test(t)) return 'WZ'
-    return 'PZ'
+    return 'WZ'
   }
   return 'unknown'
 }
@@ -496,8 +497,60 @@ export function parseW06PartiesFromExcelRows(rows, fileName = '') {
   }
 }
 
+function enrichContractorsByDocument(rows) {
+  const byDoc = new Map()
+  for (const row of rows || []) {
+    const key = String(row.documentNo || '').trim() || `_r${row.rowNo}`
+    if (!byDoc.has(key)) byDoc.set(key, [])
+    byDoc.get(key).push(row)
+  }
+
+  function findInGroup(group) {
+    for (const r of group) {
+      const c = String(r.contractorName || '').trim()
+      if (c && !isAgromarParty(c)) return c
+    }
+    for (const r of group) {
+      for (const val of Object.values(r)) {
+        const s = String(val ?? '').trim()
+        if (s.length < 4 || s.length > 160) continue
+        if (isAgromarParty(s)) continue
+        if (/^(pz|wz|mm|rr|fv|fs)[\/\s-]/i.test(s)) continue
+        if (/^\d+([,.]\d+)?$/.test(s.replace(/\s/g, ''))) continue
+        if (/^\d{4}-\d{2}-\d{2}|^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(s)) continue
+        if (/faktura\s*vat|vat\s*rr/i.test(s)) continue
+        if (/^(truskawka|malina|jabłko|jablko|gruszka|aronia|śliwka|wisnia|porzeczka|skrzynia|paleta|karton)$/i.test(s)) continue
+        if (/sp\.?\s*z\.?\s*o\.?|spółka|gospodarstwo|rolno|sadown|przedsiębior/i.test(s)) return s
+        if (/^[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]+(\s+[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]+){1,3}$/.test(s)) return s
+      }
+    }
+    return ''
+  }
+
+  for (const group of byDoc.values()) {
+    const contractor = findInGroup(group)
+    if (!contractor) continue
+    for (const r of group) {
+      if (!r.contractorName || isAgromarParty(r.contractorName)) r.contractorName = contractor
+    }
+  }
+  return rows
+}
+
+export function listW06ImportBatches(docs) {
+  const map = new Map()
+  for (const doc of docs || []) {
+    const fn = doc.data?.source_filename
+    if (!fn) continue
+    map.set(fn, (map.get(fn) || 0) + 1)
+  }
+  return [...map.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'pl'))
+    .map(([name, count]) => ({ name, count }))
+}
+
 export async function parseW06FromExcelFile(file) {
-  const rows = await readAgromarExcel(file)
+  const rows = enrichContractorsByDocument(await readAgromarExcel(file))
   const parsed = parseW06PartiesFromExcelRows(rows, file.name)
   return {
     text: parsed.preview,
