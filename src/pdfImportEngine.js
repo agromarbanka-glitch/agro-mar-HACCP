@@ -2,6 +2,7 @@
  * Import PDF → pola formularzy (K01.1, W04, W05)
  */
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import {
   parseK011InvoiceAdvanced,
   buildK011UpdatesFromAdvanced,
@@ -12,7 +13,7 @@ import {
 
 export { isReadableName, polishDateToIso }
 
-export const PDF_IMPORT_VERSION = '1.5'
+export const PDF_IMPORT_VERSION = '1.6'
 
 export const PDF_IMPORT_DOC_TYPES = {
   'K01.1': { label: 'faktura zakupowa', accept: '.pdf,application/pdf' },
@@ -23,14 +24,7 @@ export const PDF_IMPORT_DOC_TYPES = {
 const PDFJS_VER = '4.4.168'
 const AGRO_MAR_NIP = '7171839598'
 
-try {
-  GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-  ).href
-} catch {
-  /* brak workera w środowisku bundlera */
-}
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
 function normalizeText(s) {
   return String(s || '')
@@ -183,17 +177,18 @@ function decodeHexPdfString(hex) {
 /** Odrzuca surową strukturę PDF (%PDF-, endobj…) zamiast treści dokumentu. */
 export function isReadablePdfText(text) {
   const s = String(text || '').trim()
-  if (s.length < 12) return false
-  if (/%PDF-|endobj|\bobj\b|\/Creator\s*\(|\/Producer\s*\(|xref\s|startxref|stream\s|BT\s|ET\s/i.test(s)) return false
+  if (s.length < 8) return false
+  if (/%PDF-|endobj|\/Creator\s*\(|\/Producer\s*\(|startxref/i.test(s)) return false
+  if (/\d+\s+\d+\s+obj\b/.test(s)) return false
   const letters = (s.match(/[\p{L}]/gu) || []).length
-  if (letters < 8) return false
+  if (letters < 6) return false
   const words = s.split(/\s+/).filter(Boolean)
   const avgWordLen = words.reduce((a, w) => a + w.length, 0) / Math.max(words.length, 1)
   const singleCharWords = words.filter(w => w.length === 1).length
-  const hasDocHint = /\b(Sprzedawca|Nabywca|Odbiorca|Dostawca|Wystawca|NIP|PZ|WZ|Faktura|Przyj|Wydan|Magazyn|Kontrahent|AGRO)/i.test(s)
-  if (avgWordLen < 2.2 && singleCharWords > 3 && !hasDocHint) return false
+  const hasDocHint = /\b(Sprzedawca|Nabywca|Odbiorca|Dostawca|Wystawca|NIP|PZ|WZ|Faktura|Przyj|Wydan|Magazyn|Kontrahent|AGRO|Lp\.|Towar|Produkt)/i.test(s)
+  if (avgWordLen < 2.0 && singleCharWords > 4 && !hasDocHint) return false
   const weird = (s.match(/[^0-9a-zA-Z\sąćęłńóśźżĄĆĘŁŃÓŚŹŻ.,\-()/:%°@#&+]/gu) || []).length
-  return weird / s.length < 0.35
+  return weird / s.length < 0.4
 }
 
 function decodePdfStreamFallback(buffer) {
@@ -224,10 +219,10 @@ function decodePdfStreamFallback(buffer) {
   return isReadablePdfText(joined) ? joined : ''
 }
 
-async function loadPdfDocument(buffer, withCmap = true, disableWorker = false) {
+async function loadPdfDocument(buffer, withCmap = true) {
   const opts = {
     data: buffer,
-    disableWorker,
+    disableWorker: true,
     useWorkerFetch: false,
     isEvalSupported: false
   }
@@ -249,7 +244,10 @@ export function rebuildTextFromItems(itemsByPage) {
 
 function chooseReadableText(...candidates) {
   const readable = candidates.map(c => String(c || '').trim()).filter(isReadablePdfText)
-  if (!readable.length) return ''
+  if (!readable.length) {
+    const soft = candidates.map(c => String(c || '').trim()).filter(s => s.length >= 8 && !/%PDF-|endobj/i.test(s))
+    return soft.sort((a, b) => b.length - a.length)[0] || ''
+  }
   return readable.sort((a, b) => b.length - a.length)[0]
 }
 
@@ -258,31 +256,29 @@ export async function extractPdfData(file) {
   const streamText = decodePdfStreamFallback(buffer)
   let itemsByPage = []
   let pdfText = ''
+  let lastError = null
 
   for (const withCmap of [true, false]) {
-    for (const disableWorker of [false, true]) {
-      try {
-        const pdf = await loadPdfDocument(buffer, withCmap, disableWorker)
-        const parts = []
-        itemsByPage = []
-        for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
-          const page = await pdf.getPage(pageNo)
-          const content = await page.getTextContent()
-          itemsByPage.push(content.items || [])
-          parts.push(mergeTextItems(content.items))
-        }
-        pdfText = parts.join('\n\n').trim()
-        if (isReadablePdfText(pdfText)) break
-      } catch {
-        /* próba z/bez workera i cMap */
+    try {
+      const pdf = await loadPdfDocument(buffer, withCmap)
+      const parts = []
+      itemsByPage = []
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        const page = await pdf.getPage(pageNo)
+        const content = await page.getTextContent()
+        itemsByPage.push(content.items || [])
+        parts.push(mergeTextItems(content.items))
       }
+      pdfText = parts.join('\n\n').trim()
+      if (pdfText.length >= 8) break
+    } catch (err) {
+      lastError = err
     }
-    if (isReadablePdfText(pdfText)) break
   }
 
   const fromItems = rebuildTextFromItems(itemsByPage)
   const text = chooseReadableText(pdfText, fromItems, pickBestInvoiceText(pdfText, streamText), streamText)
-  return { text, itemsByPage }
+  return { text, itemsByPage, error: text ? null : lastError?.message || null }
 }
 
 export async function extractPdfText(file) {

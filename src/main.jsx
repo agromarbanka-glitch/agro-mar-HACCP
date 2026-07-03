@@ -319,6 +319,7 @@ function App() {
   const [w06PdfImporting, setW06PdfImporting] = useState(false)
   const [w06PdfPreview, setW06PdfPreview] = useState('')
   const [w06PdfInputKey, setW06PdfInputKey] = useState(0)
+  const [w06PdfFileName, setW06PdfFileName] = useState('')
   const [w06NewRow, setW06NewRow] = useState({
     party_type: 'supplier',
     supplier_kind: 'raw',
@@ -2634,7 +2635,12 @@ function App() {
 
   async function handleW06PdfFiles(e) {
     const files = Array.from(e.target.files || [])
-    if (!files.length || !supabase) return
+    if (!files.length) return
+    if (!supabase) {
+      setMessage('W06: brak połączenia z bazą – odśwież stronę i zaloguj się ponownie.')
+      return
+    }
+    setW06PdfFileName(files.map(f => f.name).join(', '))
     setW06PdfImporting(true)
     setW06PdfPreview('')
     setMessage(`W06: odczytuję ${files.length} plik(ów) PDF…`)
@@ -2645,16 +2651,20 @@ function App() {
       const unreadable = []
       const noParty = []
       for (const file of files) {
-        const result = await parseW06FromPdfFile(file)
-        if (!previewText && result.text) previewText = String(result.text).slice(0, 2500)
-        if (result.unreadable) {
-          unreadable.push(file.name)
-          continue
-        }
-        if (result.party?.dedupe_key || result.party?.company_name) {
-          parsedParties.push(result.party)
-        } else {
-          noParty.push(`${file.name} (${result.kind || '?'})`)
+        try {
+          const result = await parseW06FromPdfFile(file)
+          if (!previewText && result.text) previewText = String(result.text).slice(0, 2500)
+          if (result.unreadable) {
+            unreadable.push(file.name + (result.pdfError ? ` (${result.pdfError})` : ''))
+            continue
+          }
+          if (result.party?.dedupe_key || result.party?.company_name) {
+            parsedParties.push(result.party)
+          } else {
+            noParty.push(`${file.name} (${result.kind || '?'})`)
+          }
+        } catch (fileErr) {
+          unreadable.push(`${file.name} (${fileErr?.message || 'błąd odczytu'})`)
         }
       }
       setW06PdfPreview(previewText || (unreadable.length ? 'Nie udało się odczytać tekstu z PDF – użyj pliku z tekstem (nie skan) lub dodaj kontrahenta ręcznie.' : ''))
@@ -2662,7 +2672,7 @@ function App() {
         if (unreadable.length) {
           setMessage(`W06: PDF bez czytelnego tekstu (${unreadable.join(', ')}). Eksportuj dokument ponownie z programu (Subiekt/Comarch) lub dodaj ręcznie.`)
         } else if (noParty.length) {
-          setMessage(`W06: odczytano tekst, ale nie rozpoznano kontrahenta w: ${noParty.join('; ')}. Uzupełnij ręcznie poniżej.`)
+          setMessage(`W06: odczytano tekst, ale nie rozpoznano kontrahenta w: ${noParty.join('; ')}. Sprawdź podgląd poniżej i uzupełnij ręcznie.`)
         } else {
           setMessage('W06: brak danych do dodania.')
         }
@@ -2670,6 +2680,11 @@ function App() {
         return
       }
       const { added, skipped } = filterNewW06Parties(existing, parsedParties)
+      if (!added.length) {
+        setMessage(`W06: rozpoznano ${parsedParties.length} kontrahent(ów), ale wszyscy są już na liście (duplikaty).`)
+        setW06PdfInputKey(k => k + 1)
+        return
+      }
       for (const party of added) {
         const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(party))
         if (error) throw error
@@ -2780,9 +2795,11 @@ function App() {
         <p className="hint">Wgraj jeden lub wiele PDF (PZ, WZ, faktury). Program rozpozna typ dokumentu i doda <b>unikalnych</b> kontrahentów – bez duplikatów. Przy kolejnych plikach pomija firmy już na liście.</p>
         <label className="full-width">Pliki PDF
           <input key={w06PdfInputKey} type="file" accept="application/pdf,.pdf" multiple disabled={w06PdfImporting} onChange={handleW06PdfFiles} />
+          <span className="hint">PDF z tekstem (np. PZ/WZ z Subiekta, Comarch) – nie skan/zdjęcie.</span>
         </label>
         {w06PdfImporting && <p className="hint">Trwa odczyt PDF…</p>}
-        {w06PdfPreview && <details className="k011-pdf-preview">
+        {w06PdfFileName && !w06PdfImporting && <p className="hint">Wybrany plik: <b>{w06PdfFileName}</b></p>}
+        {w06PdfPreview && <details className="k011-pdf-preview" open>
           <summary>Podgląd tekstu z ostatniego PDF</summary>
           <pre className="pdf-text-preview">{w06PdfPreview}</pre>
         </details>}
