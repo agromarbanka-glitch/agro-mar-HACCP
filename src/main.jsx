@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, wzStatusLabel, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import * as XLSX from 'xlsx'
@@ -23,6 +23,17 @@ const DOCS_HUB_SECTIONS = [
   ['protokoly', 'Protokoły', 'PR01–PR08'],
   ['specyfikacje', 'Specyfikacje', 'S01–S09']
 ]
+
+const DOCS_FILTERS_STORAGE_KEY = 'agro-mar-docs-filters-v1'
+
+const WORKFLOW_PILL_LABELS = {
+  do_zatwierdzenia: 'Do zatwierdzenia',
+  nieprzerobione: 'Nieprzerobione',
+  przerobione: 'Po przerobie',
+  bez_przerobu: 'Bez przerobu',
+  czesciowo: 'Częściowo',
+  zamrozone: 'Zamrożony'
+}
 
 const DOCS = [
   ['Karty kontrolne', 'K01-K06', 'Przyjęcia, temperatury, identyfikacja partii, jakość'],
@@ -272,6 +283,8 @@ function App() {
   const [pzSearch, setPzSearch] = useState('')
   const [pzStatusFilter, setPzStatusFilter] = useState('all')
   const [fifoKartotekiDirty, setFifoKartotekiDirty] = useState(false)
+  const docsFiltersHydrated = useRef(false)
+  const docsFiltersSkipSave = useRef(true)
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -445,16 +458,99 @@ function App() {
     return tag === docsWorkflowFilter
   }
 
+  function workflowPillClass(tag) {
+    const map = {
+      do_zatwierdzenia: 'wf-pill wf-approval',
+      nieprzerobione: 'wf-pill wf-pending',
+      przerobione: 'wf-pill wf-done',
+      bez_przerobu: 'wf-pill wf-bypass',
+      czesciowo: 'wf-pill wf-partial',
+      zamrozone: 'wf-pill wf-frozen'
+    }
+    return map[tag] || 'wf-pill'
+  }
+
+  function workflowPillLabel(tag) {
+    return WORKFLOW_PILL_LABELS[tag] || tag
+  }
+
+  function getDocsFilterSnapshot() {
+    return {
+      docsDateFrom,
+      docsDateTo,
+      docsWorkflowFilter,
+      haccpSearch,
+      haccpStatusFilter,
+      k03AssortmentFilter
+    }
+  }
+
+  function applyDocsFilterSnapshot(snap = {}) {
+    setDocsDateFrom(snap.docsDateFrom || '')
+    setDocsDateTo(snap.docsDateTo || '')
+    setDocsWorkflowFilter(snap.docsWorkflowFilter || 'all')
+    setHaccpSearch(snap.haccpSearch || '')
+    setHaccpStatusFilter(snap.haccpStatusFilter || 'all')
+    setK03AssortmentFilter(snap.k03AssortmentFilter || 'all')
+  }
+
+  function persistDocsFilters(code, snap) {
+    try {
+      const all = JSON.parse(localStorage.getItem(DOCS_FILTERS_STORAGE_KEY) || '{}')
+      all[code] = snap
+      localStorage.setItem(DOCS_FILTERS_STORAGE_KEY, JSON.stringify(all))
+    } catch { /* ignore quota / private mode */ }
+  }
+
   function selectKartoteka(code) {
+    if (code !== docsFilter) {
+      persistDocsFilters(docsFilter, getDocsFilterSnapshot())
+      try {
+        const all = JSON.parse(localStorage.getItem(DOCS_FILTERS_STORAGE_KEY) || '{}')
+        applyDocsFilterSnapshot(all[code] || {})
+      } catch {
+        applyDocsFilterSnapshot({})
+      }
+    }
     setDocsFilter(code)
     setDocsHubSection('kartoteki')
     setDocsFlyoutOpen(false)
-    setDocsWorkflowFilter('all')
     if (code === 'K03') loadK03TraceData()
     if (MANUAL_HACCP_FORMS[code]) resetManualHaccpForm(code)
   }
 
-  function renderDocsSidebar() {
+  function renderDocsDateFilters() {
+    return <>
+      <label>Od<input type="date" value={docsDateFrom} onChange={e => setDocsDateFrom(e.target.value)} /></label>
+      <label>Do<input type="date" value={docsDateTo} onChange={e => setDocsDateTo(e.target.value)} /></label>
+      {(docsDateFrom || docsDateTo) && (
+        <button type="button" className="mini secondary docs-clear-dates" onClick={() => { setDocsDateFrom(''); setDocsDateTo('') }}>Pokaż wszystko</button>
+      )}
+      {!docsDateFrom && !docsDateTo && <p className="hint sidebar-hint">Domyślnie widoczne są wszystkie daty.</p>}
+    </>
+  }
+
+  function renderDocsHubPlaceholderSidebar(sectionKey) {
+    const label = DOCS_HUB_SECTIONS.find(s => s[0] === sectionKey)?.[1] || sectionKey
+    const desc = DOCS_HUB_SECTIONS.find(s => s[0] === sectionKey)?.[2] || ''
+    return <aside className="docs-sidebar">
+      <div className="docs-sidebar-head">
+        <span className="docs-sidebar-k">{label}</span>
+        <small>{desc}</small>
+      </div>
+      <div className="docs-sidebar-block">
+        <h4>Zakres dat</h4>
+        {renderDocsDateFilters()}
+      </div>
+      <div className="docs-sidebar-block">
+        <h4>Szukaj</h4>
+        <label>Szukaj<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="numer, nazwa…" /></label>
+      </div>
+      <p className="hint sidebar-hint">Po dodaniu dokumentów filtry będą działać tak samo jak w kartotekach.</p>
+    </aside>
+  }
+
+  function renderDocsSidebar(filterStats = {}) {
     const isK03 = docsFilter === 'K03'
     const workflowOptions = isK03
       ? [
@@ -480,12 +576,7 @@ function App() {
 
       <div className="docs-sidebar-block">
         <h4>Zakres dat</h4>
-        <label>Od<input type="date" value={docsDateFrom} onChange={e => setDocsDateFrom(e.target.value)} /></label>
-        <label>Do<input type="date" value={docsDateTo} onChange={e => setDocsDateTo(e.target.value)} /></label>
-        {(docsDateFrom || docsDateTo) && (
-          <button type="button" className="mini secondary docs-clear-dates" onClick={() => { setDocsDateFrom(''); setDocsDateTo('') }}>Pokaż wszystko</button>
-        )}
-        {!docsDateFrom && !docsDateTo && <p className="hint sidebar-hint">Domyślnie widoczne są wszystkie daty.</p>}
+        {renderDocsDateFilters()}
       </div>
 
       <div className="docs-sidebar-block">
@@ -525,10 +616,23 @@ function App() {
         </label>
       </div>
 
+      <div className="docs-sidebar-counter">
+        <span className="docs-counter-main"><strong>{filterStats.filteredDocs ?? 0}</strong> z <strong>{filterStats.totalDocs ?? haccpCount(docsFilter)}</strong></span>
+        <span className="docs-counter-label">wpisów kartoteki</span>
+        {filterStats.filtersActive && <span className="docs-counter-badge">Filtry aktywne</span>}
+      </div>
+
+      {isK03 && (
+        <div className="docs-sidebar-counter docs-sidebar-counter-secondary">
+          <span className="docs-counter-main"><strong>{filterStats.filteredWz ?? 0}</strong> z <strong>{filterStats.totalWz ?? 0}</strong></span>
+          <span className="docs-counter-label">pozycji WZ</span>
+        </div>
+      )}
+
       <div className="docs-sidebar-stats">
-        <span><b>{haccpCount(docsFilter)}</b> wpisów</span>
-        <span><b>{haccpNonconformityCount(docsFilter)}</b> N</span>
+        <span><b>{haccpNonconformityCount(docsFilter)}</b> N łącznie</span>
         <span><b>{haccpPendingCount(docsFilter)}</b> bez podpisu</span>
+        <span><b>{filterStats.filteredGroups ?? 0}</b> kartotek w tabeli</span>
       </div>
     </aside>
   }
@@ -1040,6 +1144,22 @@ function App() {
       }
     })
   }, [haccpListDocs])
+
+  const docsFilterStats = useMemo(() => {
+    const filtersActive = Boolean(
+      docsDateFrom || docsDateTo || docsWorkflowFilter !== 'all' ||
+      haccpSearch.trim() || haccpStatusFilter !== 'all' ||
+      (docsFilter === 'K03' && k03AssortmentFilter !== 'all')
+    )
+    return {
+      filteredDocs: haccpDocsForFilter.length,
+      totalDocs: haccpCount(docsFilter),
+      filteredGroups: haccpMonthlyGroups.length,
+      filteredWz: filteredWzQueueLines.length,
+      totalWz: wzQueueLines.length,
+      filtersActive
+    }
+  }, [haccpDocsForFilter, haccpMonthlyGroups, filteredWzQueueLines, wzQueueLines, docsFilter, docsDateFrom, docsDateTo, docsWorkflowFilter, haccpSearch, haccpStatusFilter, k03AssortmentFilter, syntheticK03Docs, syntheticK04Docs, syntheticK07Docs, mergedK06Docs, haccpDocs])
 
   function buildK01MonthlyGroupForPeriod(period) {
     const docs = haccpDocs
@@ -2397,6 +2517,23 @@ function App() {
       </div>
     </div>
   }
+
+  useEffect(() => {
+    try {
+      const all = JSON.parse(localStorage.getItem(DOCS_FILTERS_STORAGE_KEY) || '{}')
+      applyDocsFilterSnapshot(all[docsFilter] || {})
+    } catch {
+      applyDocsFilterSnapshot({})
+    }
+    docsFiltersHydrated.current = true
+    const t = setTimeout(() => { docsFiltersSkipSave.current = false }, 0)
+    return () => clearTimeout(t)
+  }, [])
+
+  useEffect(() => {
+    if (!docsFiltersHydrated.current || docsFiltersSkipSave.current) return
+    persistDocsFilters(docsFilter, getDocsFilterSnapshot())
+  }, [docsDateFrom, docsDateTo, docsWorkflowFilter, haccpSearch, haccpStatusFilter, k03AssortmentFilter])
 
   useEffect(() => {
     if (activeTab === 'kartoteki' && docsFilter === 'K03') {
@@ -4116,23 +4253,32 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </nav>
 
       {docsHubSection !== 'kartoteki' && (
-        <section className="card docs-placeholder">
-          <h3>{DOCS_HUB_SECTIONS.find(s => s[0] === docsHubSection)?.[1]}</h3>
-          <p className="hint">Sekcja w przygotowaniu – dokumenty z tej kategorii będą dodawane w kolejnych etapach.</p>
-          <div className="doc-progress">{DOCS.filter((_, i) => {
-            if (docsHubSection === 'wykazy') return i === 4
-            if (docsHubSection === 'formularze') return i === 2
-            if (docsHubSection === 'protokoly') return i === 3
-            if (docsHubSection === 'specyfikacje') return i === 7
-            return false
-          }).map(d => <span key={d[0]} className="pill">{d[1]}</span>)}</div>
-        </section>
+        <div className="docs-layout">
+          {renderDocsHubPlaceholderSidebar(docsHubSection)}
+          <div className="docs-main">
+            <section className="card docs-placeholder docs-panel">
+              <div className="docs-main-head">
+                <div>
+                  <h3>{DOCS_HUB_SECTIONS.find(s => s[0] === docsHubSection)?.[1]}</h3>
+                  <p className="hint">Sekcja w przygotowaniu – dokumenty z tej kategorii będą dodawane w kolejnych etapach.</p>
+                </div>
+              </div>
+              <div className="doc-progress">{DOCS.filter((_, i) => {
+                if (docsHubSection === 'wykazy') return i === 4
+                if (docsHubSection === 'formularze') return i === 2
+                if (docsHubSection === 'protokoly') return i === 3
+                if (docsHubSection === 'specyfikacje') return i === 7
+                return false
+              }).map(d => <span key={d[0]} className="pill">{d[1]}</span>)}</div>
+            </section>
+          </div>
+        </div>
       )}
 
       {docsHubSection === 'kartoteki' && <>
       {renderK03UnfreezeBanner()}
       <div className="docs-layout">
-        {renderDocsSidebar()}
+        {renderDocsSidebar(docsFilterStats)}
         <div className="docs-main">
       <section className="card docs-panel" id="kartoteki-haccp">
         <div className="docs-main-head">
@@ -4162,7 +4308,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                   <td>{line.wz_date || '-'}</td>
                   <td>{line.document_no || '-'}</td>
                   <td>{Number(line.qty || 0).toLocaleString('pl-PL')} kg</td>
-                  <td><span className={line.status === 'frozen' ? 'status ok' : 'pill'}>{wzStatusLabel(line.status)}</span></td>
+                  <td><span className={workflowPillClass(k03LineWorkflowTag(line))}>{workflowPillLabel(k03LineWorkflowTag(line))}</span></td>
                   <td className="row-actions">
                     {canDecide && <>
                       <button className="mini" onClick={() => openK03WzModal(line, 'przerob')}>Przerób</button>
@@ -4199,6 +4345,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 const saleQty = Number(doc.qty || 0)
                 const pzQty = Number(doc.data?.rawTotal || 0)
                 const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
+                const wfTag = k03DocWorkflowTag(doc)
                 return <tr key={g.key} className={doc.frozen ? 'row-frozen' : ''}>
                   <td>{doc.document_date || '-'}</td>
                   <td><b>{doc.document_no || '-'}</b></td>
@@ -4206,7 +4353,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                   <td>{doc.product_name || g.product}</td>
                   <td>{saleQty.toLocaleString('pl-PL')}</td>
                   <td>{pzQty.toLocaleString('pl-PL')}</td>
-                  <td>{doc.frozen ? <span className="status ok">Zamrożony</span> : <span className="pill">Roboczy</span>}</td>
+                  <td><span className={workflowPillClass(wfTag)}>{workflowPillLabel(wfTag)}</span></td>
                   <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : '!'}</span></td>
                   <td>
                     <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => setK03GroupEmployee(doc, e.target.value)}>
