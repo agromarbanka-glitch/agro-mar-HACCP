@@ -12,7 +12,7 @@ import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
 import { getHaccpDocForm, buildHubDocGroups, hubPeriodLabel, buildDocumentHtml } from './haccpDocRegistry'
-import { importPdfForDocType, PDF_IMPORT_VERSION, PDF_IMPORT_DOC_TYPES } from './pdfImportEngine'
+import { importPdfForDocType, PDF_IMPORT_VERSION, PDF_IMPORT_DOC_TYPES, isReadableName } from './pdfImportEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -2492,8 +2492,8 @@ function App() {
     const delivery_date = String(form.delivery_date || '').trim()
     let item_name = String(form.item_name || '').trim()
     let supplier_invoice = String(form.supplier_invoice || '').trim()
-    if (!item_name && lineItems[0]?.name) item_name = lineItems[0].name
-    if (!item_name && pdfName) item_name = pdfName.replace(/\.pdf$/i, '').slice(0, 120)
+    if (!isReadableName(item_name) && lineItems[0]?.name) item_name = lineItems[0].name
+    if (!isReadableName(item_name)) item_name = ''
     if (!supplier_invoice && pdfName) supplier_invoice = pdfName.replace(/\.pdf$/i, '').slice(0, 120)
     return { ...form, delivery_date, item_name, supplier_invoice }
   }
@@ -2554,14 +2554,19 @@ function App() {
       setMessage('K01.1: brak wielu pozycji z PDF – użyj zwykłego zapisu.')
       return
     }
-    const norm = normalizeAuxFormForSave(auxForm, auxPdfName, k011PdfLineItems)
+    const validItems = k011PdfLineItems.filter(it => isReadableName(it.name))
+    if (!validItems.length) {
+      setMessage('K01.1: PDF nie rozpoznał nazw towarów – uzupełnij ręcznie lub sprawdź podgląd tekstu.')
+      return
+    }
+    const norm = normalizeAuxFormForSave(auxForm, auxPdfName, validItems)
     if (!norm.delivery_date) {
       setMessage('K01.1: podaj datę dostawy przed zapisem pozycji z faktury.')
       return
     }
     const supplierBase = norm.supplier_invoice || auxPdfName?.replace(/\.pdf$/i, '') || 'PDF'
     try {
-      for (const item of k011PdfLineItems) {
+      for (const item of validItems) {
         const { error } = await supabase.from('haccp_aux_materials').insert({
           delivery_date: norm.delivery_date,
           item_name: item.name,
@@ -2576,7 +2581,7 @@ function App() {
         })
         if (error) throw error
       }
-      setMessage(`K01.1: zapisano ${k011PdfLineItems.length} pozycji z faktury PDF.`)
+      setMessage(`K01.1: zapisano ${validItems.length} pozycji z faktury PDF.`)
       resetAuxForm()
       await loadAuxMaterials()
     } catch (err) {
@@ -2598,6 +2603,7 @@ function App() {
     })
     setAuxPdfName(row.source_filename || '')
     setAuxPdfPreview('')
+    setK011PdfLineItems([])
     setAuxPdfInputKey(k => k + 1)
   }
 
@@ -2630,18 +2636,21 @@ function App() {
     try {
       const { text, parsed, updates, lineItems } = await importPdfForDocType('K01.1', file)
       setAuxPdfPreview(String(text || '').trim().slice(0, 3000))
-      const items = lineItems?.length ? lineItems : (parsed.itemName ? [{ name: parsed.itemName, qty: parsed.qty }] : [])
+      const rawItems = lineItems?.length ? lineItems : (parsed.itemName ? [{ name: parsed.itemName, qty: parsed.qty }] : [])
+      const items = rawItems.filter(it => isReadableName(it.name))
       setK011PdfLineItems(items)
       setAuxForm(prev => ({ ...prev, ...updates, notes: prev.notes || `PDF: ${file.name}` }))
       const filled = Object.keys(updates).length
-      if (filled >= 1 && items.length > 1) {
-        setMessage(`K01.1: odczytano ${filled} pól i ${items.length} pozycji. Sprawdź formularz lub „Zapisz wszystkie pozycje z faktury".`)
-      } else if (filled >= 1) {
-        setMessage(`K01.1: odczytano ${filled} pól – popraw i kliknij „Dodaj do kartoteki".`)
+      if (items.length > 1) {
+        setMessage(`K01.1: rozpoznano ${items.length} pozycje (np. ${items[0].name}). Sprawdź datę i dostawcę, potem „Zapisz wszystkie pozycje z faktury".`)
+      } else if (filled >= 1 && items.length === 1) {
+        setMessage(`K01.1: odczytano ${filled} pól – sprawdź formularz i kliknij „Dodaj do kartoteki".`)
       } else if (parsed.textLength < 40) {
         setMessage('K01.1: skan PDF bez tekstu – wpisz dane ręcznie.')
+      } else if (items.length === 0) {
+        setMessage('K01.1: tekst z PDF jest, ale nazwy towarów nieczytelne – uzupełnij ręcznie (podgląd poniżej).')
       } else {
-        setMessage('K01.1: tekst jest, układ nietypowy – uzupełnij pola ręcznie (podgląd poniżej).')
+        setMessage('K01.1: częściowy odczyt – uzupełnij brakujące pola ręcznie.')
       }
     } catch (err) {
       setAuxPdfPreview('')
@@ -2797,16 +2806,24 @@ function App() {
             <summary>Podgląd tekstu odczytanego z PDF (pierwsze ~2500 znaków)</summary>
             <pre className="pdf-text-preview">{auxPdfPreview}</pre>
           </details>}
-          <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e=>setAuxForm({...auxForm, delivery_date:e.target.value})} /></label>
-          <label>Nazwa towaru / przeznaczenie<input value={auxForm.item_name} onChange={e=>setAuxForm({...auxForm, item_name:e.target.value})} placeholder="np. kartony, worki, etykiety" /></label>
-          <label>Dostawca / nr faktury<input value={auxForm.supplier_invoice} onChange={e=>setAuxForm({...auxForm, supplier_invoice:e.target.value})} placeholder="np. Firma X / FV/123/2026" /></label>
-          <label>Stan higieniczny pojazdu<select value={auxForm.vehicle_hygiene} onChange={e=>setAuxForm({...auxForm, vehicle_hygiene:e.target.value})}><option value="P">P</option><option value="N">N</option></select></label>
-          <label>Ilość<input value={auxForm.qty} onChange={e=>setAuxForm({...auxForm, qty:e.target.value})} placeholder="np. 500 szt." /></label>
-          <label>Nadany numer partii<input value={auxForm.lot_no} onChange={e=>setAuxForm({...auxForm, lot_no:e.target.value})} placeholder="jeśli dotyczy" /></label>
-          <label>Podpis przyjmującego<select value={auxForm.signed_by} onChange={e=>setAuxForm({...auxForm, signed_by:e.target.value})}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></label>
-          <label>Uwagi<input value={auxForm.notes} onChange={e=>setAuxForm({...auxForm, notes:e.target.value})} /></label>
+          {k011PdfLineItems.length > 1 && <div className="k011-pdf-lines">
+            <p className="hint"><b>Rozpoznane pozycje z faktury ({k011PdfLineItems.length}):</b></p>
+            <ul>{k011PdfLineItems.map((it, i) => <li key={i}>{it.name}{it.qty ? ` – ${it.qty}` : ''}</li>)}</ul>
+          </div>}
+          <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e => setAuxForm(prev => ({ ...prev, delivery_date: e.target.value }))} /></label>
+          <label>Nazwa towaru / przeznaczenie<input value={auxForm.item_name} onChange={e => setAuxForm(prev => ({ ...prev, item_name: e.target.value }))} placeholder="np. kartony, worki, etykiety" /></label>
+          <label>Dostawca / nr faktury<input value={auxForm.supplier_invoice} onChange={e => setAuxForm(prev => ({ ...prev, supplier_invoice: e.target.value }))} placeholder="np. Firma X / FV/123/2026" /></label>
+          <label>Stan higieniczny pojazdu<select value={auxForm.vehicle_hygiene} onChange={e => setAuxForm(prev => ({ ...prev, vehicle_hygiene: e.target.value }))}><option value="P">P</option><option value="N">N</option></select></label>
+          <label>Ilość<input value={auxForm.qty} onChange={e => setAuxForm(prev => ({ ...prev, qty: e.target.value }))} placeholder="np. 500 szt." /></label>
+          <label>Nadany numer partii<input value={auxForm.lot_no} onChange={e => setAuxForm(prev => ({ ...prev, lot_no: e.target.value }))} placeholder="jeśli dotyczy" /></label>
+          <label>Podpis przyjmującego<select value={auxForm.signed_by} onChange={e => setAuxForm(prev => ({ ...prev, signed_by: e.target.value }))}><option value="">Wybierz pracownika</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></label>
+          <label>Uwagi<input value={auxForm.notes} onChange={e => setAuxForm(prev => ({ ...prev, notes: e.target.value }))} /></label>
         </div>
-        <div className="actions"><button onClick={saveAuxMaterial}>{auxForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button><button className="secondary" onClick={resetAuxForm}>Wyczyść</button></div>
+        <div className="actions">
+          <button onClick={saveAuxMaterial}>{auxForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button>
+          {!auxForm.id && k011PdfLineItems.length > 1 && <button type="button" className="secondary" onClick={saveAuxMaterialsBatchFromPdf}>Zapisz wszystkie pozycje z faktury ({k011PdfLineItems.length})</button>}
+          <button type="button" className="secondary" onClick={resetAuxForm}>Wyczyść</button>
+        </div>
       </div>
       <div className="actions no-print"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
       <h3 className="no-print">Podgląd otwartej kartoteki: K01.1 – {auxYear}, {periodLabel}</h3>
