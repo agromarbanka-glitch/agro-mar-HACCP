@@ -339,6 +339,7 @@ function App() {
   const [k03BulkMonth, setK03BulkMonth] = useState(new Date().toISOString().slice(0, 7))
   const docsFiltersHydrated = useRef(false)
   const docsFiltersSkipSave = useRef(true)
+  const docsHubNavRef = useRef(null)
 
   const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
@@ -402,6 +403,25 @@ function App() {
     if (except !== 'protokoly') setDocsProtokolFlyoutOpen(false)
     if (except !== 'specyfikacje') setDocsSpecFlyoutOpen(false)
   }
+
+  /** Klik w zakładkę – otwiera listę pod-zakładek i trzyma ją otwartą do wyboru lub kliknięcia poza menu. */
+  function openHubTab(section) {
+    setDocsHubSection(section)
+    closeHubFlyouts(null)
+    if (section === 'kartoteki') setDocsFlyoutOpen(true)
+    else if (section === 'wykazy') setDocsWykazFlyoutOpen(true)
+    else if (section === 'formularze') setDocsFormularzFlyoutOpen(true)
+    else if (section === 'protokoly') setDocsProtokolFlyoutOpen(true)
+    else if (section === 'specyfikacje') setDocsSpecFlyoutOpen(true)
+  }
+
+  useEffect(() => {
+    function onDocPointerDown(e) {
+      if (!docsHubNavRef.current?.contains(e.target)) closeHubFlyouts(null)
+    }
+    document.addEventListener('mousedown', onDocPointerDown)
+    return () => document.removeEventListener('mousedown', onDocPointerDown)
+  }, [])
 
   const MODULE_STATUS = [
     { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
@@ -599,7 +619,7 @@ function App() {
     }
     setDocsFilter(code)
     setDocsHubSection('kartoteki')
-    closeHubFlyouts('kartoteki')
+    closeHubFlyouts(null)
     setDocsFlyoutOpen(false)
     if (code === 'K03') loadK03TraceData()
     if (getDocFormCfg(code)) resetManualHaccpForm(code)
@@ -619,7 +639,7 @@ function App() {
   function selectHubDoc(code, section, setFilter) {
     setFilter(code)
     setDocsHubSection(section)
-    closeHubFlyouts(section)
+    closeHubFlyouts(null)
     resetManualHaccpForm(code)
   }
 
@@ -5295,24 +5315,23 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <div className="section-title"><ClipboardList/><div><h2>Dokumentacja HACCP</h2><p>Kartoteki, wykazy, formularze i protokoły w jednym miejscu.</p></div></div>
       </header>
 
-      <nav className="docs-hub-nav">
+      <nav className="docs-hub-nav" ref={docsHubNavRef}>
         {DOCS_HUB_SECTIONS.map(([key, label, desc]) => {
           if (key === 'kartoteki') {
             return (
               <div
                 key={key}
                 className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
-                onMouseEnter={() => setDocsFlyoutOpen(true)}
-                onMouseLeave={() => setDocsFlyoutOpen(false)}
               >
                 <button
                   type="button"
-                  className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''}`}
-                  onClick={() => { setDocsHubSection(key); setDocsFlyoutOpen(v => !v) }}
+                  className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''} ${docsFlyoutOpen ? 'flyout-open' : ''}`}
+                  onClick={() => openHubTab(key)}
+                  aria-expanded={docsFlyoutOpen}
                 >
                   <b>{label}</b><small>{desc}</small>
                 </button>
-                {docsFlyoutOpen && (
+                {docsFlyoutOpen && docsHubSection === key && (
                   <div className="docs-k-flyout">
                     {HACCPCARDS.map(([code, title, cardDesc]) => (
                       <button
@@ -5336,17 +5355,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <div
                 key={key}
                 className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
-                onMouseEnter={() => { closeHubFlyouts('wykazy'); setDocsWykazFlyoutOpen(true) }}
-                onMouseLeave={() => setDocsWykazFlyoutOpen(false)}
               >
                 <button
                   type="button"
-                  className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''}`}
-                  onClick={() => { setDocsHubSection(key); setDocsWykazFlyoutOpen(v => !v) }}
+                  className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''} ${docsWykazFlyoutOpen ? 'flyout-open' : ''}`}
+                  onClick={() => openHubTab(key)}
+                  aria-expanded={docsWykazFlyoutOpen}
                 >
                   <b>{label}</b><small>{desc}</small>
                 </button>
-                {docsWykazFlyoutOpen && (
+                {docsWykazFlyoutOpen && docsHubSection === key && (
                   <div className="docs-k-flyout">
                     {WYKAZY_CARDS.map(([code, title, cardDesc]) => (
                       <button
@@ -5370,13 +5388,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <div
                 key={key}
                 className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
-                onMouseEnter={() => { closeHubFlyouts('formularze'); setDocsFormularzFlyoutOpen(true) }}
-                onMouseLeave={() => setDocsFormularzFlyoutOpen(false)}
               >
-                <button type="button" className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''}`} onClick={() => { setDocsHubSection(key); setDocsFormularzFlyoutOpen(v => !v) }}>
+                <button type="button" className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''} ${docsFormularzFlyoutOpen ? 'flyout-open' : ''}`} onClick={() => openHubTab(key)} aria-expanded={docsFormularzFlyoutOpen}>
                   <b>{label}</b><small>{desc}</small>
                 </button>
-                {docsFormularzFlyoutOpen && (
+                {docsFormularzFlyoutOpen && docsHubSection === key && (
                   <div className="docs-k-flyout">
                     {FORMULARZE_CARDS.map(([code, title, cardDesc]) => (
                       <button key={code} type="button" className={docsFormularzFilter === code && docsHubSection === 'formularze' ? 'active' : ''} onClick={() => selectFormularz(code)}>
@@ -5393,13 +5409,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <div
                 key={key}
                 className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
-                onMouseEnter={() => { closeHubFlyouts('protokoly'); setDocsProtokolFlyoutOpen(true) }}
-                onMouseLeave={() => setDocsProtokolFlyoutOpen(false)}
               >
-                <button type="button" className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''}`} onClick={() => { setDocsHubSection(key); setDocsProtokolFlyoutOpen(v => !v) }}>
+                <button type="button" className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''} ${docsProtokolFlyoutOpen ? 'flyout-open' : ''}`} onClick={() => openHubTab(key)} aria-expanded={docsProtokolFlyoutOpen}>
                   <b>{label}</b><small>{desc}</small>
                 </button>
-                {docsProtokolFlyoutOpen && (
+                {docsProtokolFlyoutOpen && docsHubSection === key && (
                   <div className="docs-k-flyout">
                     {PROTOKOLY_CARDS.map(([code, title, cardDesc]) => (
                       <button key={code} type="button" className={docsProtokolFilter === code && docsHubSection === 'protokoly' ? 'active' : ''} onClick={() => selectProtokol(code)}>
@@ -5416,13 +5430,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <div
                 key={key}
                 className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
-                onMouseEnter={() => { closeHubFlyouts('specyfikacje'); setDocsSpecFlyoutOpen(true) }}
-                onMouseLeave={() => setDocsSpecFlyoutOpen(false)}
               >
-                <button type="button" className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''}`} onClick={() => { setDocsHubSection(key); setDocsSpecFlyoutOpen(v => !v) }}>
+                <button type="button" className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''} ${docsSpecFlyoutOpen ? 'flyout-open' : ''}`} onClick={() => openHubTab(key)} aria-expanded={docsSpecFlyoutOpen}>
                   <b>{label}</b><small>{desc}</small>
                 </button>
-                {docsSpecFlyoutOpen && (
+                {docsSpecFlyoutOpen && docsHubSection === key && (
                   <div className="docs-k-flyout">
                     {SPECYFIKACJE_CARDS.map(([code, title, cardDesc]) => (
                       <button key={code} type="button" className={docsSpecFilter === code && docsHubSection === 'specyfikacje' ? 'active' : ''} onClick={() => selectSpec(code)}>
@@ -5435,7 +5447,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             )
           }
           return (
-            <button key={key} type="button" className={docsHubSection === key ? 'docs-hub-tab active' : 'docs-hub-tab'} onClick={() => { setDocsHubSection(key); closeHubFlyouts(null) }}>
+            <button key={key} type="button" className={docsHubSection === key ? 'docs-hub-tab active' : 'docs-hub-tab'} onClick={() => openHubTab(key)}>
               <b>{label}</b><small>{desc}</small>
             </button>
           )
