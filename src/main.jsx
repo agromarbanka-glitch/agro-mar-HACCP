@@ -12,6 +12,7 @@ import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
 import { getHaccpDocForm, buildHubDocGroups, hubPeriodLabel, buildDocumentHtml } from './haccpDocRegistry'
+import { importK011FromPdfFile, K011_PDF_IMPORT_VERSION } from './k011PdfImport'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -290,6 +291,9 @@ function App() {
   const [auxForm, setAuxForm] = useState({ delivery_date: new Date().toISOString().slice(0,10), item_name: '', supplier_invoice: '', vehicle_hygiene: 'P', qty: '', lot_no: '', notes: '', signed_by: '' })
   const [selectedAuxCard, setSelectedAuxCard] = useState(null)
   const [auxPdfName, setAuxPdfName] = useState('')
+  const [auxPdfPreview, setAuxPdfPreview] = useState('')
+  const [auxPdfImporting, setAuxPdfImporting] = useState(false)
+  const [auxPdfInputKey, setAuxPdfInputKey] = useState(0)
   const [pzRows, setPzRows] = useState([])
   const [pzHistoryRows, setPzHistoryRows] = useState([])
   const [pzEditDates, setPzEditDates] = useState({})
@@ -365,7 +369,7 @@ function App() {
 
   const MODULE_STATUS = [
     { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
-    { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna i ręczna edycja. OCR faktur odłożony na później.' },
+    { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Kartoteka półroczna, import PDF faktur (v' + K011_PDF_IMPORT_VERSION + ').' },
     { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
     { code: 'K03', name: 'Identyfikacja partii produktu', status: 'w realizacji', note: 'Jeden formularz = jeden WZ. PZ po lewej, WZ po prawej, sumy zgodne z FIFO.' },
     { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'w realizacji', note: 'Miesięczna kartoteka dzienna per komora CP3/CCP1 – jak K02.' },
@@ -2460,6 +2464,8 @@ function App() {
   function resetAuxForm() {
     setAuxForm({ delivery_date: new Date().toISOString().slice(0,10), item_name: '', supplier_invoice: '', vehicle_hygiene: 'P', qty: '', lot_no: '', notes: '', signed_by: '' })
     setAuxPdfName('')
+    setAuxPdfPreview('')
+    setAuxPdfInputKey(k => k + 1)
   }
 
   async function saveAuxMaterial() {
@@ -2509,6 +2515,8 @@ function App() {
       signed_by: row.signed_by || ''
     })
     setAuxPdfName(row.source_filename || '')
+    setAuxPdfPreview('')
+    setAuxPdfInputKey(k => k + 1)
   }
 
   async function deleteAuxMaterial(row) {
@@ -2525,110 +2533,41 @@ function App() {
     }
   }
 
-  function polishDateToIso(value) {
-    const text = String(value || '').trim()
-    const m = text.match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/)
-    if (!m) return ''
-    return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`
-  }
-
-  function firstUsefulLineAfter(text, labels) {
-    const lines = String(text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-    for (let i = 0; i < lines.length; i++) {
-      const n = normalizeText(lines[i])
-      if (labels.some(label => n.includes(normalizeText(label)))) {
-        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-          const candidate = lines[j]
-          const cn = normalizeText(candidate)
-          if (!candidate || cn.includes('nip') || cn.includes('regon') || cn.includes('konto') || cn.includes('bank')) continue
-          if (/^[0-9\s,./-]+$/.test(candidate)) continue
-          return candidate.replace(/^(nazwa|firma|sprzedawca|dostawca)\s*[:\-]?\s*/i, '').trim()
-        }
-      }
-    }
-    return ''
-  }
-
-  function parseInvoiceTextForK011(text) {
-    const clean = String(text || '').replace(/\u0000/g, ' ').replace(/[ \t]+/g, ' ')
-    const lines = clean.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-    const invoiceMatch = clean.match(/(?:faktura(?:\s+vat)?|nr\s*faktury|numer\s*faktury|fv)\s*(?:nr|numer)?\s*[:#-]?\s*([A-ZĄĆĘŁŃÓŚŹŻ0-9][A-ZĄĆĘŁŃÓŚŹŻ0-9/_.\-]{2,})/i)
-    const invoiceNo = invoiceMatch?.[1]?.replace(/[;,]$/, '') || ''
-
-    const dateLabelMatch = clean.match(/(?:data\s+wystawienia|data\s+dostawy|data\s+sprzedaży|data\s+sprzedazy)\s*[:\-]?\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})/i)
-    const anyDateMatch = clean.match(/(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{4})/)
-    const deliveryDate = polishDateToIso(dateLabelMatch?.[1] || anyDateMatch?.[1] || '')
-
-    const supplier = firstUsefulLineAfter(clean, ['Sprzedawca', 'Dostawca', 'Wystawca'])
-
-    let itemName = ''
-    let qty = ''
-    const materialKeywords = /(karton|worek|worki|skrzyn|beczk|etykiet|foli|opakowan|palet|taśm|tasma|wiadr|pojemnik|nakrętk|nakretk)/i
-    const qtyRegex = /(\d+(?:[\s ]?\d{3})*(?:[,.]\d+)?)\s*(szt\.?|kg|opak\.?|rol\.?|mb|m2|m²|kpl\.?|pcs)/i
-    const candidates = lines.filter(l => materialKeywords.test(l) || qtyRegex.test(l))
-    for (const line of candidates) {
-      const q = line.match(qtyRegex)
-      if (q && !qty) qty = `${q[1].replace(/\s/g, '')} ${q[2].replace('.', '')}`
-      if (materialKeywords.test(line) && !itemName) {
-        itemName = line
-          .replace(/\s+\d+(?:[\s ]?\d{3})*(?:[,.]\d+)?\s*(szt\.?|kg|opak\.?|rol\.?|mb|m2|m²|kpl\.?|pcs).*/i, '')
-          .replace(/^\d+\.?\s*/, '')
-          .trim()
-      }
-      if (itemName && qty) break
-    }
-    if (!itemName && candidates[0]) itemName = candidates[0].slice(0, 80)
-
-    const supplierInvoice = [supplier, invoiceNo].filter(Boolean).join(' / ')
-    return { deliveryDate, invoiceNo, supplier, itemName, qty, supplierInvoice }
-  }
-
-  async function extractPdfText(file) {
-    try {
-      const pdfjsLib = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.mjs')
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.mjs'
-      const data = await file.arrayBuffer()
-      const pdf = await pdfjsLib.getDocument({ data }).promise
-      const parts = []
-      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
-        const page = await pdf.getPage(pageNo)
-        const content = await page.getTextContent()
-        parts.push(content.items.map(item => item.str).join('\n'))
-      }
-      return parts.join('\n')
-    } catch (err) {
-      const buffer = await file.arrayBuffer()
-      const raw = new TextDecoder('latin1').decode(buffer)
-      return raw
-        .replace(/\(([^()]{1,120})\)\s*Tj/g, '\n$1\n')
-        .replace(/<([0-9A-Fa-f]{4,})>\s*Tj/g, '\n')
-        .replace(/[^\x09\x0A\x0D\x20-\x7EĄĆĘŁŃÓŚŹŻąćęłńóśźż]+/g, ' ')
-    }
-  }
-
   async function handleAuxPdfFile(e) {
     const file = e.target.files?.[0]
     if (!file) return
+    if (file.type && file.type !== 'application/pdf') {
+      setMessage('K01.1: wybierz plik PDF.')
+      return
+    }
     setAuxPdfName(file.name)
+    setAuxPdfImporting(true)
+    setAuxPdfPreview('')
     setMessage('K01.1: odczytuję fakturę PDF...')
     try {
-      const text = await extractPdfText(file)
-      const parsed = parseInvoiceTextForK011(text)
-      const updates = {}
-      if (parsed.deliveryDate) updates.delivery_date = parsed.deliveryDate
-      if (parsed.itemName) updates.item_name = parsed.itemName
-      if (parsed.supplierInvoice) updates.supplier_invoice = parsed.supplierInvoice
-      else if (parsed.invoiceNo) updates.supplier_invoice = parsed.invoiceNo
-      if (parsed.qty) updates.qty = parsed.qty
-      setAuxForm(prev => ({ ...prev, ...updates, notes: prev.notes || `PDF: ${file.name}` }))
+      const { text, parsed, updates } = await importK011FromPdfFile(file)
+      const preview = String(text || '').trim().slice(0, 2500)
+      setAuxPdfPreview(preview)
+      setAuxForm(prev => ({
+        ...prev,
+        ...updates,
+        notes: prev.notes || (Object.keys(updates).length ? `PDF: ${file.name}` : `PDF (słaby odczyt): ${file.name}`)
+      }))
       const filled = Object.keys(updates).length
-      if (filled) {
-        setMessage(`K01.1: odczytano PDF i uzupełniono ${filled} pola. Sprawdź dane przed zapisem.`)
+      if (filled >= 2) {
+        setMessage(`K01.1: odczytano PDF (${filled} pól). Sprawdź dane poniżej i zapisz pozycję.`)
+      } else if (filled === 1) {
+        setMessage(`K01.1: częściowy odczyt PDF (1 pole). Uzupełnij resztę ręcznie – podgląd tekstu poniżej.`)
+      } else if (parsed.textLength < 40) {
+        setMessage('K01.1: PDF wygląda na skan lub obraz – brak tekstu do odczytu. Wpisz dane ręcznie albo użyj PDF z warstwą tekstową (nie skan).')
       } else {
-        setMessage('K01.1: nie udało się automatycznie rozpoznać danych z PDF. Uzupełnij pola ręcznie i zapisz pozycję.')
+        setMessage('K01.1: tekst z PDF jest, ale faktura ma nietypowy układ. Użyj podglądu odczytu i uzupełnij pola ręcznie.')
       }
     } catch (err) {
-      setMessage(`K01.1: błąd odczytu PDF: ${err.message}. Uzupełnij dane ręcznie.`)
+      setAuxPdfPreview('')
+      setMessage(`K01.1: błąd odczytu PDF: ${err?.message || String(err)}. Uzupełnij dane ręcznie.`)
+    } finally {
+      setAuxPdfImporting(false)
     }
   }
 
@@ -2740,7 +2679,16 @@ function App() {
       <div className="card inner-card no-print">
         <h3>{auxForm.id ? 'Edytuj pozycję K01.1' : `Dodaj pozycję do K01.1 – ${auxYear}, ${periodLabel}`}</h3>
         <div className="form-grid compact">
-          <label>Faktura PDF<input type="file" accept="application/pdf" onChange={handleAuxPdfFile} /><span className="hint">PDF tekstowy odczytuje się automatycznie; skan może wymagać ręcznej korekty.</span></label>
+          <label className="full-width">Faktura PDF
+            <input key={auxPdfInputKey} type="file" accept="application/pdf,.pdf" disabled={auxPdfImporting} onChange={handleAuxPdfFile} />
+            <span className="hint">PDF z tekstem (np. z Subiekta, Comarch) – system uzupełni formularz. Skan/zdjęcie w PDF wymaga ręcznego wpisu.</span>
+          </label>
+          {auxPdfImporting && <p className="hint">Trwa odczyt PDF…</p>}
+          {auxPdfName && <p className="hint">Wybrany PDF: <b>{auxPdfName}</b></p>}
+          {auxPdfPreview && <details className="k011-pdf-preview" open>
+            <summary>Podgląd tekstu odczytanego z PDF (pierwsze ~2500 znaków)</summary>
+            <pre className="pdf-text-preview">{auxPdfPreview}</pre>
+          </details>}
           <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e=>setAuxForm({...auxForm, delivery_date:e.target.value})} /></label>
           <label>Nazwa towaru / przeznaczenie<input value={auxForm.item_name} onChange={e=>setAuxForm({...auxForm, item_name:e.target.value})} placeholder="np. kartony, worki, etykiety" /></label>
           <label>Dostawca / nr faktury<input value={auxForm.supplier_invoice} onChange={e=>setAuxForm({...auxForm, supplier_invoice:e.target.value})} placeholder="np. Firma X / FV/123/2026" /></label>
@@ -2750,7 +2698,6 @@ function App() {
           <label>Podpis przyjmującego<select value={auxForm.signed_by} onChange={e=>setAuxForm({...auxForm, signed_by:e.target.value})}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></label>
           <label>Uwagi<input value={auxForm.notes} onChange={e=>setAuxForm({...auxForm, notes:e.target.value})} /></label>
         </div>
-        {auxPdfName && <p className="hint">Wybrany PDF: <b>{auxPdfName}</b></p>}
         <div className="actions"><button onClick={saveAuxMaterial}>{auxForm.id ? 'Zapisz zmiany' : 'Dodaj do kartoteki'}</button><button className="secondary" onClick={resetAuxForm}>Wyczyść</button></div>
       </div>
       <div className="actions no-print"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
