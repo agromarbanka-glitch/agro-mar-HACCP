@@ -12,7 +12,7 @@ import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
 import { getHaccpDocForm, buildHubDocGroups, hubPeriodLabel, buildDocumentHtml } from './haccpDocRegistry'
-import { importPdfForDocType, PDF_IMPORT_VERSION, PDF_IMPORT_DOC_TYPES, isReadableName } from './pdfImportEngine'
+import { importPdfForDocType, PDF_IMPORT_VERSION, PDF_IMPORT_DOC_TYPES } from './pdfImportEngine'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -757,6 +757,7 @@ function App() {
     const items = []
     for (const doc of syntheticK03Docs) {
       if (!doc.frozen && doc.data?.frozen !== true) continue
+      if (!matchesDocsDateRange(doc.document_date)) continue
       items.push({
         type: 'K03',
         label: `${doc.document_no || '-'} · ${doc.product_name || ''}`,
@@ -765,7 +766,7 @@ function App() {
       })
     }
     return items.sort((a, b) => String(b.group.docs[0]?.document_date || '').localeCompare(String(a.group.docs[0]?.document_date || '')))
-  }, [syntheticK03Docs])
+  }, [syntheticK03Docs, docsDateFrom, docsDateTo])
 
   const k03BulkMonthStats = useMemo(() => {
     const month = String(k03BulkMonth || '').slice(0, 7)
@@ -2492,10 +2493,16 @@ function App() {
     const delivery_date = String(form.delivery_date || '').trim()
     let item_name = String(form.item_name || '').trim()
     let supplier_invoice = String(form.supplier_invoice || '').trim()
-    if (!isReadableName(item_name) && lineItems[0]?.name) item_name = lineItems[0].name
-    if (!isReadableName(item_name)) item_name = ''
+    if (!item_name && lineItems[0]?.name) item_name = String(lineItems[0].name).trim()
     if (!supplier_invoice && pdfName) supplier_invoice = pdfName.replace(/\.pdf$/i, '').slice(0, 120)
     return { ...form, delivery_date, item_name, supplier_invoice }
+  }
+
+  function updateK011LineItem(index, field, value) {
+    setK011PdfLineItems(prev => prev.map((it, i) => i === index ? { ...it, [field]: value } : it))
+    if (index === 0 && (field === 'name' || field === 'qty')) {
+      setAuxForm(prev => ({ ...prev, [field === 'name' ? 'item_name' : 'qty']: value }))
+    }
   }
 
   async function saveAuxMaterial() {
@@ -2508,8 +2515,8 @@ function App() {
       setMessage('K01.1: podaj datę dostawy.')
       return
     }
-    if (!norm.item_name) {
-      setMessage('K01.1: podaj nazwę towaru – PDF mógł odczytać dane niepełnie (sprawdź podgląd tekstu).')
+    if (!norm.item_name || norm.item_name.length < 2) {
+      setMessage('K01.1: podaj nazwę towaru (min. 2 znaki) – popraw pozycję z PDF lub wpisz ręcznie.')
       return
     }
     if (!norm.supplier_invoice) {
@@ -2554,9 +2561,9 @@ function App() {
       setMessage('K01.1: brak wielu pozycji z PDF – użyj zwykłego zapisu.')
       return
     }
-    const validItems = k011PdfLineItems.filter(it => isReadableName(it.name))
+    const validItems = k011PdfLineItems.filter(it => String(it.name || '').trim().length >= 2)
     if (!validItems.length) {
-      setMessage('K01.1: PDF nie rozpoznał nazw towarów – uzupełnij ręcznie lub sprawdź podgląd tekstu.')
+      setMessage('K01.1: brak pozycji do zapisu – uzupełnij nazwy towarów w tabeli poniżej.')
       return
     }
     const norm = normalizeAuxFormForSave(auxForm, auxPdfName, validItems)
@@ -2637,9 +2644,15 @@ function App() {
       const { text, parsed, updates, lineItems } = await importPdfForDocType('K01.1', file)
       setAuxPdfPreview(String(text || '').trim().slice(0, 3000))
       const rawItems = lineItems?.length ? lineItems : (parsed.itemName ? [{ name: parsed.itemName, qty: parsed.qty }] : [])
-      const items = rawItems.filter(it => isReadableName(it.name))
-      setK011PdfLineItems(items)
-      setAuxForm(prev => ({ ...prev, ...updates, notes: prev.notes || `PDF: ${file.name}` }))
+      const items = rawItems.map(it => ({ name: String(it.name || '').trim(), qty: String(it.qty || '').trim() })).filter(it => it.name.length >= 2 || it.qty)
+      setK011PdfLineItems(items.length ? items : rawItems)
+      setAuxForm(prev => ({
+        ...prev,
+        ...updates,
+        item_name: updates.item_name || items[0]?.name || prev.item_name,
+        qty: updates.qty || items[0]?.qty || prev.qty,
+        notes: prev.notes || `PDF: ${file.name}`
+      }))
       const filled = Object.keys(updates).length
       if (items.length > 1) {
         setMessage(`K01.1: rozpoznano ${items.length} pozycje (np. ${items[0].name}). Sprawdź datę i dostawcę, potem „Zapisz wszystkie pozycje z faktury".`)
@@ -2806,9 +2819,12 @@ function App() {
             <summary>Podgląd tekstu odczytanego z PDF (pierwsze ~2500 znaków)</summary>
             <pre className="pdf-text-preview">{auxPdfPreview}</pre>
           </details>}
-          {k011PdfLineItems.length > 1 && <div className="k011-pdf-lines">
-            <p className="hint"><b>Rozpoznane pozycje z faktury ({k011PdfLineItems.length}):</b></p>
-            <ul>{k011PdfLineItems.map((it, i) => <li key={i}>{it.name}{it.qty ? ` – ${it.qty}` : ''}</li>)}</ul>
+          {k011PdfLineItems.length > 0 && <div className="k011-pdf-lines">
+            <p className="hint"><b>Pozycje z faktury ({k011PdfLineItems.length}) – popraw przed zapisem:</b></p>
+            {k011PdfLineItems.map((it, i) => <div key={i} className="k011-line-edit">
+              <label>Nazwa<input value={it.name} onChange={e => updateK011LineItem(i, 'name', e.target.value)} placeholder="nazwa towaru" /></label>
+              <label>Ilość<input value={it.qty || ''} onChange={e => updateK011LineItem(i, 'qty', e.target.value)} placeholder="np. 4224 szt" /></label>
+            </div>)}
           </div>}
           <label>Data dostawy<input type="date" value={auxForm.delivery_date} onChange={e => setAuxForm(prev => ({ ...prev, delivery_date: e.target.value }))} /></label>
           <label>Nazwa towaru / przeznaczenie<input value={auxForm.item_name} onChange={e => setAuxForm(prev => ({ ...prev, item_name: e.target.value }))} placeholder="np. kartony, worki, etykiety" /></label>
@@ -4947,11 +4963,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </>}
       </section>
 
-      {(frozenKartoteki.length > 0 || k03WorkflowHistory.length > 0) && (
-        <section className="card docs-frozen-panel">
+      {docsFilter === 'K03' && docsWorkflowFilter === 'zamrozone' && (frozenKartoteki.length > 0 || k03WorkflowHistory.length > 0) && (
+        <details className="card docs-frozen-panel">
+          <summary>Zarządzanie zamrożonymi K03 ({frozenKartoteki.length}) – odmrożenie i historia</summary>
           {frozenKartoteki.length > 0 && <>
-            <h3>Zamrożone kartoteki K03 ({frozenKartoteki.length})</h3>
-            <p className="hint">Kompletne K03 zamrażają się automatycznie przy utworzeniu. Odmrożenie tylko ręczne – np. po imporcie nowych PZ.</p>
+            <p className="hint">Kompletne K03 zamrażają się automatycznie. Odmrożenie tylko ręczne – np. po imporcie nowych PZ.</p>
             <div className="frozen-list">
               {frozenKartoteki.map(item => (
                 <div key={item.group.key} className="frozen-item">
@@ -4978,7 +4994,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               </table></div>
             </details>
           )}
-        </section>
+        </details>
       )}
         </div>
       </div>

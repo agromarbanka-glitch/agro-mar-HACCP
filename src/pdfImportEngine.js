@@ -2,8 +2,17 @@
  * Import PDF → pola formularzy (K01.1, W04, W05)
  */
 import { getDocument } from 'pdfjs-dist'
+import {
+  parseK011InvoiceAdvanced,
+  buildK011UpdatesFromAdvanced,
+  pickBestInvoiceText,
+  isReadableName,
+  polishDateToIso
+} from './k011InvoiceParser.js'
 
-export const PDF_IMPORT_VERSION = '1.3'
+export { isReadableName, polishDateToIso }
+
+export const PDF_IMPORT_VERSION = '1.4'
 
 export const PDF_IMPORT_DOC_TYPES = {
   'K01.1': { label: 'faktura zakupowa', accept: '.pdf,application/pdf' },
@@ -21,29 +30,6 @@ function normalizeText(s) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-}
-
-/** Odrzuca losowy „śmieć” z błędnego kodowania PDF (np. i s*5 s C) ET…) */
-export function isReadableName(text) {
-  const s = String(text || '').trim()
-  if (s.length < 3) return false
-  const letters = (s.match(/[\p{L}]/gu) || []).length
-  const digits = (s.match(/\d/g) || []).length
-  const weird = (s.match(/[^0-9a-zA-Z\sąćęłńóśźżĄĆĘŁŃÓŚŹŻ.,\-()/+%°]/gu) || []).length
-  if (letters < 2) return false
-  if (weird / s.length > 0.12) return false
-  if (letters / s.length < 0.35 && digits / s.length < 0.5) return false
-  return true
-}
-
-export function polishDateToIso(value) {
-  const text = String(value || '').trim()
-  const m = text.match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/)
-  if (!m) return ''
-  const d = Number(m[1])
-  const mo = Number(m[2])
-  if (d < 1 || d > 31 || mo < 1 || mo > 12) return ''
-  return `${m[3]}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
 }
 
 function mergeTextItems(items) {
@@ -205,6 +191,7 @@ async function loadPdfDocument(buffer) {
 
 export async function extractPdfData(file) {
   const buffer = await file.arrayBuffer()
+  const streamText = decodePdfStreamFallback(buffer)
   const itemsByPage = []
   try {
     const pdf = await loadPdfDocument(buffer)
@@ -215,12 +202,12 @@ export async function extractPdfData(file) {
       itemsByPage.push(content.items || [])
       parts.push(mergeTextItems(content.items))
     }
-    const text = parts.join('\n\n').trim()
-    if (text.replace(/\s/g, '').length >= 20) return { text, itemsByPage }
+    const pdfText = parts.join('\n\n').trim()
+    const text = pickBestInvoiceText(pdfText, streamText)
+    return { text, itemsByPage }
   } catch {
-    /* fallback poniżej */
+    return { text: streamText, itemsByPage: [] }
   }
-  return { text: decodePdfStreamFallback(buffer), itemsByPage: [] }
 }
 
 export async function extractPdfText(file) {
@@ -411,55 +398,11 @@ function dedupeLineItems(items) {
 }
 
 export function parseK011Invoice(text, fileName = '', itemsByPage = []) {
-  const flat = String(text || '')
-  const lines = toLines(flat)
-  const invoiceNo = findInvoiceNumber(flat, fileName)
-  const deliveryDate = findDate(flat, ['data sprzedaży', 'data sprzedazy', 'data wystawienia', 'data dostawy', 'data dokumentu'])
-  const supplier = findSeller(lines, flat)
-
-  const flatItems = itemsByPage.flat()
-  const fromPositions = flatItems.length ? parseInvoiceLineItemsFromPositions(flatItems) : []
-  const fromText = parseInvoiceLineItems(lines, flat)
-  const lineItems = dedupeLineItems([...fromPositions, ...fromText].filter(it => isReadableName(it.name)))
-
-  const primary = lineItems[0] || {}
-
-  let itemName = primary.name || ''
-  if (!itemName) {
-    const guess = lines.find(l => MATERIAL_RE.test(l) && l.length >= 4 && l.length <= 120 && !SKIP_ROW.test(l) && isReadableName(l))
-    if (guess) itemName = guess.replace(/^\d+[\s.)-]+/, '').trim().slice(0, 120)
-  }
-  if (!itemName || !isReadableName(itemName)) {
-    const lv = labelValue(lines, ['Nazwa towaru', 'Nazwa artykułu', 'Nazwa'])
-    if (isReadableName(lv)) itemName = lv
-    else itemName = ''
-  }
-
-  const supplierInvoice = [supplier, invoiceNo].filter(Boolean).join(' / ')
-    || invoiceNo
-    || supplier
-    || invoiceFromFileName(fileName)
-    || fileName.replace(/\.pdf$/i, '')
-
-  return {
-    deliveryDate,
-    invoiceNo,
-    supplier,
-    itemName,
-    qty: primary.qty || '',
-    supplierInvoice,
-    lineItems,
-    textLength: flat.replace(/\s/g, '').length
-  }
+  return parseK011InvoiceAdvanced(text, fileName, itemsByPage)
 }
 
 export function buildK011FormUpdates(parsed) {
-  const updates = {}
-  if (parsed.deliveryDate) updates.delivery_date = parsed.deliveryDate
-  if (parsed.itemName && isReadableName(parsed.itemName)) updates.item_name = parsed.itemName
-  if (parsed.supplierInvoice) updates.supplier_invoice = parsed.supplierInvoice
-  if (parsed.qty) updates.qty = parsed.qty
-  return updates
+  return buildK011UpdatesFromAdvanced(parsed)
 }
 
 export function parseW04CleaningDoc(text, fileName = '') {
@@ -586,8 +529,8 @@ export function buildW05FormUpdates(parsed) {
 export async function importPdfForDocType(docType, file) {
   const { text, itemsByPage } = await extractPdfData(file)
   if (docType === 'K01.1') {
-    const parsed = parseK011Invoice(text, file.name, itemsByPage)
-    return { text, parsed, updates: buildK011FormUpdates(parsed), lineItems: parsed.lineItems || [] }
+    const parsed = parseK011InvoiceAdvanced(text, file.name, itemsByPage)
+    return { text, parsed, updates: buildK011UpdatesFromAdvanced(parsed), lineItems: parsed.lineItems || [] }
   }
   if (docType === 'W04') {
     const parsed = parseW04CleaningDoc(text, file.name)

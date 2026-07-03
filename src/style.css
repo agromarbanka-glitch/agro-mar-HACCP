@@ -295,6 +295,9 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k03-inline-filters { margin-top: 10px; align-items: center; }
 .k03-inline-filters .tab { padding: 6px 10px; font-size: 12px; }
 .docs-frozen-panel { background: #fafcf9; border: 1px solid #e0e8e0; }
+.docs-frozen-panel summary { cursor: pointer; font-weight: 700; color: #23472b; padding: 4px 0; }
+.k011-line-edit { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin: 6px 0; grid-column: 1/-1; }
+.k011-line-edit label { display: grid; gap: 4px; font-size: 12px; }
 .docs-frozen-panel h3 { margin: 0 0 10px; font-size: 16px; }
 .frozen-list { display: grid; gap: 8px; margin-bottom: 12px; }
 .frozen-item {
