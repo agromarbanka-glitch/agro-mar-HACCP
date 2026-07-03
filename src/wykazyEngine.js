@@ -4,7 +4,7 @@
 import { normalizePn } from './haccpFormsEngine'
 import { col, dval, buildPeriodGroups, periodLabel, buildManualMonthlyHtml, buildManualExcelRows } from './haccpDocShared'
 
-export const WYKAZY_ENGINE_VERSION = '1.1'
+export const WYKAZY_ENGINE_VERSION = '1.2'
 
 export const WYKAZY_CARDS = [
   ['W01', 'W01 – Orzeczenia lekarskie', 'Wykaz pracowniczych orzeczeń lekarskich (san.-epid.)', 'year'],
@@ -70,26 +70,24 @@ export const WYKAZY_FORMS = {
     code: 'W03',
     layout: 'table',
     periodMode: 'register',
-    title: 'Wykaz W03 – Wykaz mycia i czyszczenia',
+    title: 'Wykaz W03 – Wykaz mycia/czyszczenia maszyn i pomieszczeń',
     columns: [
       col('lp', 'L.p.', (_, i) => i + 1),
-      col('object', 'Obiekt', d => dval(d, 'object_name') || d.product_name || ''),
-      col('freq_after_use', 'Każdorazowo po użyciu/dostawie', d => dval(d, 'freq_after_use') || '—'),
-      col('freq_daily', '1 raz dziennie', d => dval(d, 'freq_daily') || '—'),
-      col('freq_weekly', '1 raz w tygodniu', d => dval(d, 'freq_weekly') || '—'),
-      col('freq_monthly', '1 raz w miesiącu', d => dval(d, 'freq_monthly') || '—'),
-      col('freq_bimonthly', '2 razy w miesiącu', d => dval(d, 'freq_bimonthly') || '—'),
-      col('process', 'Proces (M/C/D)', d => dval(d, 'process_code'))
+      col('object', 'OBIEKT', d => dval(d, 'object_name') || d.product_name || ''),
+      col('freq_after_use', 'Każdorazowo po użyciu/dostawie', d => dval(d, 'freq_after_use') || ''),
+      col('freq_daily', '1 raz dziennie', d => dval(d, 'freq_daily') || ''),
+      col('freq_weekly', '1 raz w tygodniu', d => dval(d, 'freq_weekly') || ''),
+      col('freq_monthly', '1 raz w miesiącu', d => dval(d, 'freq_monthly') || ''),
+      col('freq_bimonthly', '2 razy w miesiącu', d => dval(d, 'freq_bimonthly') || '')
     ],
     fields: [
-      { key: 'document_date', label: 'Data wpisu / aktualizacji', type: 'date', required: true },
+      { key: 'document_date', label: 'Data wpisu', type: 'date', required: true },
       { key: 'object_name', label: 'Obiekt (pomieszczenie / urządzenie)', type: 'text', data: true, required: true },
       { key: 'freq_after_use', label: 'Każdorazowo po użyciu/dostawie (M/C/D)', type: 'text', data: true },
       { key: 'freq_daily', label: '1 raz dziennie (M/C/D)', type: 'text', data: true },
       { key: 'freq_weekly', label: '1 raz w tygodniu (M/C/D)', type: 'text', data: true },
       { key: 'freq_monthly', label: '1 raz w miesiącu (M/C/D)', type: 'text', data: true },
       { key: 'freq_bimonthly', label: '2 razy w miesiącu (M/C/D)', type: 'text', data: true },
-      { key: 'process_code', label: 'Dominujący proces (M/C/D)', type: 'text', data: true },
       { key: 'signed_by', label: 'Podpis (zatwierdził)', type: 'employee' }
     ]
   },

@@ -8,6 +8,10 @@ import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
+import {
+  W03_HEADER, W03_FREQ_KEYS, sortW03Docs, buildW03InsertPayload,
+  buildW03SeedPayloads, buildW03PrintHtml, buildW03ExcelRows, loadW03Meta, saveW03Meta, w03Freq
+} from './w03Engine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
@@ -299,6 +303,15 @@ function App() {
   const [manualPdfPreview, setManualPdfPreview] = useState('')
   const [manualPdfImporting, setManualPdfImporting] = useState(false)
   const [manualPdfInputKey, setManualPdfInputKey] = useState(0)
+  const [w03Meta, setW03Meta] = useState(() => loadW03Meta())
+  const [w03NewRow, setW03NewRow] = useState(() => ({
+    object_name: '',
+    freq_after_use: '',
+    freq_daily: '',
+    freq_weekly: '',
+    freq_monthly: '',
+    freq_bimonthly: ''
+  }))
   const [pzRows, setPzRows] = useState([])
   const [pzHistoryRows, setPzHistoryRows] = useState([])
   const [pzEditDates, setPzEditDates] = useState({})
@@ -1736,6 +1749,8 @@ function App() {
       : group.type === 'K07' ? buildK07MonthlyHtml(group, escapeHtml)
       : cfg?.layout === 'document' && (group.docs || []).length === 1
         ? buildDocumentHtml(group.docs[0], cfg)
+      : group.type === 'W03'
+        ? buildW03PrintHtml(group.docs || [], w03Meta, escapeHtml)
       : cfg ? buildManualMonthlyHtml(group, escapeHtml, cfg)
       : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
@@ -1768,6 +1783,8 @@ function App() {
       rows.push(...buildK04ExcelRows(group))
     } else if (group.type === 'K07') {
       rows.push(...buildK07ExcelRows(group))
+    } else if (group.type === 'W03') {
+      rows.push(...buildW03ExcelRows(docs, w03Meta))
     } else if (getDocFormCfg(group.type)) {
       rows.push(...buildManualExcelRows(group, getDocFormCfg(group.type)))
     } else if (group.type === 'K03') {
@@ -2014,6 +2031,29 @@ function App() {
           })}
         </tbody></table>
         <p className="hint no-print">K07: wpis przy każdym przerobie (produkcja). Domyślnie P – możesz zmienić każde pole przed drukiem/Excel.</p>
+      </div>
+    }
+
+    if (group.type === 'W03') {
+      const sorted = sortW03Docs(docs)
+      return <div className="w03-paper haccp-paper">
+        <table className="w03-head"><tbody><tr>
+          <td className="w03-company">{W03_HEADER.companyLines.map((l, i) => <span key={i}>{l}{i < W03_HEADER.companyLines.length - 1 && <br/>}</span>)}</td>
+          <td className="w03-title"><b>{W03_HEADER.title}</b></td>
+          <td className="w03-meta"><b>Wersja</b> {w03Meta.version || W03_HEADER.version}<br/><b>Data wydania:</b> {formatW03PlDate(w03Meta.issueDate || W03_HEADER.issueDate)}<br/><b>Strona:</b> 1 z 1</td>
+        </tr></tbody></table>
+        <table className="w03-table"><thead>
+          <tr><th rowSpan={2}>L.p.</th><th rowSpan={2}>OBIEKT</th><th colSpan={5}>CZĘSTOTLIWOŚĆ WYKONYWANIA PROCESU</th></tr>
+          <tr>{W03_FREQ_KEYS.map(([, label]) => <th key={label}>{label}</th>)}</tr>
+        </thead><tbody>
+          {sorted.map((doc, i) => <tr key={doc.id}>
+            <td>{i + 1}</td>
+            <td className="left">{doc.data?.object_name || doc.product_name || ''}</td>
+            {W03_FREQ_KEYS.map(([key]) => <td key={key}>{w03Freq(doc, key)}</td>)}
+          </tr>)}
+        </tbody></table>
+        <p className="w03-legend"><b>M</b> – mycie, <b>C</b> – czyszczenie, <b>D</b> – dezynfekcja</p>
+        <div className="w03-footer"><span><b>Zatwierdził:</b> {w03Meta.approvedBy || ''}</span><span><b>Data i podpis:</b> {formatW03PlDate(w03Meta.approvalDate)}</span></div>
       </div>
     }
 
@@ -2319,6 +2359,10 @@ function App() {
   }
 
   function printManualHaccpPeriod(type, docs) {
+    if (type === 'W03') {
+      printHtmlInIframe(buildW03PrintHtml(docs, w03Meta, escapeHtml))
+      return
+    }
     const cfg = getDocFormCfg(type)
     if (!cfg || !docs.length) { setMessage('Brak wpisów do wydruku.'); return }
     const period = String(docs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
@@ -2326,6 +2370,15 @@ function App() {
   }
 
   function exportManualHaccpPeriodExcel(type, docs) {
+    if (type === 'W03') {
+      const rows = buildW03ExcelRows(docs, w03Meta)
+      const wb = XLSX.utils.book_new()
+      const ws = XLSX.utils.aoa_to_sheet(rows)
+      ws['!cols'] = rows[4]?.map(() => ({ wch: 20 })) || []
+      XLSX.utils.book_append_sheet(wb, ws, 'W03')
+      XLSX.writeFile(wb, 'W03-harmonogram-mycia.xlsx')
+      return
+    }
     const cfg = getDocFormCfg(type)
     if (!cfg || !docs.length) { setMessage('Brak wpisów do Excel.'); return }
     const period = String(docs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
@@ -2438,6 +2491,157 @@ function App() {
     </>
   }
 
+  async function ensureW03Seed(force = false) {
+    if (!supabase) return
+    const existing = (haccpDocs || []).filter(d => d.document_type === 'W03')
+    if (existing.length && !force) return
+    if (existing.length && force && !window.confirm('Przywrócić 7 obiektów ze wzoru W03? Istniejące wpisy zostaną usunięte.')) return
+    try {
+      if (existing.length) {
+        for (const doc of existing) {
+          await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        }
+      }
+      const payloads = buildW03SeedPayloads()
+      for (const payload of payloads) {
+        const { error } = await supabase.from('haccp_documents').insert(payload)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setMessage('W03: wczytano wzór harmonogramu (7 obiektów).')
+    } catch (err) {
+      setMessage(`W03: błąd inicjalizacji – ${err.message}`)
+    }
+  }
+
+  async function saveW03Cell(doc, field, value) {
+    if (!supabase || !doc?.id) return
+    const nextData = { ...(doc.data || {}), [field]: value }
+    const payload = { data: nextData, updated_at: new Date().toISOString() }
+    if (field === 'object_name') payload.product_name = value
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+      if (error) throw error
+      setHaccpDocs(prev => prev.map(d => d.id === doc.id ? { ...d, ...payload, data: nextData, product_name: field === 'object_name' ? value : d.product_name } : d))
+    } catch (err) {
+      setMessage(`W03: błąd zapisu – ${err.message}`)
+    }
+  }
+
+  async function addW03Object() {
+    if (!supabase) return
+    const name = String(w03NewRow.object_name || '').trim()
+    if (!name) {
+      setMessage('W03: podaj nazwę obiektu.')
+      return
+    }
+    const existing = sortW03Docs((haccpDocs || []).filter(d => d.document_type === 'W03'))
+    const sortOrder = existing.length ? Math.max(...existing.map(d => Number(d.data?.sort_order) || 0)) + 1 : 1
+    const payload = buildW03InsertPayload({ ...w03NewRow, object_name: name }, sortOrder)
+    try {
+      const { error } = await supabase.from('haccp_documents').insert(payload)
+      if (error) throw error
+      setW03NewRow({ object_name: '', freq_after_use: '', freq_daily: '', freq_weekly: '', freq_monthly: '', freq_bimonthly: '' })
+      await loadHaccpDocs()
+      setMessage('W03: dodano obiekt do harmonogramu.')
+    } catch (err) {
+      setMessage(`W03: błąd dodawania – ${err.message}`)
+    }
+  }
+
+  async function deleteW03Row(doc) {
+    if (!supabase || !doc?.id) return
+    if (!window.confirm(`Usunąć obiekt W03: ${doc.data?.object_name || doc.product_name || ''}?`)) return
+    try {
+      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+      setMessage('W03: usunięto obiekt.')
+    } catch (err) {
+      setMessage(`W03: błąd usuwania – ${err.message}`)
+    }
+  }
+
+  function updateW03MetaField(key, value) {
+    const next = { ...w03Meta, [key]: value }
+    setW03Meta(next)
+    saveW03Meta(next)
+  }
+
+  function formatW03PlDate(iso) {
+    if (!iso) return ''
+    const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/)
+    if (!m) return iso
+    return `${m[3]}.${m[2]}.${m[1]}`
+  }
+
+  function renderW03Section() {
+    const w03Docs = sortW03Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W03'))
+    return <>
+      <div className="actions no-print" style={{ marginBottom: 12 }}>
+        <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
+        <button className="secondary" onClick={() => printManualHaccpPeriod('W03', w03Docs)}><Printer size={16}/> Druk / PDF</button>
+        <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W03', w03Docs)}>Pobierz Excel</button>
+        <button className="secondary" onClick={() => ensureW03Seed(true)}>Przywróć wzór (7 obiektów)</button>
+      </div>
+      {w03Docs.length === 0 && <p className="hint no-print">Brak wpisów – wczytuję wzór harmonogramu…</p>}
+      <div className="w03-paper haccp-paper">
+        <table className="w03-head"><tbody><tr>
+          <td className="w03-company">{W03_HEADER.companyLines.map((l, i) => <span key={i}>{l}{i < W03_HEADER.companyLines.length - 1 && <br/>}</span>)}</td>
+          <td className="w03-title"><b>{W03_HEADER.title}</b></td>
+          <td className="w03-meta"><b>Wersja</b> {w03Meta.version || W03_HEADER.version}<br/><b>Data wydania:</b> {formatW03PlDate(w03Meta.issueDate || W03_HEADER.issueDate)}<br/><b>Strona:</b> 1 z 1</td>
+        </tr></tbody></table>
+        <table className="w03-table">
+          <thead>
+            <tr>
+              <th rowSpan={2} className="w03-lp">L.p.</th>
+              <th rowSpan={2} className="w03-obj">OBIEKT</th>
+              <th colSpan={5}>CZĘSTOTLIWOŚĆ WYKONYWANIA PROCESU</th>
+              <th rowSpan={2} className="no-print w03-act">Akcje</th>
+            </tr>
+            <tr>
+              {W03_FREQ_KEYS.map(([, label]) => <th key={label}>{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {w03Docs.map((doc, i) => <tr key={doc.id}>
+              <td>{i + 1}</td>
+              <td className="left">
+                <input className="w03-cell-input w03-obj-input no-print" defaultValue={doc.data?.object_name || doc.product_name || ''} onBlur={e => saveW03Cell(doc, 'object_name', e.target.value)} />
+                <span className="print-only">{doc.data?.object_name || doc.product_name || ''}</span>
+              </td>
+              {W03_FREQ_KEYS.map(([key]) => <td key={key}>
+                <input className="w03-cell-input no-print" defaultValue={w03Freq(doc, key)} placeholder="M/C/D" onBlur={e => saveW03Cell(doc, key, e.target.value)} />
+                <span className="print-only">{w03Freq(doc, key)}</span>
+              </td>)}
+              <td className="no-print row-actions">
+                <button className="mini danger" onClick={() => deleteW03Row(doc)}>Usuń</button>
+              </td>
+            </tr>)}
+          </tbody>
+        </table>
+        <p className="w03-legend"><b>M</b> – mycie, <b>C</b> – czyszczenie, <b>D</b> – dezynfekcja</p>
+        <div className="w03-footer no-print">
+          <label>Zatwierdził<input value={w03Meta.approvedBy || ''} onChange={e => updateW03MetaField('approvedBy', e.target.value)} placeholder="podpis / imię i nazwisko" /></label>
+          <label>Data zatwierdzenia<input type="date" value={w03Meta.approvalDate || ''} onChange={e => updateW03MetaField('approvalDate', e.target.value)} /></label>
+        </div>
+        <div className="w03-footer print-only">
+          <span><b>Zatwierdził:</b> {w03Meta.approvedBy || ''}</span>
+          <span><b>Data i podpis:</b> {formatW03PlDate(w03Meta.approvalDate)}</span>
+        </div>
+      </div>
+      <div className="card inner-card no-print">
+        <h3>Dodaj obiekt do harmonogramu W03</h3>
+        <p className="hint">W kolumnach częstotliwości wpisz kody: M (mycie), C (czyszczenie), D (dezynfekcja), np. C/M lub M/D.</p>
+        <div className="form-grid compact w03-add-grid">
+          <label className="full-width">Obiekt<input value={w03NewRow.object_name} onChange={e => setW03NewRow(prev => ({ ...prev, object_name: e.target.value }))} placeholder="np. Sala pakowania – podłogi" /></label>
+          {W03_FREQ_KEYS.map(([key, label]) => <label key={key}>{label}<input value={w03NewRow[key]} onChange={e => setW03NewRow(prev => ({ ...prev, [key]: e.target.value }))} placeholder="M/C/D" /></label>)}
+        </div>
+        <div className="actions"><button onClick={addW03Object}>Dodaj obiekt</button></div>
+      </div>
+    </>
+  }
+
   function renderHubManualSection() {
     const code = activeDocsCode()
     const cards = activeHubCards()
@@ -2455,6 +2659,7 @@ function App() {
               <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
+          {code === 'W03' ? renderW03Section() : <>
           {cfg && renderManualHaccpEntrySection()}
           {hubManualGroups.length === 0 && <p className="hint">Brak wpisów. Dodaj pierwszy wpis powyżej.</p>}
           {hubManualGroups.length > 0 && <>
@@ -2475,6 +2680,7 @@ function App() {
                 </tr>
               })}</tbody>
             </table></div>
+          </>}
           </>}
         </section>
       </div>
@@ -2901,6 +3107,12 @@ function App() {
     if (!docsFiltersHydrated.current || docsFiltersSkipSave.current) return
     persistDocsFilters(docsFilter, getDocsFilterSnapshot())
   }, [docsDateFrom, docsDateTo, docsWorkflowFilter, haccpSearch, haccpStatusFilter, k03AssortmentFilter])
+
+  useEffect(() => {
+    if (docsHubSection !== 'wykazy' || docsWykazFilter !== 'W03' || !supabase) return
+    const count = (haccpDocs || []).filter(d => d.document_type === 'W03').length
+    if (count === 0) ensureW03Seed(false)
+  }, [docsHubSection, docsWykazFilter, haccpDocs, supabase])
 
   useEffect(() => {
     if (activeTab === 'kartoteki' && docsFilter === 'K03') {
