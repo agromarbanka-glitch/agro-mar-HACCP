@@ -2642,16 +2642,33 @@ function App() {
       const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
       const parsedParties = []
       let previewText = ''
+      const unreadable = []
+      const noParty = []
       for (const file of files) {
-        const { text, kind, party } = await parseW06FromPdfFile(file)
-        if (!previewText) previewText = String(text || '').slice(0, 2500)
-        if (party?.dedupe_key || party?.company_name) {
-          parsedParties.push(party)
+        const result = await parseW06FromPdfFile(file)
+        if (!previewText && result.text) previewText = String(result.text).slice(0, 2500)
+        if (result.unreadable) {
+          unreadable.push(file.name)
+          continue
+        }
+        if (result.party?.dedupe_key || result.party?.company_name) {
+          parsedParties.push(result.party)
         } else {
-          setMessage(`W06: ${file.name} – rozpoznano ${kind || '?'}, brak kontrahenta (sprawdź podgląd).`)
+          noParty.push(`${file.name} (${result.kind || '?'})`)
         }
       }
-      setW06PdfPreview(previewText)
+      setW06PdfPreview(previewText || (unreadable.length ? 'Nie udało się odczytać tekstu z PDF – użyj pliku z tekstem (nie skan) lub dodaj kontrahenta ręcznie.' : ''))
+      if (!parsedParties.length) {
+        if (unreadable.length) {
+          setMessage(`W06: PDF bez czytelnego tekstu (${unreadable.join(', ')}). Eksportuj dokument ponownie z programu (Subiekt/Comarch) lub dodaj ręcznie.`)
+        } else if (noParty.length) {
+          setMessage(`W06: odczytano tekst, ale nie rozpoznano kontrahenta w: ${noParty.join('; ')}. Uzupełnij ręcznie poniżej.`)
+        } else {
+          setMessage('W06: brak danych do dodania.')
+        }
+        setW06PdfInputKey(k => k + 1)
+        return
+      }
       const { added, skipped } = filterNewW06Parties(existing, parsedParties)
       for (const party of added) {
         const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(party))
@@ -2659,10 +2676,11 @@ function App() {
       }
       await loadHaccpDocs()
       setW06PdfInputKey(k => k + 1)
-      setMessage(
-        `W06: dodano ${added.length} nowych kontrahentów` +
-        (skipped.length ? `, pominięto ${skipped.length} duplikatów/już na liście` : '') + '.'
-      )
+      let msg = `W06: dodano ${added.length} nowych kontrahentów`
+      if (skipped.length) msg += `, pominięto ${skipped.length} duplikatów`
+      if (unreadable.length) msg += `. Nieczytelne PDF: ${unreadable.length}`
+      if (noParty.length) msg += `. Bez kontrahenta: ${noParty.length}`
+      setMessage(msg + '.')
     } catch (err) {
       setMessage(`W06: błąd importu PDF – ${err?.message || String(err)}`)
     } finally {

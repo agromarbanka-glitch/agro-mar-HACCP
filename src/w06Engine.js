@@ -1,10 +1,10 @@
 /**
  * W06 – kwalifikowani dostawcy i odbiorcy (import PDF PZ/WZ, deduplikacja).
  */
-import { extractPdfData } from './pdfImportEngine.js'
+import { extractPdfData, isReadablePdfText, rebuildTextFromItems } from './pdfImportEngine.js'
 import { isReadableName } from './k011InvoiceParser.js'
 
-export const W06_ENGINE_VERSION = '1.0'
+export const W06_ENGINE_VERSION = '1.1'
 export const AGRO_MAR_NIP = '7171839598'
 
 export const W06_PARTY_LABELS = {
@@ -51,9 +51,9 @@ export function w06DedupeKey(party) {
 export function detectW06DocKind(text, fileName = '') {
   const flat = `${text || ''} ${fileName || ''}`.toUpperCase()
   const fn = String(fileName).toUpperCase()
-  if (/\bPZ[\s./_-]|\bPZ\b|PRZYJ[EĘ]CIE/.test(flat) || fn.includes('PZ')) return 'PZ'
+  if (/\bPZ[\s./_-]|\bPZ\b|PRZYJ[EĘ]CIE|PRZYJECIE\s+ZEWN/.test(flat) || fn.includes('PZ')) return 'PZ'
   if (/\bMM[\s./_-]|\bMM\b/.test(flat) || fn.includes('MM')) return 'PZ'
-  if (/\bWZ[\s./_-]|\bWZ\b|WYDANIE/.test(flat) || fn.includes('WZ')) return 'WZ'
+  if (/\bWZ[\s./_-]|\bWZ\b|WYDANIE|WYDANIE\s+ZEWN/.test(flat) || fn.includes('WZ')) return 'WZ'
   if (/\bFS\b|\bFV\b|FAKTURA/.test(flat)) {
     const t = String(text || '')
     if (/nabywca[\s\S]{0,400}?7171839598/i.test(t) || /7171839598[\s\S]{0,400}?nabywca/i.test(t)) return 'PZ'
@@ -121,11 +121,47 @@ function findAddress(lines, nameLineIdx) {
   return parts.join(', ').slice(0, 160)
 }
 
+function extractLabelBlock(text, labels) {
+  for (const label of labels) {
+    const re = new RegExp(
+      `${label}\\s*[:\\-]?\\s*\\n?([\\s\\S]{0,350}?)(?=\\n\\s*(?:Nabywca|Odbiorca|Sprzedawca|Dostawca|Kontrahent|Wystawca|Tel\\.|Bank|Rachunek|Lp\\.|Produkt|$))`,
+      'i'
+    )
+    const m = text.match(re)
+    if (!m?.[1]) continue
+    const blockLines = toLines(m[1])
+    let name = ''
+    let nip = ''
+    let address = []
+    for (const line of blockLines) {
+      const nipM = line.match(/NIP\s*[:.]?\s*([0-9\-\\s]{10,13})/i)
+      if (nipM) {
+        nip = normalizeNip(nipM[1])
+        continue
+      }
+      if (/^(ul\.|tel|bank|konto|regon|www|email)/i.test(line)) {
+        if (/^ul\./i.test(line) || /^\d{2}-\d{3}/.test(line)) address.push(line)
+        continue
+      }
+      if (!name && line.length >= 3 && !isAgromarParty(line)) name = line
+      else if (name && /^\d{2}-\d{3}/.test(line)) address.push(line)
+    }
+    if (name && !isAgromarParty(name, nip)) {
+      return { name: name.slice(0, 200), nip, address: address.join(', ').slice(0, 160) }
+    }
+  }
+  return null
+}
+
 function extractPartyBlock(text, lines, kind) {
   const isSupplier = kind === 'PZ'
   const nameLabels = isSupplier
     ? ['Sprzedawca', 'Dostawca', 'Wystawca', 'Nadawca', 'Kontrahent']
     : ['Odbiorca', 'Nabywca', 'Klient', 'Odbiorca towaru']
+
+  const fromBlock = extractLabelBlock(text, nameLabels)
+  if (fromBlock?.name) return fromBlock
+
   const skip = [/nip/, /regon/, /konto/, /bank/, /tel/, /agro-mar/, /7171839598/, /nabywca/, /sprzedawca/]
 
   let name = labelValue(lines, nameLabels)
@@ -194,9 +230,20 @@ export function parseW06FromPdfText(text, fileName = '') {
 }
 
 export async function parseW06FromPdfFile(file) {
-  const { text } = await extractPdfData(file)
-  const parsed = parseW06FromPdfText(text, file.name)
-  return { text, ...parsed }
+  const { text, itemsByPage } = await extractPdfData(file)
+  let usableText = isReadablePdfText(text) ? text : rebuildTextFromItems(itemsByPage)
+  if (!isReadablePdfText(usableText)) {
+    return {
+      text: '',
+      kind: detectW06DocKind('', file.name),
+      party: null,
+      itemName: '',
+      textLength: 0,
+      unreadable: true
+    }
+  }
+  const parsed = parseW06FromPdfText(usableText, file.name)
+  return { text: usableText, unreadable: false, ...parsed }
 }
 
 export function existingW06DedupeKeys(docs) {

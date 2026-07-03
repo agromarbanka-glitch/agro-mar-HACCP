@@ -1,7 +1,7 @@
 /**
  * Import PDF → pola formularzy (K01.1, W04, W05)
  */
-import { getDocument } from 'pdfjs-dist'
+import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import {
   parseK011InvoiceAdvanced,
   buildK011UpdatesFromAdvanced,
@@ -12,7 +12,7 @@ import {
 
 export { isReadableName, polishDateToIso }
 
-export const PDF_IMPORT_VERSION = '1.4'
+export const PDF_IMPORT_VERSION = '1.5'
 
 export const PDF_IMPORT_DOC_TYPES = {
   'K01.1': { label: 'faktura zakupowa', accept: '.pdf,application/pdf' },
@@ -22,6 +22,15 @@ export const PDF_IMPORT_DOC_TYPES = {
 
 const PDFJS_VER = '4.4.168'
 const AGRO_MAR_NIP = '7171839598'
+
+try {
+  GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/build/pdf.worker.min.mjs',
+    import.meta.url
+  ).href
+} catch {
+  /* brak workera w środowisku bundlera */
+}
 
 function normalizeText(s) {
   return String(s || '')
@@ -157,57 +166,123 @@ function parseInvoiceLineItemsFromPositions(allItems) {
   return items
 }
 
+function decodeHexPdfString(hex) {
+  const clean = String(hex || '').replace(/\s/g, '')
+  if (clean.length < 4 || clean.length % 2) return ''
+  const bytes = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < clean.length; i += 2) {
+    bytes[i / 2] = parseInt(clean.slice(i, i + 2), 16)
+  }
+  try {
+    return new TextDecoder('utf-8').decode(bytes)
+  } catch {
+    return new TextDecoder('latin1').decode(bytes)
+  }
+}
+
+/** Odrzuca surową strukturę PDF (%PDF-, endobj…) zamiast treści dokumentu. */
+export function isReadablePdfText(text) {
+  const s = String(text || '').trim()
+  if (s.length < 12) return false
+  if (/%PDF-|endobj|\bobj\b|\/Creator\s*\(|\/Producer\s*\(|xref\s|startxref|stream\s|BT\s|ET\s/i.test(s)) return false
+  const letters = (s.match(/[\p{L}]/gu) || []).length
+  if (letters < 8) return false
+  const words = s.split(/\s+/).filter(Boolean)
+  const avgWordLen = words.reduce((a, w) => a + w.length, 0) / Math.max(words.length, 1)
+  const singleCharWords = words.filter(w => w.length === 1).length
+  const hasDocHint = /\b(Sprzedawca|Nabywca|Odbiorca|Dostawca|Wystawca|NIP|PZ|WZ|Faktura|Przyj|Wydan|Magazyn|Kontrahent|AGRO)/i.test(s)
+  if (avgWordLen < 2.2 && singleCharWords > 3 && !hasDocHint) return false
+  const weird = (s.match(/[^0-9a-zA-Z\sąćęłńóśźżĄĆĘŁŃÓŚŹŻ.,\-()/:%°@#&+]/gu) || []).length
+  return weird / s.length < 0.35
+}
+
 function decodePdfStreamFallback(buffer) {
   const raw = new TextDecoder('latin1').decode(buffer)
   const chunks = []
-  const tjRegex = /\(([^()\\]{1,300})\)\s*Tj/g
-  let m
-  while ((m = tjRegex.exec(raw)) !== null) {
-    const t = m[1]
-      .replace(/\\n/g, '\n')
-      .replace(/\\r/g, '')
-      .replace(/\\\(/g, '(')
-      .replace(/\\\)/g, ')')
-      .replace(/\\\\/g, '\\')
-    if (t.trim()) chunks.push(t.trim())
+  const patterns = [
+    /\(([^()\\]{1,500})\)\s*Tj/g,
+    /'([^'\\]{1,200})'\s*Tj/g,
+    /<([0-9A-Fa-f\s]{4,1200})>\s*Tj/g
+  ]
+  for (const re of patterns) {
+    let m
+    while ((m = re.exec(raw)) !== null) {
+      let t = m[1]
+      if (re.source.startsWith('<')) t = decodeHexPdfString(m[1])
+      else {
+        t = t
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '')
+          .replace(/\\\(/g, '(')
+          .replace(/\\\)/g, ')')
+          .replace(/\\\\/g, '\\')
+      }
+      if (t.trim() && t.length >= 2) chunks.push(t.trim())
+    }
   }
-  if (chunks.length > 20) return chunks.join('\n')
-  return raw
-    .replace(/\(([^()]{1,120})\)\s*Tj/g, '\n$1\n')
-    .replace(/[^\x09\x0A\x0D\x20-\x7EĄĆĘŁŃÓŚŹŻąćęłńóśźż]+/g, ' ')
+  const joined = chunks.join('\n')
+  return isReadablePdfText(joined) ? joined : ''
 }
 
-async function loadPdfDocument(buffer) {
-  return getDocument({
+async function loadPdfDocument(buffer, withCmap = true, disableWorker = false) {
+  const opts = {
     data: buffer,
-    disableWorker: true,
+    disableWorker,
     useWorkerFetch: false,
-    isEvalSupported: false,
-    cMapUrl: `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/cmaps/`,
-    cMapPacked: true,
-    standardFontDataUrl: `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/standard_fonts/`
-  }).promise
+    isEvalSupported: false
+  }
+  if (withCmap) {
+    opts.cMapUrl = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/cmaps/`
+    opts.cMapPacked = true
+    opts.standardFontDataUrl = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VER}/standard_fonts/`
+  }
+  return getDocument(opts).promise
+}
+
+export function rebuildTextFromItems(itemsByPage) {
+  return (itemsByPage || [])
+    .map(items => mergeTextItems(items))
+    .filter(Boolean)
+    .join('\n\n')
+    .trim()
+}
+
+function chooseReadableText(...candidates) {
+  const readable = candidates.map(c => String(c || '').trim()).filter(isReadablePdfText)
+  if (!readable.length) return ''
+  return readable.sort((a, b) => b.length - a.length)[0]
 }
 
 export async function extractPdfData(file) {
   const buffer = await file.arrayBuffer()
   const streamText = decodePdfStreamFallback(buffer)
-  const itemsByPage = []
-  try {
-    const pdf = await loadPdfDocument(buffer)
-    const parts = []
-    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
-      const page = await pdf.getPage(pageNo)
-      const content = await page.getTextContent()
-      itemsByPage.push(content.items || [])
-      parts.push(mergeTextItems(content.items))
+  let itemsByPage = []
+  let pdfText = ''
+
+  for (const withCmap of [true, false]) {
+    for (const disableWorker of [false, true]) {
+      try {
+        const pdf = await loadPdfDocument(buffer, withCmap, disableWorker)
+        const parts = []
+        itemsByPage = []
+        for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+          const page = await pdf.getPage(pageNo)
+          const content = await page.getTextContent()
+          itemsByPage.push(content.items || [])
+          parts.push(mergeTextItems(content.items))
+        }
+        pdfText = parts.join('\n\n').trim()
+        if (isReadablePdfText(pdfText)) break
+      } catch {
+        /* próba z/bez workera i cMap */
+      }
     }
-    const pdfText = parts.join('\n\n').trim()
-    const text = pickBestInvoiceText(pdfText, streamText)
-    return { text, itemsByPage }
-  } catch {
-    return { text: streamText, itemsByPage: [] }
+    if (isReadablePdfText(pdfText)) break
   }
+
+  const fromItems = rebuildTextFromItems(itemsByPage)
+  const text = chooseReadableText(pdfText, fromItems, pickBestInvoiceText(pdfText, streamText), streamText)
+  return { text, itemsByPage }
 }
 
 export async function extractPdfText(file) {
