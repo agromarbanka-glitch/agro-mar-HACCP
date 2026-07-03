@@ -198,3 +198,115 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k03-tabs { margin: 10px 0 14px; flex-wrap: wrap; }
 .k03-tabs .tab { font-size: 13px; }
 @media print { .k03-shortage-row td { background: #fff !important; color: #111; font-weight: 700; } }
+
+/* v36 – dokumentacja HACCP: hub, jedna tabela, magazyn */
+.docs-hub { display: grid; gap: 14px; }
+.docs-hub-head { margin-bottom: 0; }
+.docs-hub-head .section-title { margin-bottom: 0; }
+.docs-hub-nav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.docs-hub-tab {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #fff;
+  color: #23472b;
+  border: 1px solid #dfe7dc;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(33,45,30,.04);
+}
+.docs-hub-tab small { font-weight: 500; font-size: 11px; opacity: .75; }
+.docs-hub-tab.active { background: #23472b; color: #fff; border-color: #23472b; }
+.docs-hub-tab.active small { opacity: .85; }
+.docs-panel { padding: 18px 20px; }
+.docs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 18px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #e8ece6;
+}
+.docs-k-select { font-weight: 700; min-width: 280px; }
+.docs-k-select select {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 11px 12px;
+  border: 1px solid #cfd8cf;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  background: #f7faf6;
+}
+.docs-meta { flex: 1; min-width: 200px; color: #657068; font-size: 13px; line-height: 1.35; }
+.docs-stats { font-size: 13px; color: #536156; white-space: nowrap; }
+.docs-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+.docs-filters label { font-size: 12px; font-weight: 700; color: #445; }
+.docs-filters input, .docs-filters select {
+  display: block;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid #d8ded8;
+  border-radius: 10px;
+  min-width: 120px;
+  font-size: 13px;
+}
+.docs-actions { margin-top: 0; margin-bottom: 16px; }
+.docs-table-wrap { max-height: 420px; border-radius: 12px; }
+.docs-table { min-width: 640px; }
+.docs-table th, .docs-table td { font-size: 13px; padding: 8px 10px; }
+.docs-table.compact th, .docs-table.compact td { font-size: 12px; padding: 6px 8px; }
+.docs-table .row-frozen { background: #f0f7f1; }
+.docs-k03-wz {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #dce8dc;
+  border-radius: 14px;
+  background: #f8fbf8;
+}
+.docs-k03-wz summary { cursor: pointer; font-size: 14px; margin-bottom: 8px; }
+.k03-inline-filters { margin-top: 10px; align-items: center; }
+.k03-inline-filters .tab { padding: 6px 10px; font-size: 12px; }
+.docs-frozen-panel { background: #fafcf9; border: 1px solid #e0e8e0; }
+.docs-frozen-panel h3 { margin: 0 0 10px; font-size: 16px; }
+.frozen-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.frozen-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #eef6ef;
+  border: 1px solid #c8dcc9;
+}
+.frozen-item small { color: #657068; flex: 1; min-width: 120px; }
+.docs-history { margin-top: 8px; }
+.docs-history summary { cursor: pointer; font-weight: 700; color: #23472b; }
+.docs-placeholder { text-align: left; }
+.card.collapsible { padding: 0; overflow: hidden; }
+.card.collapsible summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 18px 22px;
+}
+.card.collapsible summary::-webkit-details-marker { display: none; }
+.card.collapsible[open] summary { border-bottom: 1px solid #e8ece6; }
+.card.collapsible > :not(summary) { padding: 0 22px 18px; }
+@media (max-width: 760px) {
+  .docs-toolbar { flex-direction: column; align-items: stretch; }
+  .docs-k-select { min-width: 0; }
+}

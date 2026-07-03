@@ -16,6 +16,14 @@ const PRODUCTS = [
   ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab']
 ]
 
+const DOCS_HUB_SECTIONS = [
+  ['kartoteki', 'Kartoteki', 'K01–K07 karty kontrolne HACCP'],
+  ['wykazy', 'Wykazy', 'W01–W10'],
+  ['formularze', 'Formularze', 'F01–F03'],
+  ['protokoly', 'Protokoły', 'PR01–PR08'],
+  ['specyfikacje', 'Specyfikacje', 'S01–S09']
+]
+
 const DOCS = [
   ['Karty kontrolne', 'K01-K06', 'Przyjęcia, temperatury, identyfikacja partii, jakość'],
   ['Raporty', 'R00-R13', 'Mycie, higiena, reklamacje, CCP, magnesy, szkło'],
@@ -214,6 +222,7 @@ function App() {
   const [importPreview, setImportPreview] = useState([])
   const [haccpDocs, setHaccpDocs] = useState([])
   const [docsFilter, setDocsFilter] = useState('K01')
+  const [docsHubSection, setDocsHubSection] = useState('kartoteki')
   const [haccpSearch, setHaccpSearch] = useState('')
   const [haccpStatusFilter, setHaccpStatusFilter] = useState('all')
   const [haccpPeriodMode, setHaccpPeriodMode] = useState('month')
@@ -406,6 +415,19 @@ function App() {
       return true
     })
   }, [wzQueueLines, k03AssortmentFilter, k03YearFilter, k03MonthFilter])
+  const frozenKartoteki = useMemo(() => {
+    const items = []
+    for (const doc of syntheticK03Docs) {
+      if (!doc.frozen && doc.data?.frozen !== true) continue
+      items.push({
+        type: 'K03',
+        label: `${doc.document_no || '-'} · ${doc.product_name || ''}`,
+        sub: doc.lot_no || doc.document_date || '',
+        group: { key: doc.id, type: 'K03', product: doc.product_name, docs: [doc] }
+      })
+    }
+    return items.sort((a, b) => String(b.group.docs[0]?.document_date || '').localeCompare(String(a.group.docs[0]?.document_date || '')))
+  }, [syntheticK03Docs])
 
   function setK03GroupEmployee(doc, employeeName) {
     if (!doc?.id) return
@@ -3460,8 +3482,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     ['importy', 'Importy Excel', Upload],
     ['pz', 'PZ / FIFO', Database],
     ['magazyn', 'Magazyn', Warehouse],
-    ['produkcja', 'Produkcja / Przerób', Package],
-    ['kartoteki', 'Kartoteki HACCP', ClipboardList],
+    ['kartoteki', 'Dokumentacja HACCP', ClipboardList],
     ['raporty', 'Raporty', FileText],
     ['ustawienia', 'Ustawienia', Settings]
   ]
@@ -3784,11 +3805,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </tr>)}</tbody>
       </table></div>}
     </section>
-    </>}
 
-    {activeTab === 'produkcja' && <>
-    <section className="card">
-      <div className="section-title"><Package/><div><h2>Produkcja / Przerób</h2><p>Ręczna decyzja, czy dana partia surowca idzie do przerobu na pulpę lub produkt gotowy. FIFO dalej zostaje po dacie przyjęcia i partii.</p></div></div>
+    <details className="card collapsible">
+      <summary><div className="section-title"><Package/><div><h2>Przerób partii (magazyn)</h2><p>Fizyczne przekształcenie partii surowca w produkt gotowy. Decyzja papierowa K03/WZ jest w Dokumentacja → K03.</p></div></div></summary>
       <div className="form-grid">
         <label>Rola użytkownika
           <select value={userRole} onChange={e => setUserRole(e.target.value)}>
@@ -3828,15 +3847,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <input value={productionYieldPercent} onChange={e => setProductionYieldPercent(e.target.value)} placeholder="np. 92" />
         </label>
         <label>Ilość produktu gotowego kg
-          <input value={productionOutputQty} onChange={e => setProductionOutputQty(e.target.value)} placeholder="np. 4800 albo taka sama ilość bez przerobu" />
+          <input value={productionOutputQty} onChange={e => setProductionOutputQty(e.target.value)} placeholder="np. 4800" />
         </label>
       </div>
-      <div className="actions"><button className="ghost" onClick={calculateProductionOutputQty}>Oblicz wg uzysku</button><button className="secondary" onClick={createProductionConversion}>Utwórz przerób / produkcję</button></div>
-      <p className="hint">Przykład: wybierz partię Malina I, wpisz ilość, wybierz „Malina pulpa” albo ten sam owoc bez przerobu. System zdejmie ilość z partii wejściowej, utworzy nową partię produktu gotowego, zapisze powiązanie partia wejściowa → partia wyjściowa i przypisze pulpę do CCP1.</p>
-    </section>
+      <div className="actions"><button className="ghost" onClick={calculateProductionOutputQty}>Oblicz wg uzysku</button><button className="secondary" onClick={createProductionConversion}>Utwórz przerób</button></div>
+      <p className="hint">Tworzy nową partię produktu gotowego i wpisy K06/K07. Formularz K03 tworzysz osobno przy WZ.</p>
+    </details>
 
-    <section className="card">
-      <div className="section-title"><ShieldCheck/><div><h2>Zmiana numeru partii</h2><p>Tylko administrator, zawsze z potwierdzeniem i zapisem historii zmiany.</p></div></div>
+    <details className="card collapsible">
+      <summary><div className="section-title"><ShieldCheck/><div><h2>Zmiana numeru partii (admin)</h2><p>Tylko administrator, z potwierdzeniem i historią.</p></div></div></summary>
       <div className="form-grid">
         <label>Partia
           <select value={lotEditId} onChange={e => setLotEditId(e.target.value)} disabled={userRole !== 'admin'}>
@@ -3853,12 +3872,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </div>
       <div className="actions"><button className="secondary" onClick={changeLotNumberAsAdmin} disabled={userRole !== 'admin'}>Zmień numer partii</button></div>
       {userRole !== 'admin' && <p className="hint danger-text">Magazynier nie może zmieniać numerów partii.</p>}
-    </section>
-    </>}
+    </details>
 
-    {activeTab === 'magazyn' && <>
     <section className="card">
-      <div className="section-title"><Warehouse/><div><h2>Stany partii i FIFO</h2><p>Podgląd pozostałych kilogramów z PZ oraz ostatnich rozliczeń WZ/FV według FIFO.</p></div></div>
+      <div className="section-title"><ArrowRightLeft/><div><h2>Stany partii i FIFO</h2><p>Podgląd pozostałych kilogramów z PZ oraz ostatnich rozliczeń WZ/FV według FIFO.</p></div></div>
       <div className="actions"><button className="secondary" onClick={loadFifoData} disabled={loadingStock}><RefreshCcw size={16}/> {loadingStock ? 'Odświeżanie...' : 'Odśwież stany FIFO'}</button></div>
       <div className="summary">
         <span>Partie: <b>{stockRows.length}</b></span>
@@ -3881,192 +3898,199 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </>}
 
     {activeTab === 'kartoteki' && <>
-    <section className="card" id="kartoteki-haccp">
-      <div className="section-title"><ClipboardList/><div><h2>Kartoteki HACCP</h2><p><b>v35 · K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · K04–K07 {HACCP_FORMS_VERSION}</b> – K03 po decyzji przerób/brak przerobu, K04/K07 dzienne, K04.1/K05/K06 ręczne.</p></div></div>
-      <div className="haccp-card-grid">
-        {HACCPCARDS.map(([code, title, desc]) => <button key={code} className={docsFilter === code ? 'haccp-card active' : 'haccp-card'} onClick={() => { setDocsFilter(code); if (code === 'K03') loadK03TraceData(); if (MANUAL_HACCP_FORMS[code]) resetManualHaccpForm(code) }}>
-          <b>{title}</b><small>{desc}</small>
-          <span><b>{haccpCount(code)}</b> dokumentów · <b>{haccpNonconformityCount(code)}</b> N · <b>{haccpPendingCount(code)}</b> bez podpisu</span>
-        </button>)}
-      </div>
-      <div className="form-grid compact">
-        <label>Szukaj partii / produktu / PZ / dostawcy<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="np. Jab/067, PZ/..., dostawca" /></label>
-        <label>Status<select value={haccpStatusFilter} onChange={e => setHaccpStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="P">Prawidłowe P</option><option value="N">Niezgodność N</option></select></label>
-      </div>
-      {docsFilter !== 'K03' && <div className="form-grid compact">
-        <label>Okres<select value={haccpPeriodMode} onChange={e => setHaccpPeriodMode(e.target.value)}><option value="month">Miesiąc</option><option value="range">Własny zakres</option></select></label>
-        {haccpPeriodMode === 'month' && <label>Miesiąc<input type="month" value={haccpMonth} onChange={e => setHaccpMonth(e.target.value)} /></label>}
-        {haccpPeriodMode === 'range' && <><label>Od<input type="date" value={haccpFrom} onChange={e => setHaccpFrom(e.target.value)} /></label><label>Do<input type="date" value={haccpTo} onChange={e => setHaccpTo(e.target.value)} /></label></>}
-      </div>}
-      <div className="actions"><button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież kartoteki</button>{docsFilter === 'K03' && <><button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO (admin)</button></>}</div>
-      {docsFilter === 'K03' && <>
-        <div className="k03-status-box">
-          <strong>K03 – status (wersja {K03_ENGINE_VERSION} / WZ {K03_WZ_ENGINE_VERSION})</strong>
-          <p>{k03Loading ? 'Ładowanie formularzy…' : (k03PanelNote || 'Kliknij „Odśwież kartoteki”, jeśli lista jest pusta.')}</p>
-          <p className="hint">
-            W bazie: <b>{k03Diag.wzDocs}</b> WZ · <b>{wzQueueLines.length || k03Diag.saleLines || k03Diag.forms}</b> pozycji ·
-            <b> {syntheticK03Docs.length}</b> kartotek K03 ·
-            <b> {filteredWzQueueLines.filter(l => l.status === 'pending').length}</b> oczekuje
-            {k03Diag.source ? ` · źródło: ${k03Diag.source}` : ''}
-          </p>
-          <p className="hint">Najpierw wybierz WZ z listy poniżej → <b>Dodaj przerób</b> lub <b>Brak przerobu</b>. Zamrożenie K03 tylko ręcznie (przycisk w kartotece). Uruchom migrację SQL <b>v34</b> dla historii zmian.</p>
+    <div className="docs-hub">
+      <header className="docs-hub-head">
+        <div className="section-title"><ClipboardList/><div><h2>Dokumentacja HACCP</h2><p>Kartoteki, wykazy, formularze i protokoły w jednym miejscu.</p></div></div>
+      </header>
+
+      <nav className="docs-hub-nav">
+        {DOCS_HUB_SECTIONS.map(([key, label, desc]) => (
+          <button key={key} type="button" className={docsHubSection === key ? 'docs-hub-tab active' : 'docs-hub-tab'} onClick={() => setDocsHubSection(key)}>
+            <b>{label}</b><small>{desc}</small>
+          </button>
+        ))}
+      </nav>
+
+      {docsHubSection !== 'kartoteki' && (
+        <section className="card docs-placeholder">
+          <h3>{DOCS_HUB_SECTIONS.find(s => s[0] === docsHubSection)?.[1]}</h3>
+          <p className="hint">Sekcja w przygotowaniu – dokumenty z tej kategorii będą dodawane w kolejnych etapach.</p>
+          <div className="doc-progress">{DOCS.filter((_, i) => {
+            if (docsHubSection === 'wykazy') return i === 4
+            if (docsHubSection === 'formularze') return i === 2
+            if (docsHubSection === 'protokoly') return i === 3
+            if (docsHubSection === 'specyfikacje') return i === 7
+            return false
+          }).map(d => <span key={d[0]} className="pill">{d[1]}</span>)}</div>
+        </section>
+      )}
+
+      {docsHubSection === 'kartoteki' && <>
+      <section className="card docs-panel" id="kartoteki-haccp">
+        <div className="docs-toolbar">
+          <label className="docs-k-select">Kartoteka
+            <select value={docsFilter} onChange={e => {
+              const code = e.target.value
+              setDocsFilter(code)
+              if (code === 'K03') loadK03TraceData()
+              if (MANUAL_HACCP_FORMS[code]) resetManualHaccpForm(code)
+            }}>
+              {HACCPCARDS.map(([code, title]) => <option key={code} value={code}>{code} – {title.replace(/^K[0-9.]+ – /, '')}</option>)}
+            </select>
+          </label>
+          <span className="docs-meta">{HACCPCARDS.find(c => c[0] === docsFilter)?.[2]}</span>
+          <span className="docs-stats"><b>{haccpCount(docsFilter)}</b> wpisów · <b>{haccpNonconformityCount(docsFilter)}</b> N · <b>{haccpPendingCount(docsFilter)}</b> bez podpisu</span>
         </div>
-        <h3>Lista WZ – decyzja przed K03</h3>
-        <p className="hint">Jedna linia = jeden asortyment na WZ. K03 powstaje dopiero po Twojej decyzji.</p>
-        {filteredWzQueueLines.length === 0 && !k03Loading && <p className="hint">Brak WZ w wybranym filtrze. Zaimportuj Excel → Zapisz do Supabase → Odśwież.</p>}
-        {filteredWzQueueLines.length > 0 && <div className="table-wrap small"><table>
-          <thead><tr><th>Asortyment</th><th>Data WZ</th><th>Nr WZ</th><th>Ilość kg</th><th>Status</th><th>Tryb</th><th>Akcje</th></tr></thead>
-          <tbody>{filteredWzQueueLines.map(line => {
-            const canDecide = line.status === 'pending'
-            const modeLabel = line.workflow?.mode === 'przerob' ? 'Przerób' : line.workflow?.mode === 'bez_przerobu' ? 'Bez przerobu' : '-'
-            return <tr key={line.key}>
-              <td><b>{line.product_name}</b></td>
-              <td>{line.wz_date || '-'}</td>
-              <td><b>{line.document_no || '-'}</b></td>
-              <td>{Number(line.qty || 0).toLocaleString('pl-PL')}</td>
-              <td><span className={line.status === 'pending' ? 'pill' : line.status === 'frozen' ? 'status ok' : 'status'}>{wzStatusLabel(line.status)}</span></td>
-              <td>{modeLabel}</td>
-              <td className="row-actions">
-                {canDecide && !line.frozen && <>
-                  <button className="mini" onClick={() => openK03WzModal(line, 'przerob')}>Dodaj przerób</button>
-                  <button className="mini secondary" onClick={() => openK03WzModal(line, 'bez_przerobu')}>Brak przerobu</button>
-                </>}
-                {line.k03Form && <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [line.k03Form] } })}><Eye size={14}/> K03</button>}
-                {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
-              </td>
-            </tr>
-          })}</tbody>
-        </table></div>}
-        {k03WorkflowHistory.length > 0 && <>
-          <h3>Historia decyzji K03/WZ</h3>
-          <div className="table-wrap small"><table>
-            <thead><tr><th>Data</th><th>WZ</th><th>Produkt</th><th>Akcja</th><th>Powód</th><th>Kto</th></tr></thead>
-            <tbody>{k03WorkflowHistory.slice(0, 50).map(h => <tr key={h.id}>
-              <td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td>
-              <td><b>{h.wz_no || '-'}</b></td>
-              <td>{h.product_name || '-'}</td>
-              <td>{h.change_type || '-'}</td>
-              <td>{h.change_reason || '-'}</td>
-              <td>{h.changed_by || '-'}</td>
-            </tr>)}</tbody>
-          </table></div>
+
+        <div className="docs-filters">
+          <label>Szukaj<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="partia, PZ, produkt…" /></label>
+          <label>Status<select value={haccpStatusFilter} onChange={e => setHaccpStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="P">P</option><option value="N">N</option></select></label>
+          {docsFilter !== 'K03' && <>
+            <label>Okres<select value={haccpPeriodMode} onChange={e => setHaccpPeriodMode(e.target.value)}><option value="month">Miesiąc</option><option value="range">Zakres</option></select></label>
+            {haccpPeriodMode === 'month' && <label>Miesiąc<input type="month" value={haccpMonth} onChange={e => setHaccpMonth(e.target.value)} /></label>}
+            {haccpPeriodMode === 'range' && <><label>Od<input type="date" value={haccpFrom} onChange={e => setHaccpFrom(e.target.value)} /></label><label>Do<input type="date" value={haccpTo} onChange={e => setHaccpTo(e.target.value)} /></label></>}
+          </>}
+        </div>
+
+        <div className="actions docs-actions">
+          <button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież</button>
+          {docsFilter === 'K03' && <>
+            <button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'FIFO…' : 'Uzupełnij FIFO'}</button>
+            <button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO</button>
+          </>}
+        </div>
+
+        {docsFilter === 'K03' && <>
+          <details className="docs-k03-wz" open>
+            <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje · {syntheticK03Docs.length} K03</summary>
+            {filteredWzQueueLines.length === 0 && !k03Loading && <p className="hint">Brak WZ. Import Excel → Zapisz do Supabase.</p>}
+            {filteredWzQueueLines.length > 0 && <div className="table-wrap docs-table-wrap"><table className="docs-table">
+              <thead><tr><th>Asortyment</th><th>Data WZ</th><th>Nr WZ</th><th>Ilość</th><th>Status</th><th>Akcje</th></tr></thead>
+              <tbody>{filteredWzQueueLines.map(line => {
+                const canDecide = line.status === 'pending'
+                return <tr key={line.key}>
+                  <td><b>{line.product_name}</b></td>
+                  <td>{line.wz_date || '-'}</td>
+                  <td>{line.document_no || '-'}</td>
+                  <td>{Number(line.qty || 0).toLocaleString('pl-PL')} kg</td>
+                  <td><span className={line.status === 'frozen' ? 'status ok' : 'pill'}>{wzStatusLabel(line.status)}</span></td>
+                  <td className="row-actions">
+                    {canDecide && <>
+                      <button className="mini" onClick={() => openK03WzModal(line, 'przerob')}>Przerób</button>
+                      <button className="mini secondary" onClick={() => openK03WzModal(line, 'bez_przerobu')}>Bez przerobu</button>
+                    </>}
+                    {line.k03Form && <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [line.k03Form] } })}><Eye size={14}/></button>}
+                    {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
+                  </td>
+                </tr>
+              })}</tbody>
+            </table></div>}
+            <div className="docs-filters k03-inline-filters">
+              {K03_ASSORTMENT_TABS.map(([code, label]) => {
+                const count = k03AssortmentCounts.get(code) || 0
+                return <button key={code} type="button" className={k03AssortmentFilter === code ? 'tab active' : 'tab'} onClick={() => setK03AssortmentFilter(code)}>{label} ({count})</button>
+              })}
+              <label>Rok<select value={k03YearFilter} onChange={e => setK03YearFilter(e.target.value)}><option value="all">Wszystkie</option>{k03YearOptions.map(y => <option key={y} value={y}>{y}</option>)}</select></label>
+              <label>Mies.<select value={k03MonthFilter} onChange={e => setK03MonthFilter(e.target.value)}><option value="all">Wszystkie</option>{['01','02','03','04','05','06','07','08','09','10','11','12'].map(m => <option key={m} value={m}>{m}</option>)}</select></label>
+              <label>Podpis zbiorczy<select value={defaultK03Employee} onChange={e => setDefaultK03Employee(e.target.value)}><option value="">—</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></label>
+              <button type="button" className="mini secondary" onClick={() => setEmployeeForVisibleK03Forms(defaultK03Employee, true)}>Uzupełnij puste</button>
+            </div>
+          </details>
         </>}
-        <div className="haccp-tabs k03-tabs">
-          {K03_ASSORTMENT_TABS.map(([code, label]) => {
-            const count = k03AssortmentCounts.get(code) || 0
-            return <button key={code} className={k03AssortmentFilter === code ? 'tab active' : 'tab'} onClick={() => setK03AssortmentFilter(code)}>{label} ({count})</button>
-          })}
-        </div>
-        <div className="form-grid compact k03-filters">
-          <label>Rok
-            <select value={k03YearFilter} onChange={e => setK03YearFilter(e.target.value)}>
-              <option value="all">Wszystkie</option>
-              {k03YearOptions.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </label>
-          <label>Miesiąc
-            <select value={k03MonthFilter} onChange={e => setK03MonthFilter(e.target.value)}>
-              <option value="all">Wszystkie</option>
-              {['01','02','03','04','05','06','07','08','09','10','11','12'].map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </label>
-          <label>Podpis (zbiorczo)
-            <select value={defaultK03Employee} onChange={e => setDefaultK03Employee(e.target.value)}>
-              <option value="">Wybierz pracownika</option>
-              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
-            </select>
-          </label>
-          <div className="actions inline">
-            <button className="secondary" onClick={() => setEmployeeForVisibleK03Forms(defaultK03Employee, false)}>Zastosuj podpis do wszystkich widocznych</button>
-            <button className="secondary" onClick={() => setEmployeeForVisibleK03Forms(defaultK03Employee, true)}>Uzupełnij tylko puste</button>
-          </div>
-        </div>
+
+        {docsFilter === 'K01.1' && renderK011Section()}
+        {MANUAL_HACCP_FORMS[docsFilter] && renderManualHaccpEntrySection()}
+
+        {!['K01.1', 'K04.1', 'K05'].includes(docsFilter) && <>
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – przypisz partie w Magazyn → CP3.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak K07 – wpisy po przerobie partii (Magazyn → Przerób partii).</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – auto po produkcji lub ręczny wpis poniżej.</p>}
+          {haccpMonthlyGroups.length === 0 && !['K03','K04','K06','K07'].includes(docsFilter) && <p className="hint">Brak kartotek dla filtrów.</p>}
+
+          {haccpMonthlyGroups.length > 0 && <div className="table-wrap docs-table-wrap"><table className="docs-table">
+            <thead><tr>
+              {docsFilter === 'K03'
+                ? <><th>Data WZ</th><th>Nr WZ</th><th>Partia</th><th>Produkt</th><th>WZ kg</th><th>PZ kg</th><th>Status</th><th>FIFO</th><th>Podpis</th><th>Akcje</th></>
+                : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>N</th><th>Akcje</th></>}
+            </tr></thead>
+            <tbody>{haccpMonthlyGroups.map(g => {
+              const doc = g.docs[0]
+              if (docsFilter === 'K03' && doc) {
+                const saleQty = Number(doc.qty || 0)
+                const pzQty = Number(doc.data?.rawTotal || 0)
+                const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
+                return <tr key={g.key} className={doc.frozen ? 'row-frozen' : ''}>
+                  <td>{doc.document_date || '-'}</td>
+                  <td><b>{doc.document_no || '-'}</b></td>
+                  <td>{doc.lot_no || '-'}</td>
+                  <td>{doc.product_name || g.product}</td>
+                  <td>{saleQty.toLocaleString('pl-PL')}</td>
+                  <td>{pzQty.toLocaleString('pl-PL')}</td>
+                  <td>{doc.frozen ? <span className="status ok">Zamrożony</span> : <span className="pill">Roboczy</span>}</td>
+                  <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : '!'}</span></td>
+                  <td>
+                    <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => setK03GroupEmployee(doc, e.target.value)}>
+                      <option value="">—</option>
+                      {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                    </select>
+                  </td>
+                  <td className="row-actions">
+                    <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })} title="Otwórz / edytuj"><Eye size={14}/></button>
+                    <button className="mini secondary" onClick={() => printHaccpGroup(g)} title="Druk"><Printer size={14}/></button>
+                    <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)} title="Excel">XLS</button>
+                  </td>
+                </tr>
+              }
+              return <tr key={g.key}>
+                <td>{periodLabel(g)}</td>
+                <td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td>
+                <td>{g.docs.length}</td>
+                <td>{g.docs.filter(d => d.status === 'N').length || '—'}</td>
+                <td className="row-actions">
+                  <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
+                  <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
+                  <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                </td>
+              </tr>
+            })}</tbody>
+          </table></div>}
+        </>}
+      </section>
+
+      {(frozenKartoteki.length > 0 || k03WorkflowHistory.length > 0) && (
+        <section className="card docs-frozen-panel">
+          {frozenKartoteki.length > 0 && <>
+            <h3>Zamrożone kartoteki ({frozenKartoteki.length})</h3>
+            <div className="frozen-list">
+              {frozenKartoteki.map(item => (
+                <div key={item.group.key} className="frozen-item">
+                  <span><b>{item.type}</b> {item.label}</span>
+                  <small>{item.sub}</small>
+                  <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: item.group })}>Otwórz</button>
+                </div>
+              ))}
+            </div>
+          </>}
+          {k03WorkflowHistory.length > 0 && (
+            <details className="docs-history">
+              <summary>Historia decyzji K03/WZ ({k03WorkflowHistory.length})</summary>
+              <div className="table-wrap docs-table-wrap"><table className="docs-table compact">
+                <thead><tr><th>Data</th><th>WZ</th><th>Produkt</th><th>Akcja</th><th>Powód</th></tr></thead>
+                <tbody>{k03WorkflowHistory.slice(0, 30).map(h => <tr key={h.id}>
+                  <td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td>
+                  <td>{h.wz_no || '-'}</td>
+                  <td>{h.product_name || '-'}</td>
+                  <td>{h.change_type || '-'}</td>
+                  <td>{h.change_reason || '-'}</td>
+                </tr>)}</tbody>
+              </table></div>
+            </details>
+          )}
+        </section>
+      )}
       </>}
-      {docsFilter === 'K01.1' && renderK011Section()}
-      {MANUAL_HACCP_FORMS[docsFilter] && renderManualHaccpEntrySection()}
-      {!['K01.1', 'K04.1', 'K05'].includes(docsFilter) && <>
-      <div className="doc-progress">{['K01','K02','K03','K04','K04.1','K05','K06','K07'].map(code => <span key={code} className={haccpCount(code) ? 'done' : ''}>{code} {haccpCount(code) ? '✔' : '○'}</span>)}</div>
-      <h3>{docsFilter === 'K03' ? 'Formularze K03 – jedna sprzedaż (WZ) = jedna kartoteka' : 'Kartoteki zbiorcze – CIĄGŁY zapis całego miesiąca / zakresu dat'}</h3>
-      <p className="hint">{docsFilter === 'K03'
-        ? <>Wybierz asortyment, rok i miesiąc powyżej, potem kliknij <b>Kartoteka</b> przy wybranym WZ. Suma PZ po lewej musi równać się ilości WZ po prawej.</>
-        : <> <b>Klikaj „Kartoteka” w tej sekcji.</b> Dla K01 system pokazuje wszystkie wpisy z wybranego miesiąca w jednym formularzu; pojedyncze „szczegóły” nie tworzą już osobnej kartki.</>}</p>
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03. Wybierz WZ z listy powyżej i kliknij „Dodaj przerób” lub „Brak przerobu”.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak kartotek K04. Przypisz partie produktu gotowego do komory CP3 w zakładce Magazyn, potem kliknij „Odśwież magazyn partii” i „Odśwież kartoteki”. Towar prosto na samochód → K04.1.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak kartotek K07. Wpisy powstają po przerobie (zakładka Produkcja / Przerób). Odśwież magazyn i kartoteki.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak kartotek K06 w tabeli powyżej – sprawdź podgląd papierowy niżej. Auto: partie w CP3 lub po produkcji. Odśwież magazyn + kartoteki.</p>}
-      {haccpMonthlyGroups.length === 0 && docsFilter !== 'K03' && docsFilter !== 'K04' && docsFilter !== 'K07' && docsFilter !== 'K06' && <p className="hint">Brak kartotek dla wybranego okresu i filtrów.</p>}
-      {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr>
-          <th>Kartoteka</th>
-          {docsFilter === 'K03' ? <><th>Data WZ</th><th>Nr WZ</th><th>Partia</th><th>Asortyment</th><th>Ilość WZ</th><th>Suma PZ</th><th>Status</th><th>FIFO</th><th>Niezgodności</th></> : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th></>}
-          <th>Akcje</th>
-        </tr></thead>
-        <tbody>{haccpMonthlyGroups.map(g => {
-          const doc = g.docs[0]
-          if (docsFilter === 'K03' && doc) {
-            const saleQty = Number(doc.qty || 0)
-            const pzQty = Number(doc.data?.rawTotal || 0)
-            const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
-            return <tr key={g.key}>
-              <td><b>{g.type}</b></td>
-              <td>{doc.document_date || '-'}</td>
-              <td><b>{doc.document_no || '-'}</b></td>
-              <td>{doc.lot_no || '-'}</td>
-              <td>{doc.product_name || g.product}</td>
-              <td>{saleQty.toLocaleString('pl-PL')} kg</td>
-              <td>{pzQty.toLocaleString('pl-PL')} kg</td>
-              <td>{doc.frozen ? <span className="status ok">Zamrożony</span> : <span className="hint">Roboczy</span>}</td>
-              <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : 'BRAK'}</span></td>
-              <td>{doc.status === 'N' ? 1 : 0}</td>
-              <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td>
-            </tr>
-          }
-          return <tr key={g.key}><td><b>{g.type}</b></td><td>{periodLabel(g)}</td><td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td><td>{g.docs.length}</td><td>{g.docs.filter(d => d.status === 'N').length}</td><td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Kartoteka</button><button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/> Druk/PDF</button><button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>Excel</button></td></tr>
-        })}</tbody>
-      </table></div>}
-      <h3>{docsFilter === 'K03' ? 'Edycja formularzy K03' : 'Kartoteki do edycji – dokładnie te same pozycje co wyżej'}</h3>
-      <p className="hint">{docsFilter === 'K03'
-        ? 'Te same pozycje co powyżej. W formularzu możesz ustawić podpis uzupełniającego wpisy.'
-        : <> <b>Ta sekcja ma mieć taką samą liczbę pozycji jak sekcja u góry.</b> Kliknięcie „Edytuj kartotekę” otwiera całą miesięczną kartotekę asortymentu w trybie edycji: P/N, podpis pracownika i PZ.</>}</p>
-      {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek do edycji dla wybranego okresu i filtrów.</p>}
-      {haccpMonthlyGroups.length > 0 && <div className="table-wrap small"><table>
-        <thead><tr>
-          <th>Kartoteka</th>
-          {docsFilter === 'K03' ? <><th>Data WZ</th><th>Nr WZ</th><th>Asortyment</th><th>Ilość WZ</th><th>Podpis</th><th>FIFO</th></> : <><th>Okres</th><th>Produkt / komora</th><th>Wpisy</th><th>Niezgodności</th></>}
-          <th>Akcje</th>
-        </tr></thead>
-        <tbody>{haccpMonthlyGroups.map(g => {
-          const doc = g.docs[0]
-          if (docsFilter === 'K03' && doc) {
-            const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
-            return <tr key={`edit-${g.key}`}>
-              <td><b>{g.type}</b></td>
-              <td>{doc.document_date || '-'}</td>
-              <td><b>{doc.document_no || '-'}</b></td>
-              <td>{doc.product_name || g.product}</td>
-              <td>{Number(doc.qty || 0).toLocaleString('pl-PL')} kg</td>
-              <td>
-                <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => setK03GroupEmployee(doc, e.target.value)}>
-                  <option value="">Wybierz</option>
-                  {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
-                </select>
-              </td>
-              <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : 'BRAK'}</span></td>
-              <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
-            </tr>
-          }
-          return <tr key={`edit-${g.key}`}>
-            <td><b>{g.type}</b></td>
-            <td>{periodLabel(g)}</td>
-            <td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td>
-            <td>{g.docs.length}</td>
-            <td>{g.docs.filter(d => d.status === 'N').length}</td>
-            <td className="row-actions"><button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Edytuj kartotekę</button></td>
-          </tr>
-        })}</tbody>
-      </table></div>}
-      </>}
-    </section>
+    </div>
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     {renderK03WzModal()}
     </>}
