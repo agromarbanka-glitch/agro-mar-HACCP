@@ -12,6 +12,10 @@ import {
   W03_HEADER, W03_FREQ_KEYS, sortW03Docs, buildW03InsertPayload,
   buildW03SeedPayloads, buildW03PrintHtml, buildW03ExcelRows, loadW03Meta, saveW03Meta, w03Freq
 } from './w03Engine'
+import {
+  sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
+  parseW06FromPdfFile, filterNewW06Parties, w06PartyLabel, w06KindLabel, w06DedupeKey
+} from './w06Engine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
@@ -312,6 +316,17 @@ function App() {
     freq_monthly: '',
     freq_bimonthly: ''
   }))
+  const [w06PdfImporting, setW06PdfImporting] = useState(false)
+  const [w06PdfPreview, setW06PdfPreview] = useState('')
+  const [w06PdfInputKey, setW06PdfInputKey] = useState(0)
+  const [w06NewRow, setW06NewRow] = useState({
+    party_type: 'supplier',
+    supplier_kind: 'raw',
+    company_name: '',
+    nip: '',
+    address: '',
+    item_name: ''
+  })
   const [pzRows, setPzRows] = useState([])
   const [pzHistoryRows, setPzHistoryRows] = useState([])
   const [pzEditDates, setPzEditDates] = useState({})
@@ -1751,6 +1766,8 @@ function App() {
         ? buildDocumentHtml(group.docs[0], cfg)
       : group.type === 'W03'
         ? buildW03PrintHtml(group.docs || [], w03Meta, escapeHtml)
+      : group.type === 'W06'
+        ? buildW06PrintHtml(group.docs || [], escapeHtml)
       : cfg ? buildManualMonthlyHtml(group, escapeHtml, cfg)
       : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
@@ -1785,6 +1802,8 @@ function App() {
       rows.push(...buildK07ExcelRows(group))
     } else if (group.type === 'W03') {
       rows.push(...buildW03ExcelRows(docs, w03Meta))
+    } else if (group.type === 'W06') {
+      rows.push(...buildW06ExcelRows(docs))
     } else if (getDocFormCfg(group.type)) {
       rows.push(...buildManualExcelRows(group, getDocFormCfg(group.type)))
     } else if (group.type === 'K03') {
@@ -2031,6 +2050,31 @@ function App() {
           })}
         </tbody></table>
         <p className="hint no-print">K07: wpis przy każdym przerobie (produkcja). Domyślnie P – możesz zmienić każde pole przed drukiem/Excel.</p>
+      </div>
+    }
+
+    if (group.type === 'W06') {
+      const sorted = sortW06Docs(docs)
+      return <div className="w06-paper haccp-paper">
+        <table className="w06-head"><tbody><tr>
+          <td className="w06-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>NIP: 7171839598</b></td>
+          <td className="w06-title"><b>Wykaz W06 – dostawcy i odbiorcy</b></td>
+          <td className="w06-meta"><b>Wpisy:</b> {sorted.length}</td>
+        </tr></tbody></table>
+        <table className="w06-table"><thead><tr>
+          <th>Lp.</th><th>Typ</th><th>Dane firmy</th><th>NIP</th><th>Towar</th><th>Źr.</th>
+        </tr></thead><tbody>
+          {sorted.map((doc, i) => {
+            const d = doc.data || {}
+            return <tr key={doc.id}>
+              <td>{i + 1}</td><td>{w06PartyLabel(doc)}</td>
+              <td className="left">{d.supplier_name || d.company_name || ''}</td>
+              <td>{d.nip || ''}</td>
+              <td className="left">{d.item_name || doc.product_name || ''}</td>
+              <td>{d.source_doc_kind || ''}</td>
+            </tr>
+          })}
+        </tbody></table>
       </div>
     }
 
@@ -2363,6 +2407,10 @@ function App() {
       printHtmlInIframe(buildW03PrintHtml(docs, w03Meta, escapeHtml))
       return
     }
+    if (type === 'W06') {
+      printHtmlInIframe(buildW06PrintHtml(docs, escapeHtml))
+      return
+    }
     const cfg = getDocFormCfg(type)
     if (!cfg || !docs.length) { setMessage('Brak wpisów do wydruku.'); return }
     const period = String(docs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
@@ -2377,6 +2425,15 @@ function App() {
       ws['!cols'] = rows[4]?.map(() => ({ wch: 20 })) || []
       XLSX.utils.book_append_sheet(wb, ws, 'W03')
       XLSX.writeFile(wb, 'W03-harmonogram-mycia.xlsx')
+      return
+    }
+    if (type === 'W06') {
+      const rows = buildW06ExcelRows(docs)
+      const wb = XLSX.utils.book_new()
+      const ws = XLSX.utils.aoa_to_sheet(rows)
+      ws['!cols'] = rows[3]?.map(() => ({ wch: 22 })) || []
+      XLSX.utils.book_append_sheet(wb, ws, 'W06')
+      XLSX.writeFile(wb, 'W06-dostawcy-odbiorcy.xlsx')
       return
     }
     const cfg = getDocFormCfg(type)
@@ -2575,6 +2632,225 @@ function App() {
     return `${m[3]}.${m[2]}.${m[1]}`
   }
 
+  async function handleW06PdfFiles(e) {
+    const files = Array.from(e.target.files || [])
+    if (!files.length || !supabase) return
+    setW06PdfImporting(true)
+    setW06PdfPreview('')
+    setMessage(`W06: odczytuję ${files.length} plik(ów) PDF…`)
+    try {
+      const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
+      const parsedParties = []
+      let previewText = ''
+      for (const file of files) {
+        const { text, kind, party } = await parseW06FromPdfFile(file)
+        if (!previewText) previewText = String(text || '').slice(0, 2500)
+        if (party?.dedupe_key || party?.company_name) {
+          parsedParties.push(party)
+        } else {
+          setMessage(`W06: ${file.name} – rozpoznano ${kind || '?'}, brak kontrahenta (sprawdź podgląd).`)
+        }
+      }
+      setW06PdfPreview(previewText)
+      const { added, skipped } = filterNewW06Parties(existing, parsedParties)
+      for (const party of added) {
+        const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(party))
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setW06PdfInputKey(k => k + 1)
+      setMessage(
+        `W06: dodano ${added.length} nowych kontrahentów` +
+        (skipped.length ? `, pominięto ${skipped.length} duplikatów/już na liście` : '') + '.'
+      )
+    } catch (err) {
+      setMessage(`W06: błąd importu PDF – ${err?.message || String(err)}`)
+    } finally {
+      setW06PdfImporting(false)
+    }
+  }
+
+  async function saveW06Cell(doc, field, value) {
+    if (!supabase || !doc?.id) return
+    const nextData = { ...(doc.data || {}), [field]: value }
+    if (field === 'company_name') {
+      const addr = nextData.address || doc.data?.address || ''
+      nextData.supplier_name = addr ? `${value}, ${addr}` : value
+    }
+    if (field === 'address') {
+      const name = nextData.company_name || doc.data?.company_name || ''
+      nextData.supplier_name = value ? `${name}, ${value}` : name
+    }
+    if (field === 'party_type') {
+      if (value === 'recipient') nextData.supplier_kind = 'recipient'
+      else if (nextData.supplier_kind === 'recipient') nextData.supplier_kind = 'raw'
+    }
+    nextData.dedupe_key = w06DedupeKey({
+      nip: nextData.nip || doc.data?.nip,
+      company_name: nextData.company_name || doc.data?.company_name,
+      supplier_name: nextData.supplier_name
+    })
+    const payload = {
+      data: nextData,
+      product_name: nextData.item_name || doc.product_name,
+      supplier_name: nextData.supplier_name || doc.supplier_name,
+      updated_at: new Date().toISOString()
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+      if (error) throw error
+      setHaccpDocs(prev => prev.map(d => d.id === doc.id ? { ...d, ...payload, data: nextData } : d))
+    } catch (err) {
+      setMessage(`W06: błąd zapisu – ${err.message}`)
+    }
+  }
+
+  async function addW06Row() {
+    if (!supabase) return
+    const name = String(w06NewRow.company_name || '').trim()
+    if (!name) {
+      setMessage('W06: podaj nazwę firmy.')
+      return
+    }
+    const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
+    const party = {
+      party_type: w06NewRow.party_type || 'supplier',
+      supplier_kind: w06NewRow.party_type === 'recipient' ? 'recipient' : (w06NewRow.supplier_kind || 'raw'),
+      company_name: name,
+      supplier_name: [name, w06NewRow.address].filter(Boolean).join(', '),
+      nip: w06NewRow.nip || '',
+      address: w06NewRow.address || '',
+      item_name: w06NewRow.item_name || '',
+      source_doc_kind: 'ręcznie'
+    }
+    party.dedupe_key = w06DedupeKey(party)
+    const { added } = filterNewW06Parties(existing, [party])
+    if (!added.length) {
+      setMessage('W06: taka firma jest już na liście (duplikat NIP/nazwy).')
+      return
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(added[0]))
+      if (error) throw error
+      setW06NewRow({ party_type: 'supplier', supplier_kind: 'raw', company_name: '', nip: '', address: '', item_name: '' })
+      await loadHaccpDocs()
+      setMessage('W06: dodano kontrahenta.')
+    } catch (err) {
+      setMessage(`W06: błąd dodawania – ${err.message}`)
+    }
+  }
+
+  async function deleteW06Row(doc) {
+    if (!supabase || !doc?.id) return
+    const label = doc.data?.company_name || doc.data?.supplier_name || ''
+    if (!window.confirm(`Usunąć z W06: ${label}?`)) return
+    try {
+      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+      setMessage('W06: usunięto wpis.')
+    } catch (err) {
+      setMessage(`W06: błąd usuwania – ${err.message}`)
+    }
+  }
+
+  function renderW06Section() {
+    const w06Docs = sortW06Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W06'))
+    return <>
+      <div className="card inner-card no-print">
+        <h3>Import PDF – PZ (dostawcy) i WZ (odbiorcy)</h3>
+        <p className="hint">Wgraj jeden lub wiele PDF (PZ, WZ, faktury). Program rozpozna typ dokumentu i doda <b>unikalnych</b> kontrahentów – bez duplikatów. Przy kolejnych plikach pomija firmy już na liście.</p>
+        <label className="full-width">Pliki PDF
+          <input key={w06PdfInputKey} type="file" accept="application/pdf,.pdf" multiple disabled={w06PdfImporting} onChange={handleW06PdfFiles} />
+        </label>
+        {w06PdfImporting && <p className="hint">Trwa odczyt PDF…</p>}
+        {w06PdfPreview && <details className="k011-pdf-preview">
+          <summary>Podgląd tekstu z ostatniego PDF</summary>
+          <pre className="pdf-text-preview">{w06PdfPreview}</pre>
+        </details>}
+      </div>
+      <div className="actions no-print" style={{ marginBottom: 12 }}>
+        <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
+        <button className="secondary" onClick={() => printManualHaccpPeriod('W06', w06Docs)}><Printer size={16}/> Druk / PDF</button>
+        <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W06', w06Docs)}>Pobierz Excel</button>
+      </div>
+      <div className="w06-paper haccp-paper">
+        <table className="w06-head"><tbody><tr>
+          <td className="w06-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+          <td className="w06-title"><b>Wykaz W06 – Wykaz kwalifikowanych dostawców i odbiorców</b></td>
+          <td className="w06-meta"><b>Wersja</b> I/2024<br/><b>Wpisy:</b> {w06Docs.length}</td>
+        </tr></tbody></table>
+        <table className="w06-table">
+          <thead><tr>
+            <th>Lp.</th><th>Typ</th><th>Kategoria</th><th>Dane firmy</th><th>NIP</th><th>Towar / surowiec</th><th>Źr.</th>
+            <th className="no-print w06-act">Akcje</th>
+          </tr></thead>
+          <tbody>
+            {w06Docs.length === 0 && <tr><td colSpan={8} className="hint">Brak wpisów – wgraj PDF PZ/WZ lub dodaj ręcznie poniżej.</td></tr>}
+            {w06Docs.map((doc, i) => {
+              const d = doc.data || {}
+              return <tr key={doc.id}>
+                <td>{i + 1}</td>
+                <td>
+                  <select className="w06-cell-input no-print" defaultValue={d.party_type || 'supplier'} onBlur={e => saveW06Cell(doc, 'party_type', e.target.value)}>
+                    <option value="supplier">Dostawca</option>
+                    <option value="recipient">Odbiorca</option>
+                  </select>
+                  <span className="print-only">{w06PartyLabel(doc)}</span>
+                </td>
+                <td>
+                  <select className="w06-cell-input no-print" defaultValue={d.supplier_kind || 'raw'} onBlur={e => saveW06Cell(doc, 'supplier_kind', e.target.value)}>
+                    <option value="raw">Surowiec</option>
+                    <option value="aux">Materiały pom.</option>
+                    <option value="recipient">Odbiorca</option>
+                  </select>
+                  <span className="print-only">{w06KindLabel(doc)}</span>
+                </td>
+                <td className="left">
+                  <input className="w06-cell-input w06-wide no-print" defaultValue={d.company_name || d.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
+                  <span className="print-only">{d.supplier_name || d.company_name || ''}</span>
+                </td>
+                <td>
+                  <input className="w06-cell-input no-print" defaultValue={d.nip || ''} onBlur={e => saveW06Cell(doc, 'nip', e.target.value.replace(/\D/g, '').slice(0, 10))} />
+                  <span className="print-only">{d.nip || ''}</span>
+                </td>
+                <td className="left">
+                  <input className="w06-cell-input w06-wide no-print" defaultValue={d.item_name || doc.product_name || ''} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
+                  <span className="print-only">{d.item_name || doc.product_name || ''}</span>
+                </td>
+                <td>{d.source_doc_kind || ''}</td>
+                <td className="no-print row-actions"><button className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń</button></td>
+              </tr>
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="card inner-card no-print">
+        <h3>Dodaj kontrahenta ręcznie</h3>
+        <div className="form-grid compact">
+          <label>Typ
+            <select value={w06NewRow.party_type} onChange={e => setW06NewRow(prev => ({ ...prev, party_type: e.target.value, supplier_kind: e.target.value === 'recipient' ? 'recipient' : prev.supplier_kind === 'recipient' ? 'raw' : prev.supplier_kind }))}>
+              <option value="supplier">Dostawca (PZ)</option>
+              <option value="recipient">Odbiorca (WZ)</option>
+            </select>
+          </label>
+          <label>Kategoria
+            <select value={w06NewRow.supplier_kind} onChange={e => setW06NewRow(prev => ({ ...prev, supplier_kind: e.target.value }))}>
+              <option value="raw">Surowiec</option>
+              <option value="aux">Materiały pomocnicze</option>
+              <option value="recipient">Odbiorca (klient)</option>
+            </select>
+          </label>
+          <label className="full-width">Nazwa firmy<input value={w06NewRow.company_name} onChange={e => setW06NewRow(prev => ({ ...prev, company_name: e.target.value }))} /></label>
+          <label>NIP<input value={w06NewRow.nip} onChange={e => setW06NewRow(prev => ({ ...prev, nip: e.target.value }))} placeholder="10 cyfr" /></label>
+          <label>Adres<input value={w06NewRow.address} onChange={e => setW06NewRow(prev => ({ ...prev, address: e.target.value }))} /></label>
+          <label>Przykładowy towar<input value={w06NewRow.item_name} onChange={e => setW06NewRow(prev => ({ ...prev, item_name: e.target.value }))} /></label>
+        </div>
+        <div className="actions"><button onClick={addW06Row}>Dodaj do wykazu</button></div>
+      </div>
+    </>
+  }
+
   function renderW03Section() {
     const w03Docs = sortW03Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W03'))
     return <>
@@ -2659,7 +2935,7 @@ function App() {
               <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
-          {code === 'W03' ? renderW03Section() : <>
+          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : <>
           {cfg && renderManualHaccpEntrySection()}
           {hubManualGroups.length === 0 && <p className="hint">Brak wpisów. Dodaj pierwszy wpis powyżej.</p>}
           {hubManualGroups.length > 0 && <>

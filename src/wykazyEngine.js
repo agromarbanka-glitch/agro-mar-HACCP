@@ -4,7 +4,7 @@
 import { normalizePn } from './haccpFormsEngine'
 import { col, dval, buildPeriodGroups, periodLabel, buildManualMonthlyHtml, buildManualExcelRows } from './haccpDocShared'
 
-export const WYKAZY_ENGINE_VERSION = '1.2'
+export const WYKAZY_ENGINE_VERSION = '1.3'
 
 export const WYKAZY_CARDS = [
   ['W01', 'W01 – Orzeczenia lekarskie', 'Wykaz pracowniczych orzeczeń lekarskich (san.-epid.)', 'year'],
@@ -141,21 +141,36 @@ export const WYKAZY_FORMS = {
     code: 'W06',
     layout: 'table',
     periodMode: 'register',
-    title: 'Wykaz W06 – Wykaz kwalifikowanych dostawców',
+    title: 'Wykaz W06 – Wykaz kwalifikowanych dostawców i odbiorców',
     columns: [
       col('lp', 'Lp.', (_, i) => i + 1),
-      col('kind', 'Kategoria', d => dval(d, 'supplier_kind') === 'aux' ? 'Materiały pomocnicze' : 'Surowiec'),
-      col('supplier', 'Dane dostawcy (nazwa i dane firmy)', d => dval(d, 'supplier_name') || d.supplier_name || ''),
-      col('item', 'Nazwa surowca / towaru', d => dval(d, 'item_name') || d.product_name || '')
+      col('party', 'Typ', d => dval(d, 'party_type') === 'recipient' ? 'Odbiorca' : 'Dostawca'),
+      col('kind', 'Kategoria', d => {
+        const k = dval(d, 'supplier_kind')
+        if (k === 'aux') return 'Materiały pomocnicze'
+        if (k === 'recipient') return 'Odbiorca (klient)'
+        return 'Surowiec'
+      }),
+      col('supplier', 'Dane firmy', d => dval(d, 'supplier_name') || d.supplier_name || dval(d, 'company_name') || ''),
+      col('nip', 'NIP', d => dval(d, 'nip')),
+      col('item', 'Nazwa surowca / towaru', d => dval(d, 'item_name') || d.product_name || ''),
+      col('source', 'Źródło', d => dval(d, 'source_doc_kind') || '')
     ],
     fields: [
       { key: 'document_date', label: 'Data wpisu', type: 'date', required: true },
+      { key: 'party_type', label: 'Typ', type: 'select', data: true, required: true, options: [
+        { value: 'supplier', label: 'Dostawca (PZ)' },
+        { value: 'recipient', label: 'Odbiorca (WZ)' }
+      ]},
       { key: 'supplier_kind', label: 'Kategoria', type: 'select', data: true, required: true, options: [
         { value: 'raw', label: 'Dostawca surowca' },
-        { value: 'aux', label: 'Materiały pomocnicze / opakowania / środki czystości' }
+        { value: 'aux', label: 'Materiały pomocnicze / opakowania' },
+        { value: 'recipient', label: 'Odbiorca (klient)' }
       ]},
-      { key: 'supplier_name', label: 'Dane dostawcy (nazwa i dane firmy)', type: 'text', data: true, required: true },
-      { key: 'item_name', label: 'Nazwa surowca / towaru', type: 'text', data: true, required: true },
+      { key: 'company_name', label: 'Nazwa firmy', type: 'text', data: true, required: true },
+      { key: 'supplier_name', label: 'Dane firmy (pełne)', type: 'text', data: true },
+      { key: 'nip', label: 'NIP', type: 'text', data: true },
+      { key: 'item_name', label: 'Nazwa surowca / towaru (przykład)', type: 'text', data: true },
       { key: 'signed_by', label: 'Podpis', type: 'employee' }
     ]
   },

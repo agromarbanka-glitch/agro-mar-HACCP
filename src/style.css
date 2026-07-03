@@ -464,7 +464,18 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .w03-footer label { display: grid; gap: 4px; font-weight: 700; min-width: 200px; }
 .w03-footer input { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-weight: 400; }
 .w03-add-grid { margin-top: 8px; }
+
+/* W06 – dostawcy i odbiorcy */
+.w06-paper { overflow-x: auto; }
+.w06-head, .w06-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.w06-head td, .w06-table td, .w06-table th { border: 1px solid #111; padding: 6px 4px; text-align: center; vertical-align: middle; font-size: 11px; }
+.w06-company { width: 28%; text-align: left; font-weight: 700; vertical-align: top; }
+.w06-title { width: 52%; text-align: center; font-weight: 700; font-size: 13px; }
+.w06-meta { width: 20%; text-align: left; font-size: 11px; vertical-align: top; }
+.w06-table .left { text-align: left; }
+.w06-cell-input { width: 100%; border: 1px solid #d8d8d8; border-radius: 6px; padding: 4px 6px; font-size: 11px; background: #fff; }
+.w06-cell-input.w06-wide { min-width: 140px; }
+.w06-act { width: 5%; }
 @media print {
-  .w03-cell-input, .w03-act, .no-print { display: none !important; }
-  .print-only { display: inline !important; }
+  .w06-cell-input, .w06-act, .no-print { display: none !important; }
 }
