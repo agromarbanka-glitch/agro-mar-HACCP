@@ -310,3 +310,20 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   .docs-toolbar { flex-direction: column; align-items: stretch; }
   .docs-k-select { min-width: 0; }
 }
+
+.k03-unfreeze-banner {
+  border: 1px solid #e8c84a;
+  background: #fffbeb;
+}
+.k03-unfreeze-banner h2 { font-size: 18px; margin: 0; }
+.unfreeze-suggest-list { display: grid; gap: 10px; }
+.unfreeze-suggest-item {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid #f0e4a8;
+}
+.unfreeze-suggest-main { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-bottom: 6px; }
+.unfreeze-suggest-main small { color: #657068; }
+.unfreeze-reasons { margin: 0 0 8px 18px; padding: 0; font-size: 13px; color: #534; }
+.unfreeze-reasons li { margin: 2px 0; }

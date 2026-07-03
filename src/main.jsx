@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, wzStatusLabel, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, wzStatusLabel, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import * as XLSX from 'xlsx'
@@ -253,6 +253,7 @@ function App() {
   const [k03Snapshots, setK03Snapshots] = useState([])
   const [wzQueueLines, setWzQueueLines] = useState([])
   const [k03WzModal, setK03WzModal] = useState(null)
+  const [k03UnfreezeSuggestions, setK03UnfreezeSuggestions] = useState([])
   const [fifoChangeLog, setFifoChangeLog] = useState([])
   const [fifoRecalculating, setFifoRecalculating] = useState(false)
   const [auxRows, setAuxRows] = useState([])
@@ -453,32 +454,6 @@ function App() {
     }
   }
 
-  async function freezeK03Document(doc, reason = 'Kartoteka zamrożona ręcznie') {
-    if (!doc?.id) return false
-    if (doc.frozen) return true
-    const shortage = Number(doc.data?.shortage || 0)
-    const quantitiesOk = doc.data?.quantitiesMatch !== false && shortage <= 0
-    if (!quantitiesOk && !doc.data?.k03_workflow?.quantity_warning_accepted) {
-      setMessage('Nie można zamrożyć – formularz ma braki PZ lub niezgodność sum (zatwierdź z ostrzeżeniem przy tworzeniu K03).')
-      return false
-    }
-    if (!supabase) {
-      setMessage('Brak bazy – zamrożenie wymaga Supabase.')
-      return false
-    }
-    try {
-      await freezeK03Workflow(supabase, doc, reason, userRole)
-      await loadK03SnapshotsOnly()
-      await loadK03TraceData()
-      await loadFifoChangeLog()
-      setMessage(`${reason}. Formularz WZ ${doc.document_no || ''} jest zablokowany przed zmianami FIFO.`)
-      return true
-    } catch (err) {
-      setMessage(`Błąd zamrażania K03: ${err?.message || String(err)}`)
-      return false
-    }
-  }
-
   async function unfreezeK03Document(doc) {
     if (!doc?.id || !supabase) return
     if (!doc.frozen && doc.data?.frozen !== true) {
@@ -495,10 +470,63 @@ function App() {
       await unfreezeK03Workflow(supabase, doc, reason.trim(), userRole)
       await loadK03TraceData()
       await loadFifoChangeLog()
+      setK03UnfreezeSuggestions(prev => prev.filter(s => s.k03_key !== doc.id))
       setMessage(`K03 odmrożony: ${reason.trim()}`)
     } catch (err) {
       setMessage(`Błąd odmrożenia: ${err?.message || String(err)}`)
     }
+  }
+
+  function docFromK03Snapshot(snap) {
+    if (!snap) return null
+    return {
+      id: snap.data?.k03_key || snap.data?.form_id,
+      document_type: 'K03',
+      document_no: snap.document_no,
+      document_date: snap.document_date,
+      product_name: snap.product_name,
+      lot_no: snap.lot_no,
+      qty: snap.qty,
+      frozen: true,
+      data: snap.data,
+      signed_by_operator: snap.signed_by_operator || ''
+    }
+  }
+
+  function renderK03UnfreezeBanner() {
+    if (!k03UnfreezeSuggestions.length) return null
+    return <section className="card k03-unfreeze-banner">
+      <div className="section-title"><AlertTriangle/><div>
+        <h2>Po imporcie – rozważ odmrożenie K03</h2>
+        <p>Nowe dane mogą zmienić rozliczenie FIFO dla poniższych zamrożonych kartotek. Odmroż tylko te, których dotyczy import.</p>
+      </div></div>
+      <div className="unfreeze-suggest-list">
+        {k03UnfreezeSuggestions.map(item => (
+          <div key={item.k03_key || item.wz_no} className="unfreeze-suggest-item">
+            <div className="unfreeze-suggest-main">
+              <b>K03 · WZ {item.wz_no}</b>
+              <span>{item.product_name}{item.lot_no ? ` · ${item.lot_no}` : ''}</span>
+              <small>{item.wz_date || ''}</small>
+            </div>
+            <ul className="unfreeze-reasons">{item.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+            <div className="row-actions">
+              <button className="mini secondary" onClick={() => {
+                const doc = docFromK03Snapshot(item.snap)
+                if (doc) unfreezeK03Document(doc)
+              }}>Odmroź</button>
+              <button className="mini secondary" onClick={() => {
+                const doc = docFromK03Snapshot(item.snap)
+                if (!doc) return
+                setActiveTab('kartoteki')
+                setDocsHubSection('kartoteki')
+                setDocsFilter('K03')
+                setSelectedHaccpDoc({ groupPreview: true, group: { key: doc.id, type: 'K03', product: doc.product_name, docs: [doc] } })
+              }}><Eye size={14}/> Podgląd</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   }
 
   async function revertK03Line(line) {
@@ -564,10 +592,11 @@ function App() {
       if (!result.ok) throw new Error(result.message || 'Nie udało się utworzyć K03.')
       const wzNo = k03WzModal.line.document_no
       const wzMode = k03WzModal.mode === 'przerob' ? 'przerób' : 'brak przerobu'
+      const frozenNote = result.autoFrozen ? ' Kartoteka zamrożona automatycznie (kompletna i prawidłowa).' : ' Kartoteka pozostaje robocza (niespójność ilości – uzupełnij i odmroź ręcznie po korekcie).'
       setK03WzModal(null)
       await loadK03TraceData()
       await loadFifoChangeLog()
-      setMessage(`K03 utworzony dla WZ ${wzNo} (${wzMode}).`)
+      setMessage(`K03 utworzony dla WZ ${wzNo} (${wzMode}).${frozenNote}`)
     } catch (err) {
       setK03WzModal(m => ({ ...m, saving: false, error: err?.message || String(err) }))
     }
@@ -2227,14 +2256,12 @@ function App() {
     if (doc.groupPreview) {
       const group = haccpMonthlyGroups.find(g => g.key === doc.group?.key) || doc.group
       return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print">
-        {group.type === 'K03' && (group.docs || [])[0] && <>
-          {(group.docs[0].frozen
-            ? <>
-              <span className="status ok">Zamrożony – FIFO nie zmieni tej kartoteki</span>
-              <button className="secondary" onClick={() => unfreezeK03Document(group.docs[0])}>Odmroź</button>
-            </>
-            : <button className="secondary" onClick={() => freezeK03Document(group.docs[0], 'Kartoteka zamrożona ręcznie')}>Zamroź kartotekę</button>)}
-        </>}
+        {group.type === 'K03' && (group.docs || [])[0] && (group.docs[0].frozen
+          ? <>
+            <span className="status ok">Zamrożony – FIFO nie zmieni tej kartoteki</span>
+            <button className="secondary" onClick={() => unfreezeK03Document(group.docs[0])}>Odmroź</button>
+          </>
+          : <span className="pill">Roboczy – uzupełnij dane; prawidłowy K03 zamraża się automatycznie przy tworzeniu</span>)}
         <button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
@@ -2370,7 +2397,17 @@ function App() {
     try {
       const parsed = await readAgromarExcel(file)
       setRows(parsed)
-      setMessage(`Wczytano ${parsed.length} wierszy. System pobiera tylko potrzebne dane: nr PZ/WZ/FV, datę, produkt i ilość.`)
+      let loadMsg = `Wczytano ${parsed.length} wierszy. System pobiera tylko potrzebne dane: nr PZ/WZ/FV, datę, produkt i ilość.`
+      if (supabase) {
+        const classified = parsed.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) }))
+        const groups = groupImportRows(classified)
+        const suggestions = await suggestFrozenK03UnfreezeAfterImport(supabase, groups)
+        setK03UnfreezeSuggestions(suggestions)
+        if (suggestions.length) {
+          loadMsg += ` Możliwe konflikty z ${suggestions.length} zamrożonymi K03 – sprawdź baner przed zapisem.`
+        }
+      }
+      setMessage(loadMsg)
     } catch (err) {
       setMessage(`Błąd wczytywania pliku: ${err.message}`)
     }
@@ -3603,9 +3640,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         setFifoRecalculating(false)
       }
 
-      setMessage(
+      const importMsg =
         `Import zakończony. Zaimportowano dokumentów: ${importedOperations}, pozycji: ${importedItems}, utworzono partii: ${createdLots}, rozliczeń FIFO: ${fifoAllocations}. Pominięto duplikatów: ${duplicateCount}.` +
         (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '')
+
+      const suggestions = supabase ? await suggestFrozenK03UnfreezeAfterImport(supabase, groups) : []
+      setK03UnfreezeSuggestions(suggestions)
+
+      setMessage(
+        importMsg +
+        (suggestions.length ? ` Sprawdź ${suggestions.length} zamrożonych K03 do ewentualnego odmrożenia (baner poniżej).` : '')
       )
       await loadFifoData()
       await loadK03TraceData()
@@ -3632,6 +3676,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <AlertTriangle size={20}/>
       <div><strong>Ważne:</strong> ta aplikacja ma być podłączona wyłącznie do nowego projektu Supabase <b>AGRO-MAR-HACCP</b>, nigdy do starej bazy opakowań.</div>
     </section>
+
+    {renderK03UnfreezeBanner()}
 
 
     <nav className="top-tabs">
@@ -3691,6 +3737,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
 
     {activeTab === 'importy' && <>
+    {renderK03UnfreezeBanner()}
     <section className="card">
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
@@ -3926,6 +3973,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       )}
 
       {docsHubSection === 'kartoteki' && <>
+      {renderK03UnfreezeBanner()}
       <section className="card docs-panel" id="kartoteki-haccp">
         <div className="docs-toolbar">
           <label className="docs-k-select">Kartoteka
@@ -4061,13 +4109,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {(frozenKartoteki.length > 0 || k03WorkflowHistory.length > 0) && (
         <section className="card docs-frozen-panel">
           {frozenKartoteki.length > 0 && <>
-            <h3>Zamrożone kartoteki ({frozenKartoteki.length})</h3>
+            <h3>Zamrożone kartoteki K03 ({frozenKartoteki.length})</h3>
+            <p className="hint">Kompletne K03 zamrażają się automatycznie przy utworzeniu. Odmrożenie tylko ręczne – np. po imporcie nowych PZ.</p>
             <div className="frozen-list">
               {frozenKartoteki.map(item => (
                 <div key={item.group.key} className="frozen-item">
                   <span><b>{item.type}</b> {item.label}</span>
                   <small>{item.sub}</small>
                   <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: item.group })}>Otwórz</button>
+                  <button className="mini secondary" onClick={() => unfreezeK03Document(item.group.docs[0])}>Odmroź</button>
                 </div>
               ))}
             </div>

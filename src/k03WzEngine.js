@@ -8,11 +8,102 @@ import {
   buildK03FormDoc,
   saveK03Snapshot,
   inferProductCode,
+  productGroupForName,
   K03_ENGINE_VERSION
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
 
 export const K03_WZ_ENGINE_VERSION = '1.0'
+
+/** K03 kompletny i prawidłowy – można zamrozić automatycznie. */
+export function isK03CompleteAndValid(doc) {
+  if (!doc) return false
+  const shortage = Number(doc.data?.shortage || 0)
+  if (shortage > 0.0005) return false
+  if (doc.data?.invalidFuturePz === true) return false
+  if (doc.data?.k03_workflow?.quantity_warning_accepted === true) return false
+  if (doc.status === 'N') return false
+  const saleQty = Number(doc.qty || doc.data?.saleQty || 0)
+  const rawTotal = Number(doc.data?.rawTotal || 0)
+  if (Math.abs(rawTotal - saleQty) >= 0.001) return false
+  return true
+}
+
+function normalizeDocNo(value) {
+  return String(value || '').trim().toUpperCase().replace(/\s+/g, '')
+}
+
+/**
+ * Po imporcie Excel sugeruje zamrożone K03, które mogą wymagać odmrożenia
+ * (nowe PZ w tej samej grupie, wcześniejsza sprzedaż, ponowny numer PZ).
+ */
+export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups = []) {
+  if (!client || !importGroups.length) return []
+
+  const snapshots = await loadK03Snapshots(client)
+  const frozen = (snapshots || []).filter(s => s.data?.frozen === true)
+  if (!frozen.length) return []
+
+  const newPz = importGroups.filter(g => g.operation === 'przyjecie')
+  const newSales = importGroups.filter(g => g.operation === 'sprzedaz')
+  const suggestions = []
+
+  for (const snap of frozen) {
+    const reasons = []
+    const group = snap.data?.product_group || productGroupForName(snap.product_name)
+    const cutoff = String(
+      snap.data?.fifo_cutoff_date ||
+      snap.data?.k03_workflow?.fifo_cutoff_date ||
+      snap.document_date ||
+      ''
+    ).slice(0, 10)
+    const wzDate = String(snap.document_date || '').slice(0, 10)
+    const frozenPzNos = new Set(
+      (snap.data?.rawRows || [])
+        .map(r => normalizeDocNo(r.pz_no))
+        .filter(Boolean)
+    )
+
+    for (const pz of newPz) {
+      const pzDate = String(pz.issueDate || '').slice(0, 10)
+      const pzGroup = productGroupForName(pz.productName)
+      const docNo = normalizeDocNo(pz.documentNo)
+
+      if (docNo && frozenPzNos.has(docNo)) {
+        reasons.push(`ponowny import PZ ${pz.documentNo} (możliwa zmiana daty lub ilości)`)
+      } else if (pzGroup === group && pzDate && cutoff && pzDate <= cutoff) {
+        reasons.push(`nowe PZ ${pz.documentNo || '?'} z ${pzDate} – ta sama grupa (${group}), przed datą graniczną ${cutoff}`)
+      }
+    }
+
+    for (const sale of newSales) {
+      const saleDate = String(sale.issueDate || '').slice(0, 10)
+      const saleGroup = productGroupForName(sale.productName)
+      if (saleDate && wzDate && saleDate <= wzDate && (!group || saleGroup === group || !sale.productName)) {
+        reasons.push(`nowa sprzedaż ${sale.documentNo || '?'} z ${saleDate} – może zmienić FIFO przed WZ ${snap.document_no || wzDate}`)
+      }
+    }
+
+    const uniqueReasons = [...new Set(reasons)]
+    if (!uniqueReasons.length) continue
+
+    suggestions.push({
+      k03_key: snap.data?.k03_key || snap.data?.form_id,
+      wz_no: snap.document_no || '',
+      product_name: snap.product_name || '',
+      lot_no: snap.lot_no || '',
+      wz_date: wzDate,
+      frozen_at: snap.data?.frozen_at || snap.updated_at,
+      reasons: uniqueReasons,
+      snap
+    })
+  }
+
+  return suggestions.sort((a, b) =>
+    String(b.wz_date || '').localeCompare(String(a.wz_date || '')) ||
+    String(a.wz_no || '').localeCompare(String(b.wz_no || ''))
+  )
+}
 
 export function wzStatusLabel(status) {
   const map = {
@@ -223,10 +314,18 @@ export async function generateK03Workflow(client, line, options = {}) {
   doc = {
     ...doc,
     lot_no: lotNo,
-    status: mismatch && !acceptQuantityMismatch ? 'N' : (shortage > 0 ? 'N' : 'P')
+    status: mismatch ? 'N' : 'P',
+    data: {
+      ...doc.data,
+      shortage,
+      rawTotal,
+      quantitiesMatch: !mismatch,
+      quantity_warning_accepted: mismatch && acceptQuantityMismatch
+    }
   }
 
-  await saveK03Snapshot(client, doc, { freeze: false, userRole: changedBy })
+  const canAutoFreeze = isK03CompleteAndValid(doc)
+  await saveK03Snapshot(client, doc, { freeze: canAutoFreeze, userRole: changedBy })
 
   await logK03Workflow(client, {
     wz_no: line.document_no,
@@ -234,12 +333,25 @@ export async function generateK03Workflow(client, line, options = {}) {
     product_name: line.product_name,
     k03_key: k03Key,
     change_type: mismatch ? 'k03_quantity_warning_accepted' : (mode === 'przerob' ? 'k03_created_przerob' : 'k03_created_bez_przerobu'),
-    after_data: { workflow, sale_qty: saleQty, raw_total: rawTotal, shortage },
+    after_data: { workflow, sale_qty: saleQty, raw_total: rawTotal, shortage, auto_frozen: canAutoFreeze },
     change_reason: options.reason || workflow.mode,
     changed_by: changedBy
   })
 
-  return { ok: true, doc, workflow, fifoResult }
+  if (canAutoFreeze) {
+    doc = { ...doc, frozen: true, data: { ...doc.data, frozen: true, frozen_at: new Date().toISOString() } }
+    await logK03Workflow(client, {
+      wz_no: line.document_no,
+      wz_date: wzDate,
+      product_name: line.product_name,
+      k03_key: k03Key,
+      change_type: 'k03_frozen',
+      change_reason: 'Automatyczne zamrożenie – kompletny i prawidłowy K03',
+      changed_by: changedBy
+    })
+  }
+
+  return { ok: true, doc, workflow, fifoResult, autoFrozen: canAutoFreeze }
 }
 
 /** Cofnięcie decyzji K03 (tylko gdy nie zamrożony). */
