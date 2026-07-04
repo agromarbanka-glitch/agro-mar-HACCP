@@ -2809,6 +2809,7 @@ function App() {
         group={group}
         supabase={supabase}
         employees={employees}
+        haccpDocs={haccpDocs}
         loadHaccpDocs={loadHaccpDocs}
         setMessage={setMessage}
         defaultEmployee=""

@@ -18,7 +18,8 @@ import {
   r04MakeStation,
   buildR04ControlPayload,
   defaultR04Reading,
-  resolveR04Stations
+  resolveR04Stations,
+  findPreviousR04Control
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 
@@ -294,7 +295,7 @@ async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage
 }
 
 export function RMonthlyReportPreview({
-  group, supabase, employees, loadHaccpDocs, setMessage, defaultEmployee
+  group, supabase, employees, haccpDocs, loadHaccpDocs, setMessage, defaultEmployee
 }) {
   const code = group.type
   const cfg = getRMonthlyConfig(code) || group.config
@@ -372,11 +373,14 @@ export function RMonthlyReportPreview({
 
   async function addControl(date) {
     if (!supabase) return
-    const existing = sortRMonthlyDocs(docs.filter(d => d.data?.stations))
+    const existing = sortRMonthlyDocs(docs.filter(d => !d.data?.is_shell && d.data?.stations))
     const stations = existing.length
       ? (existing[existing.length - 1].data?.stations || columns).map(s => ({ ...s }))
       : (columns.length ? columns : resolveR04Stations([], period, [])).map(s => ({ ...s }))
-    const payload = buildR04ControlPayload(period, date, stations, defaultEmployee)
+    const copyFrom = existing.length
+      ? existing[existing.length - 1]
+      : findPreviousR04Control(haccpDocs, period)
+    const payload = buildR04ControlPayload(period, date, stations, defaultEmployee, '', copyFrom)
     const { error } = await supabase.from('haccp_documents').insert(payload)
     if (error) { setMessage(`${code}: ${error.message}`); return }
     await loadHaccpDocs()

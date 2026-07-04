@@ -124,14 +124,48 @@ function previousMonthKey(yearMonth) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
-export function findPreviousR04Stations(allDocs, yearMonth) {
+export function findPreviousR04Control(allDocs, yearMonth) {
   const prevKey = previousMonthKey(yearMonth)
   const prevDocs = sortRMonthlyDocs((allDocs || []).filter(d =>
-    d.document_type === 'R04' && d.data?.month_key === prevKey && Array.isArray(d.data?.stations)
+    d.document_type === 'R04'
+    && (d.data?.month_key === prevKey || String(d.document_date || '').slice(0, 7) === prevKey)
+    && !d.data?.is_shell
+    && Array.isArray(d.data?.stations)
   ))
-  const last = prevDocs[prevDocs.length - 1]
-  if (last?.data?.stations?.length) return last.data.stations.map(s => ({ ...s }))
+  return prevDocs[prevDocs.length - 1] || null
+}
+
+export function findPreviousR04Stations(allDocs, yearMonth) {
+  const prev = findPreviousR04Control(allDocs, yearMonth)
+  if (prev?.data?.stations?.length) return prev.data.stations.map(s => ({ ...s }))
   return []
+}
+
+export function r04ReadingsFromPrevious(stations, prevDoc, cfg = getRMonthlyConfig('R04')) {
+  const prevReadings = prevDoc?.data?.readings || {}
+  const prevStations = prevDoc?.data?.stations || []
+  const readings = {}
+  for (const st of stations || []) {
+    let prev = prevReadings[st.id]
+    if (!prev) {
+      const match = prevStations.find(ps => ps.label === st.label && (ps.kind || 'derat') === (st.kind || 'derat'))
+      if (match) prev = prevReadings[match.id]
+    }
+    if (!prev) {
+      const kindIdx = stations.filter(s => s.kind === st.kind).indexOf(st)
+      const prevSameKind = prevStations.filter(s => s.kind === st.kind)
+      if (kindIdx >= 0 && prevSameKind[kindIdx]) prev = prevReadings[prevSameKind[kindIdx].id]
+    }
+    readings[st.id] = prev
+      ? {
+        bait: prev.bait ?? '',
+        rodents: prev.rodents ?? cfg?.defaultRodents ?? 'brak gryzoni',
+        state: prev.state ?? cfg?.defaultState ?? 'nienaruszona',
+        notes: prev.notes ?? ''
+      }
+      : defaultR04Reading(cfg)
+  }
+  return readings
 }
 
 export function resolveR04Stations(allDocs, yearMonth, columnDefs) {
@@ -152,10 +186,13 @@ export function r04MakeStation(kind, existing = []) {
   return { id: `trap-${n}-${Date.now().toString(36).slice(-3)}`, kind: 'trap', label: `PŻ ${n}` }
 }
 
-export function buildR04ControlPayload(yearMonth, controlDate, stations, signedBy = '', documentNo = '') {
+export function buildR04ControlPayload(yearMonth, controlDate, stations, signedBy = '', documentNo = '', copyFromDoc = null) {
   const cfg = getRMonthlyConfig('R04')
   const st = (stations || defaultR04Stations()).map(s => ({ ...s }))
   const date = controlDate || `${yearMonth}-01`
+  const readings = copyFromDoc
+    ? r04ReadingsFromPrevious(st, copyFromDoc, cfg)
+    : defaultR04ReadingsForStations(st, cfg)
   return {
     document_type: 'R04',
     document_date: date,
@@ -167,7 +204,7 @@ export function buildR04ControlPayload(yearMonth, controlDate, stations, signedB
       control_date: date,
       document_no: '',
       stations: st,
-      readings: defaultR04ReadingsForStations(st, cfg)
+      readings
     },
     signed_by_operator: signedBy || '',
     qty: 0,
@@ -331,9 +368,10 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
   }
 
   if (cfg.layout === 'r04-control') {
+    const prevDoc = findPreviousR04Control(allDocs, yearMonth)
     const stations = resolveR04Stations(allDocs, yearMonth, columnDefs)
     saveRMonthlyColumns(code, stations)
-    return [buildR04ControlPayload(yearMonth, `${yearMonth}-01`, stations, signedBy)]
+    return [buildR04ControlPayload(yearMonth, `${yearMonth}-01`, stations, signedBy, '', prevDoc)]
   }
 
   if (cfg.layout === 'station-matrix') {

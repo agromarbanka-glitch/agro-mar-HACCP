@@ -58,7 +58,7 @@ export const R_MONTHLY_CONFIGS = {
     ],
     columnLabel: 'Stacje i pułapki',
     addColumnLabel: 'Dodaj stację',
-    createHint: 'Kartoteka miesięczna – 20 stacji deratyzacyjnych + 6 pułapek żywołownych; kontrole z własną datą. Nowy miesiąc kopiuje listę stacji z poprzedniego.',
+    createHint: 'Kartoteka miesięczna – 20 stacji + 6 pułapek; nowy miesiąc kopiuje listę stacji i wartości z ostatniej kontroli poprzedniego miesiąca.',
     signLabel: 'Kontrolę przeprowadził',
     legend: '* ubytek trutki (wpisz np. 25%) · ** obecność gryzoni · *** stan stacji (nienaruszona / uszkodzona / zniszczona)'
   },
