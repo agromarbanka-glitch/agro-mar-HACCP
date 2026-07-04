@@ -470,7 +470,7 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .w03-add-grid { margin-top: 8px; }
 
 /* R13 – kontrola elementów szklanych */
-.r01-paper, .r02-paper, .r13-paper { overflow-x: auto; }
+.r01-paper, .r02-paper, .r13-paper, .monthly-paper { overflow-x: auto; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }

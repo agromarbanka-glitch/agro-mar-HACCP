@@ -36,6 +36,9 @@ import {
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   partyToW06NewRow, W06_PARTY_LABELS
 } from './w06Engine'
+import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows } from './rMonthlyEngine'
+import { isRMonthlyReport } from './rMonthlyConfigs'
+import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
@@ -2014,6 +2017,7 @@ function App() {
     if (code === 'R02') return buildR02PeriodGroups(hubManualDocsForFilter)
     if (code === 'R01') return buildR01PeriodGroups(hubManualDocsForFilter)
     if (code === 'R13') return buildR13PeriodGroups(hubManualDocsForFilter)
+    if (isRMonthlyReport(code)) return buildRMonthlyPeriodGroups(code, hubManualDocsForFilter)
     return buildHubDocGroups(hubManualDocsForFilter, code, cfg)
   }, [hubManualDocsForFilter, docsHubSection, docsWykazFilter, docsRaportFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter])
 
@@ -2457,6 +2461,8 @@ function App() {
         ? buildR01PrintHtml(group, escapeHtml)
       : group.type === 'R13'
         ? buildR13PrintHtml(group, escapeHtml)
+      : isRMonthlyReport(group.type)
+        ? buildRMonthlyPrintHtml(group.type, group, escapeHtml)
       : cfg ? buildManualMonthlyHtml(group, escapeHtml, cfg)
       : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
@@ -2499,6 +2505,8 @@ function App() {
       rows.push(...buildR01ExcelRows(group))
     } else if (group.type === 'R13') {
       rows.push(...buildR13ExcelRows(group))
+    } else if (isRMonthlyReport(group.type)) {
+      rows.push(...buildRMonthlyExcelRows(group.type, group))
     } else if (getDocFormCfg(group.type)) {
       rows.push(...buildManualExcelRows(group, getDocFormCfg(group.type)))
     } else if (group.type === 'K03') {
@@ -2796,7 +2804,18 @@ function App() {
       </div>
     }
 
-    if (getDocFormCfg(group.type) && !['r13', 'r01', 'r02'].includes(getDocFormCfg(group.type).layout)) {
+    if (isRMonthlyReport(group.type)) {
+      return <RMonthlyReportPreview
+        group={group}
+        supabase={supabase}
+        employees={employees}
+        loadHaccpDocs={loadHaccpDocs}
+        setMessage={setMessage}
+        defaultEmployee=""
+      />
+    }
+
+    if (getDocFormCfg(group.type) && !['r13', 'r01', 'r02', 'monthly'].includes(getDocFormCfg(group.type).layout)) {
       const cfg = getDocFormCfg(group.type)
       if (cfg.layout === 'document') {
         const fields = (cfg.documentFields || cfg.fields).filter(f => f.key !== 'signed_by' && f.key !== 'document_date')
@@ -4262,7 +4281,20 @@ function App() {
               <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
-          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : <>
+          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : isRMonthlyReport(code) ? (
+            <RMonthlyReportSection
+              code={code}
+              supabase={supabase}
+              employees={employees}
+              haccpDocs={haccpDocs}
+              hubManualGroups={hubManualGroups}
+              loadHaccpDocs={loadHaccpDocs}
+              setMessage={setMessage}
+              setSelectedHaccpDoc={setSelectedHaccpDoc}
+              printHaccpGroup={printHaccpGroup}
+              exportHaccpGroupExcel={exportHaccpGroupExcel}
+            />
+          ) : <>
           {cfg && renderManualHaccpEntrySection()}
           {hubManualGroups.length === 0 && <p className="hint">Brak wpisów. Dodaj pierwszy wpis powyżej.</p>}
           {hubManualGroups.length > 0 && <>
@@ -4685,6 +4717,13 @@ function App() {
         {liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
+          if (!supabase || !window.confirm(`Usunąć kartotekę ${liveGroup.type} za ${liveGroup.period}?`)) return
+          for (const d of liveGroup.docs || []) await supabase.from('haccp_documents').delete().eq('id', d.id)
+          await loadHaccpDocs()
+          setSelectedHaccpDoc(null)
+          setMessage(`${liveGroup.type}: usunięto kartotekę.`)
+        }}><Trash2 size={16}/> Usuń kartotekę</button>}
         <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
