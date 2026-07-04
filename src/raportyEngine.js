@@ -4,7 +4,7 @@
 import { normalizePn } from './haccpFormsEngine'
 import { col, dval, buildPeriodGroups, periodLabel, buildManualMonthlyHtml, buildManualExcelRows } from './haccpDocShared'
 
-export const RAPORTY_ENGINE_VERSION = '1.0'
+export const RAPORTY_ENGINE_VERSION = '1.1'
 
 export const RAPORTY_CARDS = [
   ['R00', 'R00 – Dopuszczenie do pracy', 'Raport dopuszczenia pracowników do pracy', 'register'],
@@ -18,7 +18,7 @@ export const RAPORTY_CARDS = [
   ['R08', 'R08 – Wzorcowanie urządzeń', 'Raport wzorcowania urządzeń kontrolno-pomiarowych', 'register'],
   ['R09', 'R09 – Trend szkodników', 'Trend aktywności szkodników', 'month'],
   ['R11', 'R11 – Kontrola magnesów', 'Raport kontroli magnesów', 'month'],
-  ['R13', 'R13 – Elementy szklane', 'Raport kontroli elementów szklanych i tworzyw sztucznych', 'register']
+  ['R13', 'R13 – Elementy szklane', 'Raport kontroli elementów szklanych – kartoteka miesięczna (dni robocze)', 'month']
 ]
 
 function cleaningFields(objectLabel) {
@@ -271,26 +271,11 @@ export const RAPORTY_FORMS = {
   },
   R13: {
     code: 'R13',
-    layout: 'table',
-    periodMode: 'register',
-    title: 'Raport R13 – Raport kontroli elementów szklanych i tworzyw sztucznych',
-    columns: [
-      col('lp', 'Lp.', (_, i) => i + 1),
-      col('element', 'Element', d => dval(d, 'element_name') || d.product_name || ''),
-      col('location', 'Lokalizacja', d => dval(d, 'location')),
-      col('date', 'Data kontroli', d => d.document_date || ''),
-      col('condition', 'Stan', d => normalizePn(dval(d, 'condition_ok', 'P'))),
-      col('sign', 'Podpis', d => d.signed_by_operator || '')
-    ],
-    fields: [
-      { key: 'document_date', label: 'Data kontroli', type: 'date', required: true },
-      { key: 'element_name', label: 'Element (szkło / tworzywo)', type: 'text', data: true, required: true },
-      { key: 'location', label: 'Lokalizacja w zakładzie', type: 'text', data: true },
-      { key: 'quantity', label: 'Ilość / wymiary', type: 'text', data: true },
-      { key: 'condition_ok', label: 'Stan prawidłowy (P/N)', type: 'pn', data: true },
-      { key: 'damage_action', label: 'Uszkodzenie – działanie', type: 'text', data: true },
-      { key: 'signed_by', label: 'Podpis', type: 'employee' }
-    ]
+    layout: 'r13',
+    periodMode: 'month',
+    title: 'Raport R13 – Raport kontroli elementów szklanych',
+    columns: [],
+    fields: []
   }
 }
 

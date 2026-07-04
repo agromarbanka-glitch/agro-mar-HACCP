@@ -10,6 +10,11 @@ import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07D
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
 import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
 import {
+  R13_ENGINE_VERSION, R13_HEADER, R13_GLASS_ELEMENTS, buildR13MonthPayloads, buildR13PeriodGroups,
+  buildR13PrintHtml, buildR13ExcelRows, sortR13Docs, r13ElementsSummary, r13DocStatus,
+  formatR13PlDate, defaultR13ElementsMap, workDatesInMonth
+} from './r13Engine'
+import {
   W03_HEADER, W03_FREQ_KEYS, sortW03Docs, buildW03InsertPayload,
   buildW03SeedPayloads, buildW03PrintHtml, buildW03ExcelRows, loadW03Meta, saveW03Meta, w03Freq
 } from './w03Engine'
@@ -279,7 +284,9 @@ function App() {
   const [k04Overrides, setK04Overrides] = useState({})
   const [k07Overrides, setK07Overrides] = useState({})
   const [defaultK04Employee, setDefaultK04Employee] = useState('')
-  const [defaultK07Employee, setDefaultK07Employee] = useState('')
+  const [defaultR13Employee, setDefaultR13Employee] = useState('')
+  const [r13NewMonth, setR13NewMonth] = useState(new Date().toISOString().slice(0, 7))
+  const [r13ExpandedRow, setR13ExpandedRow] = useState(null)
   const [defaultK06Employee, setDefaultK06Employee] = useState('')
   const [formsTrace, setFormsTrace] = useState({ operations: [], allocations: [] })
   const [manualHaccpForm, setManualHaccpForm] = useState({})
@@ -441,7 +448,7 @@ function App() {
     { code: 'K05', name: 'Towary wycofane', status: 'w realizacji', note: 'Ręczny rejestr wycofań.' },
     { code: 'K06', name: 'Ocena jakości produktu', status: 'w realizacji', note: 'Auto z produkcji + ręczna edycja P/N.' },
     { code: 'K07', name: 'Kontrola sita CCP1', status: 'w realizacji', note: 'Dzienna kartoteka sita na linii przerobu.' },
-    { code: 'Raporty', name: 'R00–R13', status: 'robocze', note: 'Raporty 1:1 – wpisy ręczne, druk i Excel.' },
+    { code: 'Raporty', name: 'R00–R13', status: 'robocze', note: 'R13 – kartoteka miesięczna (dni robocze, auto P, druk/Excel).' },
     { code: 'Wykazy', name: 'W01–W10', status: 'robocze', note: 'Kartoteki wykazów 1:1 ze wzorami – wpisy ręczne, druk i Excel.' },
     { code: 'Formularze', name: 'F01–F03', status: 'robocze', note: 'Formularze 1:1 – wpisy ręczne, logika później.' },
     { code: 'Protokoły', name: 'PR01–PR08', status: 'robocze', note: 'Protokoły 1:1 – dokumenty i rejestry.' },
@@ -1164,6 +1171,103 @@ function App() {
     setMessage(`Ustawiono podpis K07 dla ${docs.length} wpisów.`)
   }
 
+  async function saveR13Cell(doc, patch = {}, signedBy) {
+    if (!supabase || !doc?.id) return
+    const nextData = { ...(doc.data || {}), ...patch }
+    if (patch.elements) nextData.elements = { ...(doc.data?.elements || {}), ...patch.elements }
+    const payload = {
+      data: nextData,
+      status: r13DocStatus({ ...doc, data: nextData }),
+      updated_at: new Date().toISOString()
+    }
+    if (signedBy !== undefined) payload.signed_by_operator = signedBy
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R13: błąd zapisu – ${err.message}`)
+    }
+  }
+
+  async function setR13SummaryForDoc(doc, summaryPn) {
+    const val = formNormalizePn(summaryPn)
+    await saveR13Cell(doc, { elements: defaultR13ElementsMap(val), corrective: val === 'P' ? '' : (doc.data?.corrective || '') })
+  }
+
+  async function setR13ElementPn(doc, elementNo, value) {
+    const elements = { ...(doc.data?.elements || defaultR13ElementsMap('P')), [String(elementNo)]: formNormalizePn(value) }
+    await saveR13Cell(doc, { elements })
+  }
+
+  async function setEmployeeForVisibleR13Group(group, employeeName, onlyEmpty = false) {
+    if (!group || !employeeName) return
+    if (!supabase) { setMessage('Brak bazy – podpis R13 wymaga Supabase.'); return }
+    const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || ''))
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów R13.' : 'Brak wpisów R13.'); return }
+    try {
+      for (const doc of docs) {
+        const { error } = await supabase.from('haccp_documents').update({
+          signed_by_operator: employeeName,
+          updated_at: new Date().toISOString()
+        }).eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setMessage(`Ustawiono podpis R13 dla ${docs.length} dni.`)
+    } catch (err) {
+      setMessage(`R13: ${err.message}`)
+    }
+  }
+
+  async function createR13MonthKartoteka() {
+    if (!supabase) {
+      setMessage('R13: brak połączenia z bazą (Supabase).')
+      return
+    }
+    const yearMonth = r13NewMonth
+    if (!/^\d{4}-\d{2}$/.test(yearMonth)) {
+      setMessage('R13: wybierz rok i miesiąc.')
+      return
+    }
+    const existing = (haccpDocs || []).filter(d => d.document_type === 'R13' && d.data?.month_key === yearMonth)
+    if (existing.length && !window.confirm(`Kartoteka R13 za ${yearMonth} już istnieje (${existing.length} wpisów). Utworzyć ponownie (doda kolejne dni)?`)) return
+    const payloads = buildR13MonthPayloads(yearMonth, defaultR13Employee)
+    if (!payloads.length) {
+      setMessage('R13: brak dni roboczych w wybranym miesiącu.')
+      return
+    }
+    try {
+      for (const payload of payloads) {
+        const dup = (haccpDocs || []).some(d => d.document_type === 'R13' && d.document_date === payload.document_date)
+        if (dup) continue
+        const { error } = await supabase.from('haccp_documents').insert(payload)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      const dayCount = workDatesInMonth(yearMonth).length
+      setMessage(`R13: utworzono kartotekę za ${yearMonth} – ${dayCount} dni roboczych (bez niedziel), domyślnie P${defaultR13Employee ? `, podpis: ${defaultR13Employee}` : ''}.`)
+    } catch (err) {
+      setMessage(`R13: błąd tworzenia – ${err.message}`)
+    }
+  }
+
+  async function deleteR13Month(group) {
+    if (!supabase || !group?.docs?.length) return
+    if (!window.confirm(`Usunąć całą kartotekę R13 za ${group.period}? (${group.docs.length} wpisów)`)) return
+    try {
+      for (const doc of group.docs) {
+        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setSelectedHaccpDoc(null)
+      setMessage(`R13: usunięto kartotekę za ${group.period}.`)
+    } catch (err) {
+      setMessage(`R13: ${err.message}`)
+    }
+  }
+
   async function setEmployeeForVisibleK06Group(group, employeeName, onlyEmpty = false) {
     if (!group || !employeeName) return
     const docs = (group.docs || []).filter(d => !onlyEmpty || !d.signed_by_operator)
@@ -1366,6 +1470,7 @@ function App() {
     const code = activeDocsCode()
     const cfg = getDocFormCfg(code)
     if (!cfg || docsHubSection === 'kartoteki') return []
+    if (code === 'R13') return buildR13PeriodGroups(hubManualDocsForFilter)
     return buildHubDocGroups(hubManualDocsForFilter, code, cfg)
   }, [hubManualDocsForFilter, docsHubSection, docsWykazFilter, docsRaportFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter])
 
@@ -1803,6 +1908,8 @@ function App() {
         ? buildW03PrintHtml(group.docs || [], w03Meta, escapeHtml)
       : group.type === 'W06'
         ? buildW06PrintHtml(group.docs || [], escapeHtml)
+      : group.type === 'R13'
+        ? buildR13PrintHtml(group, escapeHtml)
       : cfg ? buildManualMonthlyHtml(group, escapeHtml, cfg)
       : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
@@ -1839,6 +1946,8 @@ function App() {
       rows.push(...buildW03ExcelRows(docs, w03Meta))
     } else if (group.type === 'W06') {
       rows.push(...buildW06ExcelRows(docs))
+    } else if (group.type === 'R13') {
+      rows.push(...buildR13ExcelRows(group))
     } else if (getDocFormCfg(group.type)) {
       rows.push(...buildManualExcelRows(group, getDocFormCfg(group.type)))
     } else if (group.type === 'K03') {
@@ -2206,6 +2315,89 @@ function App() {
             })}
           </tr>)}
         </tbody></table>
+      </div>
+    }
+
+    if (group.type === 'R13') {
+      const r13Docs = sortR13Docs(group.docs || [])
+      const period = String(group.period || '')
+      const year = period.slice(0, 4)
+      const month = period.slice(5, 7)
+      return <div className="monthly-paper r13-paper">
+        <div className="no-print employee-signature-row" style={{ marginBottom: '10px' }}>
+          <label>Podpis kontrolującego (zbiorczo)
+            <select value={defaultR13Employee} onChange={e => setDefaultR13Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, true)}>Uzupełnij puste</button>
+          <button className="secondary danger" onClick={() => deleteR13Month(group)}>Usuń kartotekę</button>
+          <span className="hint">Dni robocze (bez niedziel). Domyślnie P – możesz zmienić pojedynczy wiersz lub rozwinąć szczegóły elementów 1–23.</span>
+        </div>
+        <table className="r13-head"><tbody><tr>
+          <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+          <td className="r13-title"><b>{R13_HEADER.title}</b></td>
+          <td className="r13-meta"><b>Rok:</b> {year}<br/><b>Miesiąc:</b> {month}<br/><b>Str.</b> 1 z 1<br/><b>Wersja</b> {R13_HEADER.version}</td>
+        </tr></tbody></table>
+        <table className="r13-table">
+          <thead><tr>
+            <th>Lp.</th><th>Data</th><th>Numer elementu szklanego (*P/N)</th><th>Podpis kontrolującego</th><th>Uwagi **T/N</th><th className="no-print">Szczegóły</th>
+          </tr></thead>
+          <tbody>
+            {r13Docs.map((doc, i) => {
+              const summary = r13ElementsSummary(doc.data?.elements)
+              const allP = summary === 'P'
+              const expanded = r13ExpandedRow === doc.id
+              return <React.Fragment key={doc.id}>
+                <tr>
+                  <td>{i + 1}</td>
+                  <td>{formatR13PlDate(doc.document_date)}</td>
+                  <td className={!allP ? 'pn-n' : ''}>
+                    <select className="mini-select no-print" value={allP ? 'P' : 'N'} onChange={e => setR13SummaryForDoc(doc, e.target.value)}>
+                      <option value="P">P</option><option value="N">N</option>
+                    </select>
+                    <span className="print-only">{summary}</span>
+                    {!allP && <span className="no-print hint" style={{ display: 'block', fontSize: '10px' }}>{summary}</span>}
+                  </td>
+                  <td>
+                    <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveR13Cell(doc, {}, e.target.value)}>
+                      <option value="">Wybierz</option>
+                      {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                    </select>
+                    <span className="print-only">{doc.signed_by_operator || ''}</span>
+                  </td>
+                  <td>
+                    <select className="mini-select no-print" value={doc.data?.corrective || ''} onChange={e => saveR13Cell(doc, { corrective: e.target.value })}>
+                      <option value="">—</option><option value="T">T</option><option value="N">N</option>
+                    </select>
+                    <span className="print-only">{doc.data?.corrective || '—'}</span>
+                  </td>
+                  <td className="no-print">
+                    <button type="button" className="mini secondary" onClick={() => setR13ExpandedRow(expanded ? null : doc.id)}>{expanded ? 'Zwiń' : 'Elementy 1–23'}</button>
+                  </td>
+                </tr>
+                {expanded && <tr className="no-print"><td colSpan={6}>
+                  <div className="r13-elements-grid">
+                    {R13_GLASS_ELEMENTS.map(el => (
+                      <label key={el.no}>{el.label}
+                        <select className="mini-select" value={formNormalizePn(doc.data?.elements?.[String(el.no)] || 'P')} onChange={e => setR13ElementPn(doc, el.no, e.target.value)}>
+                          <option value="P">P</option><option value="N">N</option>
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </td></tr>}
+              </React.Fragment>
+            })}
+          </tbody>
+        </table>
+        <div className="r13-glass-block"><b>Szyby (wg nr):</b> {R13_GLASS_ELEMENTS.map(e => <span key={e.no} className="r13-glass-no">{e.no}</span>)}</div>
+        <div className="r13-legend">
+          * <b>P</b> – prawidłowo, element cały nieuszkodzony; <b>N</b> – nieprawidłowo, element uszkodzony/zbity/wyszczerbiony.<br/>
+          ** <b>T</b> – podjęto działania naprawcze/korekcyjne; <b>N</b> – nie podjęto działań naprawczych.
+        </div>
       </div>
     }
 
@@ -3070,6 +3262,45 @@ function App() {
     </>
   }
 
+  function renderR13Section() {
+    return <>
+      <div className="card inner-card no-print r13-add-panel">
+        <h3>Dodaj kartotekę R13 za miesiąc</h3>
+        <p className="hint">System uzupełni automatycznie wszystkie <b>dni robocze (pon–sob)</b> wartością <b>P</b> dla 23 elementów szklanych. <b>Niedziele są pomijane.</b> Wybierz miesiąc i podpis – potem możesz edytować pojedyncze wiersze.</p>
+        <div className="k03-bulk-row">
+          <label>Rok i miesiąc<input type="month" value={r13NewMonth} onChange={e => setR13NewMonth(e.target.value)} /></label>
+          <label>Podpis kontrolującego
+            <select value={defaultR13Employee} onChange={e => setDefaultR13Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button onClick={createR13MonthKartoteka}>Utwórz kartotekę</button>
+        </div>
+        <p className="hint">Wersja silnika R13: {R13_ENGINE_VERSION}. Układ zgodny ze wzorem Word (Raport R13).</p>
+      </div>
+      {hubManualGroups.length === 0 && <p className="hint">Brak kartotek R13 – utwórz pierwszą kartotekę miesięczną powyżej.</p>}
+      {hubManualGroups.length > 0 && <>
+        <h3>Lista kartotek R13</h3>
+        <div className="table-wrap docs-table-wrap"><table className="docs-table">
+          <thead><tr><th>Miesiąc</th><th>Dni robocze</th><th>N</th><th>Akcje</th></tr></thead>
+          <tbody>{hubManualGroups.map(g => (
+            <tr key={g.key}>
+              <td><b>{g.period}</b></td>
+              <td>{g.docs.length}</td>
+              <td>{g.docs.filter(d => r13DocStatus(d) === 'N').length || '—'}</td>
+              <td className="row-actions">
+                <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
+                <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
+                <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </>}
+    </>
+  }
+
   function renderHubManualSection() {
     const code = activeDocsCode()
     const cards = activeHubCards()
@@ -3087,7 +3318,7 @@ function App() {
               <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
-          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : <>
+          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R13' ? renderR13Section() : <>
           {cfg && renderManualHaccpEntrySection()}
           {hubManualGroups.length === 0 && <p className="hint">Brak wpisów. Dodaj pierwszy wpis powyżej.</p>}
           {hubManualGroups.length > 0 && <>
@@ -5045,7 +5276,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
+      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R13 {R13_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
     </header>
 
     <section className="warning">
