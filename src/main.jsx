@@ -10,9 +10,10 @@ import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07D
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
 import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
 import {
-  R13_ENGINE_VERSION, R13_HEADER, R13_GLASS_ELEMENTS, buildR13MonthPayloads, buildR13PeriodGroups,
-  buildR13PrintHtml, buildR13ExcelRows, sortR13Docs, r13ElementsSummary, r13DocStatus,
-  formatR13PlDate, defaultR13ElementsMap, workDatesInMonth, buildR13CalendarRows
+  R13_ENGINE_VERSION, R13_HEADER, loadR13Columns, saveR13Columns, buildR13MonthPayloads, buildR13PeriodGroups,
+  buildR13PrintHtml, buildR13ExcelRows, sortR13Docs, r13DocStatus, r13ColumnsFromDocs, r13ChecksForDoc,
+  r13CheckDisplay, formatR13PlDate, buildR13CalendarRows, buildR13SingleDayPayload, r13MakeColumn,
+  isSundayDate, defaultR13Checks
 } from './r13Engine'
 import {
   W03_HEADER, W03_FREQ_KEYS, sortW03Docs, buildW03InsertPayload,
@@ -286,7 +287,8 @@ function App() {
   const [defaultK04Employee, setDefaultK04Employee] = useState('')
   const [defaultR13Employee, setDefaultR13Employee] = useState('')
   const [r13NewMonth, setR13NewMonth] = useState(new Date().toISOString().slice(0, 7))
-  const [r13ExpandedRow, setR13ExpandedRow] = useState(null)
+  const [r13ColumnDefs, setR13ColumnDefs] = useState(() => loadR13Columns())
+  const [r13NewColumnLabel, setR13NewColumnLabel] = useState('')
   const [defaultK06Employee, setDefaultK06Employee] = useState('')
   const [formsTrace, setFormsTrace] = useState({ operations: [], allocations: [] })
   const [manualHaccpForm, setManualHaccpForm] = useState({})
@@ -1174,10 +1176,11 @@ function App() {
   async function saveR13Cell(doc, patch = {}, signedBy) {
     if (!supabase || !doc?.id) return
     const nextData = { ...(doc.data || {}), ...patch }
-    if (patch.elements) nextData.elements = { ...(doc.data?.elements || {}), ...patch.elements }
+    if (patch.checks) nextData.checks = { ...(doc.data?.checks || {}), ...patch.checks }
+    const columns = r13ColumnsFromDocs([doc])
     const payload = {
       data: nextData,
-      status: r13DocStatus({ ...doc, data: nextData }),
+      status: r13DocStatus({ ...doc, data: nextData }, columns),
       updated_at: new Date().toISOString()
     }
     if (signedBy !== undefined) payload.signed_by_operator = signedBy
@@ -1190,14 +1193,67 @@ function App() {
     }
   }
 
-  async function setR13SummaryForDoc(doc, summaryPn) {
-    const val = formNormalizePn(summaryPn)
-    await saveR13Cell(doc, { elements: defaultR13ElementsMap(val), corrective: val === 'P' ? '' : (doc.data?.corrective || '') })
+  async function setR13GlassCheck(doc, columnId, value, columns) {
+    const cols = columns || r13ColumnsFromDocs([doc])
+    const checks = r13ChecksForDoc(doc, cols)
+    const nextVal = value === '' ? '' : formNormalizePn(value)
+    await saveR13Cell(doc, { checks: { ...checks, [columnId]: nextVal } })
   }
 
-  async function setR13ElementPn(doc, elementNo, value) {
-    const elements = { ...(doc.data?.elements || defaultR13ElementsMap('P')), [String(elementNo)]: formNormalizePn(value) }
-    await saveR13Cell(doc, { elements })
+  async function setR13RowAllP(doc, columns) {
+    const cols = columns || r13ColumnsFromDocs([doc])
+    await saveR13Cell(doc, { checks: defaultR13Checks(cols, 'P') })
+  }
+
+  async function updateR13DocsColumns(group, nextColumns, fillNewWithP = true) {
+    if (!supabase || !group?.docs?.length) return
+    saveR13Columns(nextColumns)
+    setR13ColumnDefs(nextColumns)
+    try {
+      for (const doc of group.docs) {
+        const oldChecks = r13ChecksForDoc(doc, r13ColumnsFromDocs([doc]))
+        const sunday = doc.data?.is_day_off || isSundayDate(doc.document_date)
+        const checks = {}
+        for (const col of nextColumns) {
+          if (oldChecks[col.id] !== undefined && oldChecks[col.id] !== '') checks[col.id] = oldChecks[col.id]
+          else checks[col.id] = sunday ? '' : (fillNewWithP ? 'P' : '')
+        }
+        const { error } = await supabase.from('haccp_documents').update({
+          data: { ...(doc.data || {}), glass_columns: nextColumns, checks },
+          status: r13DocStatus({ ...doc, data: { ...doc.data, checks } }, nextColumns),
+          updated_at: new Date().toISOString()
+        }).eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R13: ${err.message}`)
+    }
+  }
+
+  async function addR13ColumnToGroup(group, label) {
+    const col = r13MakeColumn(label)
+    const cols = [...(group.columns || r13ColumnsFromDocs(group.docs)), col]
+    await updateR13DocsColumns(group, cols, true)
+    setR13NewColumnLabel('')
+    setMessage(`R13: dodano kolumnę „${col.label}”.`)
+  }
+
+  async function removeR13ColumnFromGroup(group, columnId) {
+    const allCols = group.columns || r13ColumnsFromDocs(group.docs)
+    const removed = allCols.find(c => c.id === columnId)
+    const cols = allCols.filter(c => c.id !== columnId)
+    if (cols.length < 1) { setMessage('R13: musi zostać co najmniej jedna szyba.'); return }
+    if (!window.confirm(`Usunąć kolumnę „${removed?.label || columnId}" z tej kartoteki?`)) return
+    await updateR13DocsColumns(group, cols, false)
+    setMessage('R13: usunięto kolumnę.')
+  }
+
+  async function renameR13ColumnInGroup(group, columnId, newLabel) {
+    const label = String(newLabel || '').trim()
+    if (!label) return
+    const cols = (group.columns || r13ColumnsFromDocs(group.docs)).map(c => c.id === columnId ? { ...c, label } : c)
+    await updateR13DocsColumns(group, cols, false)
   }
 
   async function setEmployeeForVisibleR13Group(group, employeeName, onlyEmpty = false) {
@@ -1232,21 +1288,24 @@ function App() {
     }
     const existing = (haccpDocs || []).filter(d => d.document_type === 'R13' && d.data?.month_key === yearMonth)
     if (existing.length && !window.confirm(`Kartoteka R13 za ${yearMonth} już istnieje (${existing.length} wpisów). Utworzyć ponownie (doda kolejne dni)?`)) return
-    const payloads = buildR13MonthPayloads(yearMonth, defaultR13Employee)
+    const payloads = buildR13MonthPayloads(yearMonth, defaultR13Employee, r13ColumnDefs)
     if (!payloads.length) {
-      setMessage('R13: brak dni roboczych w wybranym miesiącu.')
+      setMessage('R13: brak dni w wybranym miesiącu.')
       return
     }
     try {
+      let added = 0
       for (const payload of payloads) {
         const dup = (haccpDocs || []).some(d => d.document_type === 'R13' && d.document_date === payload.document_date)
         if (dup) continue
         const { error } = await supabase.from('haccp_documents').insert(payload)
         if (error) throw error
+        added++
       }
       await loadHaccpDocs()
-      const dayCount = workDatesInMonth(yearMonth).length
-      setMessage(`R13: utworzono kartotekę za ${yearMonth} – ${dayCount} dni roboczych (bez niedziel), domyślnie P${defaultR13Employee ? `, podpis: ${defaultR13Employee}` : ''}.`)
+      const totalDays = payloads.length
+      const sundays = payloads.filter(p => p.data?.is_day_off).length
+      setMessage(`R13: utworzono kartotekę za ${yearMonth} – ${added} dni (${totalDays - sundays} roboczych z P, ${sundays} niedziel pustych)${defaultR13Employee ? `, podpis: ${defaultR13Employee}` : ''}.`)
     } catch (err) {
       setMessage(`R13: błąd tworzenia – ${err.message}`)
     }
@@ -1275,13 +1334,13 @@ function App() {
       setMessage('R13: data musi pozostać w tym samym miesiącu kartoteki.')
       return
     }
-    if (new Date(`${newDate}T12:00:00`).getDay() === 0) {
-      setMessage('R13: niedziela to dzień wolny – wybierz inny dzień.')
-      return
-    }
+    const sunday = isSundayDate(newDate)
     try {
+      const columns = r13ColumnsFromDocs([doc])
+      const checks = r13ChecksForDoc(doc, columns)
       const { error } = await supabase.from('haccp_documents').update({
         document_date: newDate,
+        data: { ...(doc.data || {}), is_day_off: sunday, checks },
         updated_at: new Date().toISOString()
       }).eq('id', doc.id)
       if (error) throw error
@@ -1300,30 +1359,14 @@ function App() {
   async function addMissingR13Day(group, date) {
     if (!supabase || !date) return
     const yearMonth = group.period
-    const workDocs = sortR13Docs(group.docs || [])
-    const sortOrder = workDocs.length + 1
-    const payload = {
-      document_type: 'R13',
-      document_date: date,
-      document_no: `R13/${yearMonth}/${String(sortOrder).padStart(2, '0')}`,
-      product_name: 'Kontrola elementów szklanych',
-      status: 'P',
-      data: {
-        month_key: yearMonth,
-        sort_order: sortOrder,
-        elements: defaultR13ElementsMap('P'),
-        corrective: '',
-        notes_tn: ''
-      },
-      signed_by_operator: defaultR13Employee || workDocs[0]?.signed_by_operator || '',
-      qty: 0,
-      updated_at: new Date().toISOString()
-    }
+    const columns = group.columns || r13ColumnsFromDocs(group.docs)
+    const sunday = isSundayDate(date)
+    const payload = buildR13SingleDayPayload(yearMonth, date, columns, defaultR13Employee || sortR13Docs(group.docs)[0]?.signed_by_operator || '', sunday)
     try {
       const { error } = await supabase.from('haccp_documents').insert(payload)
       if (error) throw error
       await loadHaccpDocs()
-      setMessage(`R13: dodano wpis na ${formatR13PlDate(date)}.`)
+      setMessage(`R13: dodano wpis na ${formatR13PlDate(date)}${sunday ? ' (dzień wolny – uzupełnij ręcznie)' : ''}.`)
     } catch (err) {
       setMessage(`R13: ${err.message}`)
     }
@@ -2384,7 +2427,19 @@ function App() {
       const period = String(group.period || r13Docs[0]?.data?.month_key || '')
       const year = period.slice(0, 4)
       const month = period.slice(5, 7)
+      const columns = group.columns || r13ColumnsFromDocs(r13Docs)
       const calendar = buildR13CalendarRows(period, r13Docs)
+      const renderGlassCell = (doc, col) => {
+        const checks = r13ChecksForDoc(doc, columns)
+        const val = checks[col.id]
+        const display = r13CheckDisplay(val)
+        return <td key={col.id} className={display === 'N' ? 'pn-n' : ''}>
+          <select className="mini-select no-print" value={val === '' ? '' : formNormalizePn(val)} onChange={e => setR13GlassCheck(doc, col.id, e.target.value, columns)}>
+            <option value="">—</option><option value="P">P</option><option value="N">N</option>
+          </select>
+          <span className="print-only">{display}</span>
+        </td>
+      }
       return <div className="monthly-paper r13-paper">
         <div className="no-print employee-signature-row" style={{ marginBottom: '10px' }}>
           <label>Podpis kontrolującego (zbiorczo)
@@ -2396,7 +2451,22 @@ function App() {
           <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, true)}>Uzupełnij puste</button>
           <button className="secondary danger" onClick={() => deleteR13Month(group)}>Usuń kartotekę</button>
-          <span className="hint">Edytuj P/N, podpis i uwagi w tabeli. Niedziele oznaczone na różowo – bez wpisu.</span>
+          <span className="hint">Niedziele na różowo – domyślnie puste, można uzupełnić ręcznie (np. praca w niedzielę).</span>
+        </div>
+        <div className="no-print r13-columns-panel">
+          <b>Kolumny szyb w tej kartotece:</b>
+          <div className="r13-columns-list">
+            {columns.map(col => (
+              <span key={col.id} className="r13-column-chip">
+                <input className="cell-input r13-col-rename" defaultValue={col.label} onBlur={e => { if (e.target.value.trim() && e.target.value.trim() !== col.label) renameR13ColumnInGroup(group, col.id, e.target.value) }} />
+                {columns.length > 1 && <button type="button" className="mini danger" title="Usuń kolumnę" onClick={() => removeR13ColumnFromGroup(group, col.id)}>×</button>}
+              </span>
+            ))}
+          </div>
+          <div className="r13-add-column-row">
+            <input value={r13NewColumnLabel} onChange={e => setR13NewColumnLabel(e.target.value)} placeholder="np. Szyba 3" onKeyDown={e => { if (e.key === 'Enter' && r13NewColumnLabel.trim()) addR13ColumnToGroup(group, r13NewColumnLabel) }} />
+            <button type="button" className="secondary" onClick={() => addR13ColumnToGroup(group, r13NewColumnLabel)} disabled={!r13NewColumnLabel.trim()}>Dodaj szybę</button>
+          </div>
         </div>
         <table className="r13-head"><tbody><tr>
           <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -2405,78 +2475,61 @@ function App() {
         </tr></tbody></table>
         <table className="r13-table">
           <thead><tr>
-            <th>Lp.</th><th>Data</th><th>Numer elementu szklanego (*P/N)</th><th>Podpis kontrolującego</th><th>Uwagi **T/N</th><th className="no-print">Szczegóły</th>
+            <th>Lp.</th><th>Data</th>
+            {columns.map(col => <th key={col.id}>{col.label}<br/><small>(*P/N)</small></th>)}
+            <th>Podpis kontrolującego</th><th>Uwagi **T/N</th><th className="no-print">Akcje</th>
           </tr></thead>
           <tbody>
             {calendar.map(row => {
-              if (row.isSunday) {
-                return <tr key={row.date} className="r13-day-off">
-                  <td>{row.lp}</td>
-                  <td>{formatR13PlDate(row.date)}</td>
-                  <td colSpan={4} className="r13-off-label">Niedziela – dzień wolny od pracy</td>
-                </tr>
-              }
+              const dayOff = row.isSunday
               const doc = row.doc
               if (!doc) {
-                return <tr key={row.date} className="r13-missing no-print">
+                return <tr key={row.date} className={`${dayOff ? 'r13-day-off' : ''} r13-missing no-print`.trim()}>
                   <td>{row.lp}</td>
-                  <td>{formatR13PlDate(row.date)}</td>
-                  <td colSpan={3} className="hint">Brak wpisu</td>
-                  <td><button type="button" className="mini secondary" onClick={() => addMissingR13Day(group, row.date)}>Dodaj P</button></td>
+                  <td>{formatR13PlDate(row.date)}{dayOff ? <small className="r13-off-tag"> (dzień wolny)</small> : ''}</td>
+                  {columns.map(col => <td key={col.id}>—</td>)}
+                  <td colSpan={2} className="hint">{dayOff ? 'Niedziela – pusty wpis' : 'Brak wpisu'}</td>
+                  <td className="no-print">
+                    <button type="button" className="mini secondary" onClick={() => addMissingR13Day(group, row.date)}>{dayOff ? 'Dodaj wpis' : 'Dodaj P'}</button>
+                  </td>
                 </tr>
               }
-              const summary = r13ElementsSummary(doc.data?.elements)
-              const allP = summary === 'P'
-              const expanded = r13ExpandedRow === doc.id
-              return <React.Fragment key={doc.id}>
-                <tr>
-                  <td>{row.lp}</td>
-                  <td>
-                    <input className="cell-input no-print" type="date" defaultValue={doc.document_date} onBlur={e => { if (e.target.value !== doc.document_date) saveR13DocumentDate(doc, e.target.value) }} />
-                    <span className="print-only">{formatR13PlDate(doc.document_date)}</span>
-                  </td>
-                  <td className={!allP ? 'pn-n' : ''}>
-                    <select className="mini-select no-print" value={allP ? 'P' : 'N'} onChange={e => setR13SummaryForDoc(doc, e.target.value)}>
-                      <option value="P">P</option><option value="N">N</option>
-                    </select>
-                    <span>{summary}</span>
-                  </td>
-                  <td>
-                    <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveR13Cell(doc, {}, e.target.value)}>
-                      <option value="">Wybierz</option>
-                      {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
-                    </select>
-                    <span className="print-only">{doc.signed_by_operator || ''}</span>
-                  </td>
-                  <td>
-                    <select className="mini-select no-print" value={doc.data?.corrective || ''} onChange={e => saveR13Cell(doc, { corrective: e.target.value })}>
-                      <option value="">—</option><option value="T">T</option><option value="N">N</option>
-                    </select>
-                    <span>{doc.data?.corrective || '—'}</span>
-                  </td>
-                  <td className="no-print">
-                    <button type="button" className="mini secondary" onClick={() => setR13ExpandedRow(expanded ? null : doc.id)}>{expanded ? 'Zwiń' : 'Elementy 1–23'}</button>
-                  </td>
-                </tr>
-                {expanded && <tr className="no-print"><td colSpan={6}>
-                  <div className="r13-elements-grid">
-                    {R13_GLASS_ELEMENTS.map(el => (
-                      <label key={el.no}>{el.label}
-                        <select className="mini-select" value={formNormalizePn(doc.data?.elements?.[String(el.no)] || 'P')} onChange={e => setR13ElementPn(doc, el.no, e.target.value)}>
-                          <option value="P">P</option><option value="N">N</option>
-                        </select>
-                      </label>
-                    ))}
-                  </div>
-                </td></tr>}
-              </React.Fragment>
+              const checks = r13ChecksForDoc(doc, columns)
+              const rowHasN = Object.values(checks).some(v => v === 'N')
+              const isOff = dayOff || doc.data?.is_day_off
+              return <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
+                <td>{row.lp}</td>
+                <td>
+                  <input className="cell-input no-print" type="date" defaultValue={doc.document_date} onBlur={e => { if (e.target.value !== doc.document_date) saveR13DocumentDate(doc, e.target.value) }} />
+                  <span className="print-only">{formatR13PlDate(doc.document_date)}{isOff ? ' (dzień wolny)' : ''}</span>
+                </td>
+                {columns.map(col => renderGlassCell(doc, col))}
+                <td>
+                  <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveR13Cell(doc, {}, e.target.value)}>
+                    <option value="">Wybierz</option>
+                    {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                  </select>
+                  <span className="print-only">{doc.signed_by_operator || ''}</span>
+                </td>
+                <td className={doc.data?.corrective === 'N' ? 'pn-n' : ''}>
+                  <select className="mini-select no-print" value={doc.data?.corrective || ''} onChange={e => saveR13Cell(doc, { corrective: e.target.value })}>
+                    <option value="">—</option><option value="T">T</option><option value="N">N</option>
+                  </select>
+                  <span className="print-only">{doc.data?.corrective || '—'}</span>
+                </td>
+                <td className="no-print">
+                  {(isOff || rowHasN || !Object.values(checks).every(v => v === 'P')) && (
+                    <button type="button" className="mini secondary" onClick={() => setR13RowAllP(doc, columns)} title="Ustaw P we wszystkich szybach">Wszystkie P</button>
+                  )}
+                </td>
+              </tr>
             })}
           </tbody>
         </table>
-        <div className="r13-glass-block"><b>Szyby (wg nr):</b> {R13_GLASS_ELEMENTS.map(e => <span key={e.no} className="r13-glass-no">{e.no}</span>)}</div>
         <div className="r13-legend">
           * <b>P</b> – prawidłowo, element cały nieuszkodzony; <b>N</b> – nieprawidłowo, element uszkodzony/zbity/wyszczerbiony.<br/>
-          ** <b>T</b> – podjęto działania naprawcze/korekcyjne; <b>N</b> – nie podjęto działań naprawczych.
+          ** <b>T</b> – podjęto działania naprawcze/korekcyjne; <b>N</b> – nie podjęto działań naprawczych.<br/>
+          Niedziele oznaczone na różowo – domyślnie puste, uzupełniane ręcznie w razie pracy.
         </div>
       </div>
     }
@@ -3342,11 +3395,43 @@ function App() {
     </>
   }
 
+  function addR13DefaultColumn() {
+    const col = r13MakeColumn(r13NewColumnLabel)
+    const next = [...r13ColumnDefs, col]
+    saveR13Columns(next)
+    setR13ColumnDefs(next)
+    setR13NewColumnLabel('')
+    setMessage(`R13: dodano domyślną kolumnę „${col.label}” (dla nowych kartotek).`)
+  }
+
+  function removeR13DefaultColumn(columnId) {
+    const next = r13ColumnDefs.filter(c => c.id !== columnId)
+    if (next.length < 1) { setMessage('R13: musi zostać co najmniej jedna szyba.'); return }
+    saveR13Columns(next)
+    setR13ColumnDefs(next)
+    setMessage('R13: usunięto kolumnę z ustawień domyślnych.')
+  }
+
   function renderR13Section() {
     return <>
       <div className="card inner-card no-print r13-add-panel">
         <h3>Dodaj kartotekę R13 za miesiąc</h3>
-        <p className="hint">System uzupełni automatycznie wszystkie <b>dni robocze (pon–sob)</b> wartością <b>P</b> dla 23 elementów szklanych. <b>Niedziele są pomijane.</b> Wybierz miesiąc i podpis – potem możesz edytować pojedyncze wiersze.</p>
+        <p className="hint">System uzupełni <b>cały miesiąc</b>: dni robocze (pon–sob) z <b>P</b> w każdej szybie, <b>niedziele puste</b> (jasny czerwony) – można je potem uzupełnić ręcznie.</p>
+        <div className="r13-columns-panel">
+          <b>Kolumny szyb (domyślne dla nowych kartotek):</b>
+          <div className="r13-columns-list">
+            {r13ColumnDefs.map(col => (
+              <span key={col.id} className="r13-column-chip">{col.label}
+                {r13ColumnDefs.length > 1 && <button type="button" className="mini danger" title="Usuń z domyślnych" onClick={() => removeR13DefaultColumn(col.id)}>×</button>}
+              </span>
+            ))}
+          </div>
+          <div className="r13-add-column-row">
+            <input value={r13NewColumnLabel} onChange={e => setR13NewColumnLabel(e.target.value)} placeholder="np. Szyba 3" onKeyDown={e => { if (e.key === 'Enter' && r13NewColumnLabel.trim()) addR13DefaultColumn() }} />
+            <button type="button" className="secondary" onClick={addR13DefaultColumn} disabled={!r13NewColumnLabel.trim()}>Dodaj szybę</button>
+          </div>
+          <p className="hint">Dodane kolumny można też dopisać do istniejącej kartoteki w podglądzie (Otwórz).</p>
+        </div>
         <div className="k03-bulk-row">
           <label>Rok i miesiąc
             <div className="r13-month-picker">
@@ -3363,25 +3448,26 @@ function App() {
           </label>
           <button onClick={createR13MonthKartoteka}>Utwórz kartotekę</button>
         </div>
-        <p className="hint">Wersja silnika R13: {R13_ENGINE_VERSION}. Układ zgodny ze wzorem Word (Raport R13).</p>
+        <p className="hint">Wersja silnika R13: {R13_ENGINE_VERSION}. Kolumny: {r13ColumnDefs.map(c => c.label).join(', ')}.</p>
       </div>
       {hubManualGroups.length === 0 && <p className="hint">Brak kartotek R13 – utwórz pierwszą kartotekę miesięczną powyżej.</p>}
       {hubManualGroups.length > 0 && <>
         <h3>Lista kartotek R13</h3>
         <div className="table-wrap docs-table-wrap"><table className="docs-table">
-          <thead><tr><th>Miesiąc</th><th>Dni robocze</th><th>N</th><th>Akcje</th></tr></thead>
-          <tbody>{hubManualGroups.map(g => (
-            <tr key={g.key}>
-              <td><b>{g.period}</b></td>
+          <thead><tr><th>Miesiąc</th><th>Dni w miesiącu</th><th>N</th><th>Akcje</th></tr></thead>
+          <tbody>{hubManualGroups.map(g => {
+            const cols = g.columns || r13ColumnsFromDocs(g.docs)
+            return <tr key={g.key}>
+              <td><b>{g.period}</b> <span className="hint">({cols.map(c => c.label).join(', ')})</span></td>
               <td>{g.docs.length}</td>
-              <td>{g.docs.filter(d => r13DocStatus(d) === 'N').length || '—'}</td>
+              <td>{g.docs.filter(d => r13DocStatus(d, cols) === 'N').length || '—'}</td>
               <td className="row-actions">
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
               </td>
             </tr>
-          ))}</tbody>
+          })}</tbody>
         </table></div>
       </>}
     </>
