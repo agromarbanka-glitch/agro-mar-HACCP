@@ -4,7 +4,7 @@
  */
 import { normalizePn } from './haccpFormsEngine'
 
-export const R13_ENGINE_VERSION = '1.0'
+export const R13_ENGINE_VERSION = '1.1'
 
 export const R13_HEADER = {
   title: 'Raport R13 - Raport kontroli elementów szklanych',
@@ -29,23 +29,37 @@ export function defaultR13ElementsMap(value = 'P') {
   return Object.fromEntries(R13_GLASS_ELEMENTS.map(e => [String(e.no), v]))
 }
 
-/** Dni miesiąca bez niedziel (0 = niedziela). */
-export function workDatesInMonth(yearMonth) {
+/** Wszystkie dni miesiąca (z flagą niedzieli). */
+export function calendarDaysInMonth(yearMonth) {
   const [y, m] = String(yearMonth || '').split('-').map(Number)
   if (!y || !m) return []
-  const dates = []
+  const days = []
   const cursor = new Date(y, m - 1, 1, 12, 0, 0)
   const last = new Date(y, m, 0, 12, 0, 0)
   while (cursor <= last) {
-    if (cursor.getDay() !== 0) {
-      const yy = cursor.getFullYear()
-      const mm = String(cursor.getMonth() + 1).padStart(2, '0')
-      const dd = String(cursor.getDate()).padStart(2, '0')
-      dates.push(`${yy}-${mm}-${dd}`)
-    }
+    const yy = cursor.getFullYear()
+    const mm = String(cursor.getMonth() + 1).padStart(2, '0')
+    const dd = String(cursor.getDate()).padStart(2, '0')
+    const iso = `${yy}-${mm}-${dd}`
+    days.push({ date: iso, day: cursor.getDate(), isSunday: cursor.getDay() === 0 })
     cursor.setDate(cursor.getDate() + 1)
   }
-  return dates
+  return days
+}
+
+/** Dni miesiąca bez niedziel (0 = niedziela). */
+export function workDatesInMonth(yearMonth) {
+  return calendarDaysInMonth(yearMonth).filter(d => !d.isSunday).map(d => d.date)
+}
+
+/** Kalendarz miesiąca + powiązane wpisy R13 (do podglądu i druku). */
+export function buildR13CalendarRows(yearMonth, docs = []) {
+  const docByDate = new Map((docs || []).map(d => [String(d.document_date || '').slice(0, 10), d]))
+  return calendarDaysInMonth(yearMonth).map((day, i) => ({
+    ...day,
+    lp: i + 1,
+    doc: docByDate.get(day.date) || null
+  }))
 }
 
 export function r13ElementsSummary(elements = {}) {
@@ -127,11 +141,19 @@ export function buildR13PrintHtml(group, escapeHtml) {
   const period = String(group.period || '')
   const year = period.slice(0, 4)
   const month = period.slice(5, 7)
-  const rows = docs.map((doc, i) => {
+  const calendar = buildR13CalendarRows(period, docs)
+  const rows = calendar.map(row => {
+    if (row.isSunday) {
+      return `<tr class="day-off"><td>${row.lp}</td><td>${escapeHtml(formatR13PlDate(row.date))}</td><td colspan="3" class="off-label">Niedziela – dzień wolny od pracy</td></tr>`
+    }
+    const doc = row.doc
+    if (!doc) {
+      return `<tr><td>${row.lp}</td><td>${escapeHtml(formatR13PlDate(row.date))}</td><td>—</td><td>—</td><td>—</td></tr>`
+    }
     const summary = r13ElementsSummary(doc.data?.elements)
     const corrective = String(doc.data?.corrective || doc.data?.notes_tn || '').trim()
     return `<tr>
-      <td>${i + 1}</td>
+      <td>${row.lp}</td>
       <td>${escapeHtml(formatR13PlDate(doc.document_date))}</td>
       <td class="${summary.includes('(N)') ? 'pn-n' : ''}">${escapeHtml(summary)}</td>
       <td>${escapeHtml(doc.signed_by_operator || '')}</td>
@@ -147,6 +169,7 @@ export function buildR13PrintHtml(group, escapeHtml) {
 table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px 6px;text-align:center;vertical-align:middle}
 .left{text-align:left}.title{font-weight:bold;text-align:center}.meta{text-align:left;font-size:10pt}
 .r13-glass-no{display:inline-block;min-width:18px;margin:0 2px}.pn-n{font-weight:bold}
+.day-off td{background:#ffe8e8!important;color:#8b3a3a}.off-label{font-style:italic;text-align:center}
 .legend{margin-top:10px;font-size:9.5pt;line-height:1.45;text-align:left}
 .glass-block{margin-top:12px;font-size:10pt;text-align:left}
 @media print{button{display:none}}
@@ -176,14 +199,24 @@ table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px so
 export function buildR13ExcelRows(group) {
   const docs = sortR13Docs(group.docs || [])
   const period = String(group.period || '')
+  const calendar = buildR13CalendarRows(period, docs)
   const rows = [
     ['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'],
     [R13_HEADER.title, '', '', '', `Okres: ${period}`, `Wersja ${R13_HEADER.version}`],
     ['Lp.', 'Data', 'Numer elementu szklanego (*P/N)', 'Podpis kontrolującego', 'Uwagi **T/N']
   ]
-  docs.forEach((doc, i) => {
+  calendar.forEach(row => {
+    if (row.isSunday) {
+      rows.push([row.lp, formatR13PlDate(row.date), 'Niedziela – dzień wolny', '', ''])
+      return
+    }
+    const doc = row.doc
+    if (!doc) {
+      rows.push([row.lp, formatR13PlDate(row.date), '—', '', ''])
+      return
+    }
     rows.push([
-      i + 1,
+      row.lp,
       formatR13PlDate(doc.document_date),
       r13ElementsSummary(doc.data?.elements),
       doc.signed_by_operator || '',

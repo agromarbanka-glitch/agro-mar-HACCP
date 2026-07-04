@@ -12,7 +12,7 @@ import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
 import {
   R13_ENGINE_VERSION, R13_HEADER, R13_GLASS_ELEMENTS, buildR13MonthPayloads, buildR13PeriodGroups,
   buildR13PrintHtml, buildR13ExcelRows, sortR13Docs, r13ElementsSummary, r13DocStatus,
-  formatR13PlDate, defaultR13ElementsMap, workDatesInMonth
+  formatR13PlDate, defaultR13ElementsMap, workDatesInMonth, buildR13CalendarRows
 } from './r13Engine'
 import {
   W03_HEADER, W03_FREQ_KEYS, sortW03Docs, buildW03InsertPayload,
@@ -1268,6 +1268,67 @@ function App() {
     }
   }
 
+  async function saveR13DocumentDate(doc, newDate) {
+    if (!supabase || !doc?.id || !newDate) return
+    const monthKey = doc.data?.month_key || String(doc.document_date || '').slice(0, 7)
+    if (!String(newDate).startsWith(monthKey)) {
+      setMessage('R13: data musi pozostać w tym samym miesiącu kartoteki.')
+      return
+    }
+    if (new Date(`${newDate}T12:00:00`).getDay() === 0) {
+      setMessage('R13: niedziela to dzień wolny – wybierz inny dzień.')
+      return
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').update({
+        document_date: newDate,
+        updated_at: new Date().toISOString()
+      }).eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R13: ${err.message}`)
+    }
+  }
+
+  function shiftR13NewMonth(delta) {
+    const [y, m] = r13NewMonth.split('-').map(Number)
+    const d = new Date(y, m - 1 + delta, 1)
+    setR13NewMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+  }
+
+  async function addMissingR13Day(group, date) {
+    if (!supabase || !date) return
+    const yearMonth = group.period
+    const workDocs = sortR13Docs(group.docs || [])
+    const sortOrder = workDocs.length + 1
+    const payload = {
+      document_type: 'R13',
+      document_date: date,
+      document_no: `R13/${yearMonth}/${String(sortOrder).padStart(2, '0')}`,
+      product_name: 'Kontrola elementów szklanych',
+      status: 'P',
+      data: {
+        month_key: yearMonth,
+        sort_order: sortOrder,
+        elements: defaultR13ElementsMap('P'),
+        corrective: '',
+        notes_tn: ''
+      },
+      signed_by_operator: defaultR13Employee || workDocs[0]?.signed_by_operator || '',
+      qty: 0,
+      updated_at: new Date().toISOString()
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').insert(payload)
+      if (error) throw error
+      await loadHaccpDocs()
+      setMessage(`R13: dodano wpis na ${formatR13PlDate(date)}.`)
+    } catch (err) {
+      setMessage(`R13: ${err.message}`)
+    }
+  }
+
   async function setEmployeeForVisibleK06Group(group, employeeName, onlyEmpty = false) {
     if (!group || !employeeName) return
     const docs = (group.docs || []).filter(d => !onlyEmpty || !d.signed_by_operator)
@@ -2245,7 +2306,7 @@ function App() {
       </div>
     }
 
-    if (getDocFormCfg(group.type)) {
+    if (getDocFormCfg(group.type) && getDocFormCfg(group.type).layout !== 'r13') {
       const cfg = getDocFormCfg(group.type)
       if (cfg.layout === 'document') {
         const fields = (cfg.documentFields || cfg.fields).filter(f => f.key !== 'signed_by' && f.key !== 'document_date')
@@ -2320,9 +2381,10 @@ function App() {
 
     if (group.type === 'R13') {
       const r13Docs = sortR13Docs(group.docs || [])
-      const period = String(group.period || '')
+      const period = String(group.period || r13Docs[0]?.data?.month_key || '')
       const year = period.slice(0, 4)
       const month = period.slice(5, 7)
+      const calendar = buildR13CalendarRows(period, r13Docs)
       return <div className="monthly-paper r13-paper">
         <div className="no-print employee-signature-row" style={{ marginBottom: '10px' }}>
           <label>Podpis kontrolującego (zbiorczo)
@@ -2334,7 +2396,7 @@ function App() {
           <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, true)}>Uzupełnij puste</button>
           <button className="secondary danger" onClick={() => deleteR13Month(group)}>Usuń kartotekę</button>
-          <span className="hint">Dni robocze (bez niedziel). Domyślnie P – możesz zmienić pojedynczy wiersz lub rozwinąć szczegóły elementów 1–23.</span>
+          <span className="hint">Edytuj P/N, podpis i uwagi w tabeli. Niedziele oznaczone na różowo – bez wpisu.</span>
         </div>
         <table className="r13-head"><tbody><tr>
           <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -2346,20 +2408,38 @@ function App() {
             <th>Lp.</th><th>Data</th><th>Numer elementu szklanego (*P/N)</th><th>Podpis kontrolującego</th><th>Uwagi **T/N</th><th className="no-print">Szczegóły</th>
           </tr></thead>
           <tbody>
-            {r13Docs.map((doc, i) => {
+            {calendar.map(row => {
+              if (row.isSunday) {
+                return <tr key={row.date} className="r13-day-off">
+                  <td>{row.lp}</td>
+                  <td>{formatR13PlDate(row.date)}</td>
+                  <td colSpan={4} className="r13-off-label">Niedziela – dzień wolny od pracy</td>
+                </tr>
+              }
+              const doc = row.doc
+              if (!doc) {
+                return <tr key={row.date} className="r13-missing no-print">
+                  <td>{row.lp}</td>
+                  <td>{formatR13PlDate(row.date)}</td>
+                  <td colSpan={3} className="hint">Brak wpisu</td>
+                  <td><button type="button" className="mini secondary" onClick={() => addMissingR13Day(group, row.date)}>Dodaj P</button></td>
+                </tr>
+              }
               const summary = r13ElementsSummary(doc.data?.elements)
               const allP = summary === 'P'
               const expanded = r13ExpandedRow === doc.id
               return <React.Fragment key={doc.id}>
                 <tr>
-                  <td>{i + 1}</td>
-                  <td>{formatR13PlDate(doc.document_date)}</td>
+                  <td>{row.lp}</td>
+                  <td>
+                    <input className="cell-input no-print" type="date" defaultValue={doc.document_date} onBlur={e => { if (e.target.value !== doc.document_date) saveR13DocumentDate(doc, e.target.value) }} />
+                    <span className="print-only">{formatR13PlDate(doc.document_date)}</span>
+                  </td>
                   <td className={!allP ? 'pn-n' : ''}>
                     <select className="mini-select no-print" value={allP ? 'P' : 'N'} onChange={e => setR13SummaryForDoc(doc, e.target.value)}>
                       <option value="P">P</option><option value="N">N</option>
                     </select>
-                    <span className="print-only">{summary}</span>
-                    {!allP && <span className="no-print hint" style={{ display: 'block', fontSize: '10px' }}>{summary}</span>}
+                    <span>{summary}</span>
                   </td>
                   <td>
                     <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveR13Cell(doc, {}, e.target.value)}>
@@ -2372,7 +2452,7 @@ function App() {
                     <select className="mini-select no-print" value={doc.data?.corrective || ''} onChange={e => saveR13Cell(doc, { corrective: e.target.value })}>
                       <option value="">—</option><option value="T">T</option><option value="N">N</option>
                     </select>
-                    <span className="print-only">{doc.data?.corrective || '—'}</span>
+                    <span>{doc.data?.corrective || '—'}</span>
                   </td>
                   <td className="no-print">
                     <button type="button" className="mini secondary" onClick={() => setR13ExpandedRow(expanded ? null : doc.id)}>{expanded ? 'Zwiń' : 'Elementy 1–23'}</button>
@@ -3268,7 +3348,13 @@ function App() {
         <h3>Dodaj kartotekę R13 za miesiąc</h3>
         <p className="hint">System uzupełni automatycznie wszystkie <b>dni robocze (pon–sob)</b> wartością <b>P</b> dla 23 elementów szklanych. <b>Niedziele są pomijane.</b> Wybierz miesiąc i podpis – potem możesz edytować pojedyncze wiersze.</p>
         <div className="k03-bulk-row">
-          <label>Rok i miesiąc<input type="month" value={r13NewMonth} onChange={e => setR13NewMonth(e.target.value)} /></label>
+          <label>Rok i miesiąc
+            <div className="r13-month-picker">
+              <button type="button" className="mini secondary" onClick={() => shiftR13NewMonth(-1)} title="Poprzedni miesiąc">◀</button>
+              <input type="month" value={r13NewMonth} onChange={e => setR13NewMonth(e.target.value)} />
+              <button type="button" className="mini secondary" onClick={() => shiftR13NewMonth(1)} title="Następny miesiąc">▶</button>
+            </div>
+          </label>
           <label>Podpis kontrolującego
             <select value={defaultR13Employee} onChange={e => setDefaultR13Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
@@ -3727,15 +3813,17 @@ function App() {
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
-      const group = haccpMonthlyGroups.find(g => g.key === doc.group?.key) || hubManualGroups.find(g => g.key === doc.group?.key) || doc.group
-      return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(group)}</div><div className="modal-actions no-print">
-        {group.type === 'K03' && (group.docs || [])[0] && (group.docs[0].frozen
+      const liveGroup = hubManualGroups.find(g => g.key === doc.group?.key)
+        || haccpMonthlyGroups.find(g => g.key === doc.group?.key)
+        || doc.group
+      return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(liveGroup)}</div><div className="modal-actions no-print">
+        {liveGroup.type === 'K03' && (liveGroup.docs || [])[0] && (liveGroup.docs[0].frozen
           ? <>
             <span className="status ok">Zamrożony – FIFO nie zmieni tej kartoteki</span>
-            <button className="secondary" onClick={() => unfreezeK03Document(group.docs[0])}>Odmroź</button>
+            <button className="secondary" onClick={() => unfreezeK03Document(liveGroup.docs[0])}>Odmroź</button>
           </>
           : <span className="pill">Roboczy – uzupełnij dane; prawidłowy K03 zamraża się automatycznie przy tworzeniu</span>)}
-        <button className="secondary" onClick={() => printHaccpGroup(group)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(group)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
+        <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
       <div className="haccp-modal" onClick={e => e.stopPropagation()}>
