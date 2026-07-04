@@ -40,22 +40,27 @@ export const R_MONTHLY_CONFIGS = {
   },
   R04: {
     code: 'R04',
-    layout: 'station-matrix',
+    layout: 'r04-control',
     periodMode: 'month',
-    storageKey: 'agro-mar-r04-stations-v1',
+    storageKey: 'agro-mar-r04-stations-v2',
     header: {
       title: 'Raport R04 - Raport wewnętrznej kontroli stacji deratyzacyjnych i pułapek żywołownych',
-      version: 'I/2024'
+      version: 'I/2024',
+      approvalDate: '02.09.2024'
     },
-    defaultStations: [
-      { id: 'st-1', label: '1' }, { id: 'st-2', label: '2' }, { id: 'st-3', label: '3' },
-      { id: 'st-4', label: '4' }, { id: 'st-5', label: '5' }, { id: 'st-6', label: '6' },
-      { id: 'st-7', label: '7' }, { id: 'st-8', label: '8' }
+    deratCount: 20,
+    trapCount: 6,
+    defaultRodents: 'brak gryzoni',
+    defaultState: 'nienaruszona',
+    stationTypes: [
+      { kind: 'derat', label: 'Stacja deratyzacyjna (kolejna)' },
+      { kind: 'trap', label: 'Pułapka żywołowna (kolejna)' }
     ],
-    baitOptions: ['', '0-50', '75', '100'],
-    stateOptions: ['', 'nienaruszona', 'uszkodzona', 'zniszczona'],
-    createHint: 'Kartoteka miesięczna – dodawaj daty kontroli; przy każdej stacji oznacz ubytek trutki, gryzonie i stan.',
-    signLabel: 'Kontrolę przeprowadził'
+    columnLabel: 'Stacje i pułapki',
+    addColumnLabel: 'Dodaj stację',
+    createHint: 'Kartoteka miesięczna – 20 stacji deratyzacyjnych + 6 pułapek żywołownych; kontrole z własną datą. Nowy miesiąc kopiuje listę stacji z poprzedniego.',
+    signLabel: 'Kontrolę przeprowadził',
+    legend: '* ubytek trutki (wpisz np. 25%) · ** obecność gryzoni · *** stan stacji (nienaruszona / uszkodzona / zniszczona)'
   },
   R05: {
     code: 'R05',

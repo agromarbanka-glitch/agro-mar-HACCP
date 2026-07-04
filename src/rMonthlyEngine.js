@@ -25,7 +25,8 @@ export function normalizeMcd(value) {
 export function loadRMonthlyColumns(code) {
   const cfg = getRMonthlyConfig(code)
   if (!cfg) return []
-  const fallback = cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || []
+  const fallback = cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers
+    || (cfg.layout === 'r04-control' ? defaultR04Stations() : [])
   if (!cfg.storageKey) return fallback.map(c => ({ ...c }))
   try {
     const raw = localStorage.getItem(cfg.storageKey)
@@ -66,7 +67,8 @@ export function sortRMonthlyDocs(docs) {
 export function columnsFromDocs(code, docs, fallback) {
   const cfg = getRMonthlyConfig(code)
   const first = sortRMonthlyDocs(docs)[0]
-  const key = cfg?.layout === 'station-matrix' ? 'stations'
+  const key = cfg?.layout === 'r04-control' ? 'stations'
+    : cfg?.layout === 'station-matrix' ? 'stations'
     : cfg?.layout === 'daily-calibration' ? 'chamber_columns'
     : 'columns'
   const stored = first?.data?.[key] || first?.data?.machine_columns || first?.data?.room_columns || first?.data?.columns
@@ -91,6 +93,88 @@ export function r08MakeChamber(kind, existing = []) {
   return { id, kind, label }
 }
 
+export function defaultR04Stations() {
+  const cfg = getRMonthlyConfig('R04')
+  const deratN = cfg?.deratCount || 20
+  const trapN = cfg?.trapCount || 6
+  const stations = []
+  for (let i = 1; i <= deratN; i++) stations.push({ id: `derat-${i}`, kind: 'derat', label: String(i) })
+  for (let i = 1; i <= trapN; i++) stations.push({ id: `trap-${i}`, kind: 'trap', label: `PŻ ${i}` })
+  return stations
+}
+
+export function defaultR04Reading(cfg = getRMonthlyConfig('R04')) {
+  return {
+    bait: '',
+    rodents: cfg?.defaultRodents || 'brak gryzoni',
+    state: cfg?.defaultState || 'nienaruszona',
+    notes: ''
+  }
+}
+
+export function defaultR04ReadingsForStations(stations, cfg) {
+  const readings = {}
+  for (const st of stations || []) readings[st.id] = defaultR04Reading(cfg)
+  return readings
+}
+
+function previousMonthKey(yearMonth) {
+  const [y, m] = String(yearMonth).split('-').map(Number)
+  const d = new Date(y, (m || 1) - 2, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+export function findPreviousR04Stations(allDocs, yearMonth) {
+  const prevKey = previousMonthKey(yearMonth)
+  const prevDocs = sortRMonthlyDocs((allDocs || []).filter(d =>
+    d.document_type === 'R04' && d.data?.month_key === prevKey && Array.isArray(d.data?.stations)
+  ))
+  const last = prevDocs[prevDocs.length - 1]
+  if (last?.data?.stations?.length) return last.data.stations.map(s => ({ ...s }))
+  return []
+}
+
+export function resolveR04Stations(allDocs, yearMonth, columnDefs) {
+  const fromPrev = findPreviousR04Stations(allDocs, yearMonth)
+  if (fromPrev.length) return fromPrev
+  if (columnDefs?.length) return columnDefs.map(s => ({ ...s }))
+  const stored = loadRMonthlyColumns('R04')
+  if (stored.length) return stored.map(s => ({ ...s }))
+  return defaultR04Stations()
+}
+
+export function r04MakeStation(kind, existing = []) {
+  if (kind === 'derat') {
+    const n = existing.filter(s => s.kind === 'derat').length + 1
+    return { id: `derat-${n}-${Date.now().toString(36).slice(-3)}`, kind: 'derat', label: String(n) }
+  }
+  const n = existing.filter(s => s.kind === 'trap').length + 1
+  return { id: `trap-${n}-${Date.now().toString(36).slice(-3)}`, kind: 'trap', label: `PŻ ${n}` }
+}
+
+export function buildR04ControlPayload(yearMonth, controlDate, stations, signedBy = '', documentNo = '') {
+  const cfg = getRMonthlyConfig('R04')
+  const st = (stations || defaultR04Stations()).map(s => ({ ...s }))
+  const date = controlDate || `${yearMonth}-01`
+  return {
+    document_type: 'R04',
+    document_date: date,
+    document_no: documentNo || `R04/${yearMonth}/${date}`,
+    product_name: cfg?.header?.title || 'R04',
+    status: 'P',
+    data: {
+      month_key: yearMonth,
+      control_date: date,
+      document_no: '',
+      stations: st,
+      readings: defaultR04ReadingsForStations(st, cfg)
+    },
+    signed_by_operator: signedBy || '',
+    qty: 0,
+    updated_at: new Date().toISOString()
+  }
+}
+
 export function buildRMonthlyPeriodGroups(code, docs) {
   const cfg = getRMonthlyConfig(code)
   if (!cfg) return []
@@ -111,11 +195,15 @@ export function buildRMonthlyPeriodGroups(code, docs) {
     .map(g => {
       const allDocs = sortRMonthlyDocs(g.docs)
       const rows = allDocs.filter(d => !d.data?.is_shell)
-      const keepAll = ['register-rows', 'station-matrix', 'single-month', 'quarter-trend'].includes(cfg.layout)
+      const keepAll = ['register-rows', 'station-matrix', 'r04-control', 'single-month', 'quarter-trend'].includes(cfg.layout)
       const columns = columnsFromDocs(code, rows.length ? rows : allDocs)
+      let docsForGroup = keepAll ? allDocs : (rows.length ? rows : allDocs.filter(d => !d.data?.is_shell))
+      if (cfg.layout === 'r04-control') {
+        docsForGroup = allDocs.filter(d => !d.data?.is_shell && (d.data?.stations || d.data?.readings))
+      }
       return {
         ...g,
-        docs: keepAll ? allDocs : (rows.length ? rows : allDocs.filter(d => !d.data?.is_shell)),
+        docs: docsForGroup,
         columns,
         config: cfg
       }
@@ -179,7 +267,7 @@ function defaultStationReadings(stations) {
   return readings
 }
 
-export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', columnDefs = loadRMonthlyColumns(code)) {
+export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', columnDefs = loadRMonthlyColumns(code), allDocs = []) {
   const cfg = getRMonthlyConfig(code)
   if (!cfg) return []
 
@@ -240,6 +328,12 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
       qty: 0,
       updated_at: new Date().toISOString()
     }]
+  }
+
+  if (cfg.layout === 'r04-control') {
+    const stations = resolveR04Stations(allDocs, yearMonth, columnDefs)
+    saveRMonthlyColumns(code, stations)
+    return [buildR04ControlPayload(yearMonth, `${yearMonth}-01`, stations, signedBy)]
   }
 
   if (cfg.layout === 'station-matrix') {
@@ -455,6 +549,35 @@ ${rows.map((doc, i) => `<tr><td>${i + 1}</td>${cfg.rowFields.map(f => `<td>${esc
     body = `<table><thead><tr><th>Lp.</th><th>Miesiąc</th><th>I. Stacje deratyzacyjne</th><th>II. Pułapki żywołowne</th><th>Trend</th></tr></thead><tbody>
 ${months.map((m, i) => `<tr><td>${i + 1}</td><td>${m.month || ''}</td><td>Szt.: ${escapeHtml(m.derat_count || '—')} / ${escapeHtml(m.derat_rodents || '—')}</td><td>Szt.: ${escapeHtml(m.trap_count || '—')} / ${escapeHtml(m.trap_rodents || '—')}</td><td>${escapeHtml(m.trend || '—')}</td></tr>`).join('')}
 </tbody></table><p>${escapeHtml(doc?.data?.notes || '')}</p>`
+  } else if (cfg.layout === 'r04-control') {
+    const controls = sortRMonthlyDocs(docs.filter(d => d.data?.readings || d.data?.stations))
+    body = controls.map(doc => {
+      const stations = doc.data?.stations || group.columns || []
+      const rd = doc.data?.readings || {}
+      const stationRows = stations.map(st => {
+        const r = rd[st.id] || defaultR04Reading(cfg)
+        const kindLabel = st.kind === 'trap' ? 'Pułapka' : 'Stacja'
+        return `<tr>
+          <td>${escapeHtml(st.label)}<br/><small>${kindLabel}</small></td>
+          <td>${escapeHtml(r.bait || '—')}</td>
+          <td>${escapeHtml(r.rodents || '—')}</td>
+          <td>${escapeHtml(r.state || '—')}</td>
+          <td>${escapeHtml(r.notes || '')}</td>
+        </tr>`
+      }).join('')
+      return `<div style="margin-bottom:20px">
+        <p><b>Nr bieżący dokumentu:</b> ${escapeHtml(doc.data?.document_no || '')} &nbsp; <b>Data kontroli:</b> ${formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}</p>
+        <table><thead><tr>
+          <th>Nr stacji deratyzacyjnej/<br/>pułapki żywołownej</th>
+          <th>Ubytek trutki *</th>
+          <th>Obecność gryzoni **</th>
+          <th>Stan stacji ***</th>
+          <th>UWAGI</th>
+        </tr></thead><tbody>${stationRows}</tbody></table>
+        <p><b>${escapeHtml(cfg.signLabel)}:</b> ${escapeHtml(doc.signed_by_operator || '')}</p>
+      </div>`
+    }).join('') || '<p>Brak kontroli w tym miesiącu.</p>'
+    body += `<p style="font-size:9pt">${escapeHtml(cfg.legend || '')}</p>`
   } else if (cfg.layout === 'station-matrix') {
     const controls = docs.filter(d => d.data?.readings)
     body = controls.map(doc => {
@@ -553,6 +676,19 @@ export function buildRMonthlyExcelRows(code, group) {
     rows.push(['Lp.', 'Miesiąc', 'Stacje deratyzacyjne', 'Pułapki żywołowne', 'Trend'])
     ;(doc?.data?.months || []).forEach((m, i) => {
       rows.push([i + 1, m.month || '', m.derat_summary || '', m.trap_summary || '', m.trend || ''])
+    })
+  } else if (cfg?.layout === 'r04-control') {
+    const controls = sortRMonthlyDocs(docs.filter(d => d.data?.stations))
+    controls.forEach(doc => {
+      const stations = doc.data?.stations || group.columns || []
+      rows.push([`Kontrola ${formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}`, doc.data?.document_no || ''])
+      rows.push(['Nr stacji', 'Ubytek trutki', 'Obecność gryzoni', 'Stan stacji', 'Uwagi'])
+      stations.forEach(st => {
+        const r = doc.data?.readings?.[st.id] || {}
+        rows.push([st.label, r.bait || '', r.rodents || '', r.state || '', r.notes || ''])
+      })
+      rows.push(['Podpis', doc.signed_by_operator || ''])
+      rows.push([])
     })
   } else if (cfg?.layout === 'station-matrix') {
     docs.filter(d => d.data?.readings).forEach(doc => {

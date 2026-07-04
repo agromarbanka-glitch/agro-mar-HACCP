@@ -10,12 +10,15 @@ import {
   buildRMonthlyMonthPayloads,
   buildRMonthlySingleDayPayload,
   buildRegisterRowPayload,
-  buildStationControlPayload,
   sortRMonthlyDocs,
   buildCalendarRows,
   formatRMonthlyPlDate,
   columnsFromDocs,
-  r08MakeChamber
+  r08MakeChamber,
+  r04MakeStation,
+  buildR04ControlPayload,
+  defaultR04Reading,
+  resolveR04Stations
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 
@@ -41,6 +44,7 @@ export function RMonthlyReportSection({
   const [columnDefs, setColumnDefs] = useState(() => loadRMonthlyColumns(code))
   const [newColumnLabel, setNewColumnLabel] = useState('')
   const [newChamberKind, setNewChamberKind] = useState('raw')
+  const [newStationKind, setNewStationKind] = useState('derat')
   const [defaultEmployee, setDefaultEmployee] = useState('')
   const [newRow, setNewRow] = useState(() => defaultNewRow(cfg))
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
@@ -70,9 +74,9 @@ export function RMonthlyReportSection({
         }
       }
       let added = 0
-      const payloads = buildRMonthlyMonthPayloads(code, newMonth, defaultEmployee, columnDefs)
+      const payloads = buildRMonthlyMonthPayloads(code, newMonth, defaultEmployee, columnDefs, haccpDocs)
       for (const payload of payloads) {
-        if (cfg.layout !== 'single-month' && cfg.layout !== 'register-rows' && cfg.layout !== 'quarter-trend' && cfg.layout !== 'station-matrix') {
+        if (cfg.layout !== 'single-month' && cfg.layout !== 'register-rows' && cfg.layout !== 'quarter-trend' && cfg.layout !== 'station-matrix' && cfg.layout !== 'r04-control') {
           const dup = (haccpDocs || []).some(d => d.document_type === code && d.document_date === payload.document_date)
           if (dup) continue
         }
@@ -126,6 +130,10 @@ export function RMonthlyReportSection({
       addR08Chamber(newChamberKind)
       return
     }
+    if (code === 'R04') {
+      addR04Station(newStationKind)
+      return
+    }
     const col = rMonthlyMakeColumn(newColumnLabel, code.toLowerCase())
     const next = [...columnDefs, col]
     saveRMonthlyColumns(code, next)
@@ -143,7 +151,16 @@ export function RMonthlyReportSection({
     setMessage(`${code}: dodano ${col.label}.`)
   }
 
-  const colPanel = (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers) && cfg.storageKey ? (
+  function addR04Station(kind) {
+    const col = r04MakeStation(kind, columnDefs)
+    if (!col) return
+    const next = [...columnDefs, col]
+    saveRMonthlyColumns(code, next)
+    setColumnDefs(next)
+    setMessage(`${code}: dodano ${col.label}.`)
+  }
+
+  const colPanel = (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control') && cfg.storageKey ? (
     <div className="r13-columns-panel">
       <b>{cfg.columnLabel || 'Stacje'}:</b>
       <div className="r13-columns-list">
@@ -169,6 +186,18 @@ export function RMonthlyReportSection({
             </select>
           </label>
           <button type="button" className="secondary" onClick={addDefaultColumn}>{cfg.addColumnLabel || 'Dodaj chłodnię'}</button>
+        </div>
+      ) : code === 'R04' ? (
+        <div className="r13-add-column-row">
+          <label>Typ stacji
+            <select value={newStationKind} onChange={e => setNewStationKind(e.target.value)}>
+              {(cfg.stationTypes || []).map(t => (
+                <option key={t.kind} value={t.kind}>{t.label}</option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="secondary" onClick={addDefaultColumn}>{cfg.addColumnLabel || 'Dodaj stację'}</button>
+          <p className="hint">Domyślnie 20 stacji deratyzacyjnych + 6 pułapek żywołownych. Nowy miesiąc kopiuje listę z poprzedniego.</p>
         </div>
       ) : (
         <div className="r13-add-column-row">
@@ -279,6 +308,8 @@ export function RMonthlyReportPreview({
     return init
   })
   const [previewChamberKind, setPreviewChamberKind] = useState('raw')
+  const [previewStationKind, setPreviewStationKind] = useState('derat')
+  const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
 
   useEffect(() => {
     if (cfg?.layout !== 'single-month' || !singleDoc) return
@@ -340,13 +371,80 @@ export function RMonthlyReportPreview({
   }
 
   async function addControl(date) {
-    const stations = columns
-    const readings = {}
-    stations.forEach(st => { readings[st.id] = { bait: '', rodents: false, state: '', notes: '' } })
-    const payload = buildStationControlPayload(code, period, date, stations, readings, defaultEmployee)
-    await supabase.from('haccp_documents').insert(payload)
+    if (!supabase) return
+    const existing = sortRMonthlyDocs(docs.filter(d => d.data?.stations))
+    const stations = existing.length
+      ? (existing[existing.length - 1].data?.stations || columns).map(s => ({ ...s }))
+      : (columns.length ? columns : resolveR04Stations([], period, [])).map(s => ({ ...s }))
+    const payload = buildR04ControlPayload(period, date, stations, defaultEmployee)
+    const { error } = await supabase.from('haccp_documents').insert(payload)
+    if (error) { setMessage(`${code}: ${error.message}`); return }
+    await loadHaccpDocs()
+    setMessage(`${code}: dodano kontrolę na ${formatRMonthlyPlDate(date)} (${stations.length} stacji).`)
+  }
+
+  async function saveR04ControlDate(doc, date) {
+    if (!supabase || !doc?.id) return
+    const { error } = await supabase.from('haccp_documents').update({
+      document_date: date,
+      data: { ...(doc.data || {}), control_date: date },
+      updated_at: new Date().toISOString()
+    }).eq('id', doc.id)
+    if (error) setMessage(`${code}: ${error.message}`)
+    else await loadHaccpDocs()
+  }
+
+  async function deleteControl(doc) {
+    if (!supabase || !doc?.id) return
+    if (!window.confirm(`Usunąć kontrolę z dnia ${formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}?`)) return
+    await supabase.from('haccp_documents').delete().eq('id', doc.id)
+    await loadHaccpDocs()
+    setMessage(`${code}: usunięto kontrolę.`)
+  }
+
+  function saveR04Reading(doc, stId, patch) {
+    const readings = { ...(doc.data?.readings || {}), [stId]: { ...(doc.data?.readings?.[stId] || defaultR04Reading(cfg)), ...patch } }
+    saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code)
+  }
+
+  async function addR04StationToDoc(doc, kind) {
+    if (!supabase || !doc) return
+    const stations = [...(doc.data?.stations || columns)]
+    const col = r04MakeStation(kind, stations)
+    if (!col) return
+    const next = [...stations, col]
+    const readings = { ...(doc.data?.readings || {}), [col.id]: defaultR04Reading(cfg) }
+    saveRMonthlyColumns(code, next)
+    const { error } = await supabase.from('haccp_documents').update({
+      data: { ...(doc.data || {}), stations: next, readings },
+      updated_at: new Date().toISOString()
+    }).eq('id', doc.id)
+    if (error) { setMessage(`${code}: ${error.message}`); return }
+    await loadHaccpDocs()
+    setMessage(`${code}: dodano ${col.label}.`)
+  }
+
+  async function removeR04Station(doc, stId) {
+    if (!supabase || !doc || !window.confirm('Usunąć tę stację z kontroli?')) return
+    const stations = (doc.data?.stations || []).filter(s => s.id !== stId)
+    const readings = { ...(doc.data?.readings || {}) }
+    delete readings[stId]
+    saveRMonthlyColumns(code, stations)
+    const { error } = await supabase.from('haccp_documents').update({
+      data: { ...(doc.data || {}), stations, readings },
+      updated_at: new Date().toISOString()
+    }).eq('id', doc.id)
+    if (error) { setMessage(`${code}: ${error.message}`); return }
     await loadHaccpDocs()
   }
+
+  const headR04 = (docNo = '') => (
+    <table className="r04-head"><tbody><tr>
+      <td className="r04-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+      <td className="r04-title"><b>{cfg.header.title}</b></td>
+      <td className="r04-meta"><b>Wersja</b> {cfg.header.version}<br/><b>Data zatwierdzenia:</b> {cfg.header.approvalDate || '—'}<br/><b>Rok:</b> {year}<br/><b>Miesiąc:</b> {month}</td>
+    </tr></tbody></table>
+  )
 
   const head = (
     <table className="r13-head"><tbody><tr>
@@ -473,45 +571,105 @@ export function RMonthlyReportPreview({
     </div>
   }
 
-  if (cfg.layout === 'station-matrix') {
-    const controls = docs.filter(d => d.data?.readings)
-    return <div className="monthly-paper r13-paper">{toolbar}{head}
-      <div className="no-print k03-bulk-row">
-        <label>Data kontroli<input type="date" defaultValue={new Date().toISOString().slice(0, 10)} id={`${code}-ctrl-date`} /></label>
-        <button type="button" onClick={() => {
-          const el = document.getElementById(`${code}-ctrl-date`)
-          if (el?.value) addControl(el.value)
-        }}>Dodaj kontrolę</button>
-      </div>
-      {controls.map(doc => (
-        <div key={doc.id} style={{ marginBottom: 16 }}>
-          <h4>Kontrola: {formatRMonthlyPlDate(doc.document_date || doc.data?.control_date)}</h4>
-          <table className="r13-table"><thead><tr><th>Nr stacji</th><th>Ubytek trutki *</th><th>Gryzonie **</th><th>Stan ***</th><th>Uwagi</th></tr></thead>
-            <tbody>{columns.map(st => {
-              const rd = doc.data?.readings?.[st.id] || {}
-              return <tr key={st.id}>
-                <td>{st.label}</td>
-                <td><select className="mini-select" value={rd.bait || ''} onChange={e => {
-                  const readings = { ...(doc.data?.readings || {}), [st.id]: { ...rd, bait: e.target.value } }
-                  saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code)
-                }}><option value="">—</option>{cfg.baitOptions.filter(Boolean).map(o => <option key={o} value={o}>{o}%</option>)}</select></td>
-                <td><input type="checkbox" checked={!!rd.rodents} onChange={e => {
-                  const readings = { ...(doc.data?.readings || {}), [st.id]: { ...rd, rodents: e.target.checked } }
-                  saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code)
-                }} /></td>
-                <td><select className="mini-select" value={rd.state || ''} onChange={e => {
-                  const readings = { ...(doc.data?.readings || {}), [st.id]: { ...rd, state: e.target.value } }
-                  saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code)
-                }}><option value="">—</option>{cfg.stateOptions.filter(Boolean).map(o => <option key={o} value={o}>{o}</option>)}</select></td>
-                <td><input className="cell-input" defaultValue={rd.notes || ''} onBlur={e => {
-                  const readings = { ...(doc.data?.readings || {}), [st.id]: { ...rd, notes: e.target.value } }
-                  saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code)
-                }} /></td>
-              </tr>
-            })}</tbody></table>
+  if (cfg.layout === 'r04-control') {
+    const controls = sortRMonthlyDocs(docs.filter(d => !d.data?.is_shell && (d.data?.stations || d.data?.readings)))
+    const stationsFromFirst = controls[0]?.data?.stations || columns
+
+    return <div className="monthly-paper r04-paper">{toolbar}
+      <div className="no-print card inner-card" style={{ marginBottom: 12 }}>
+        <b>Dodaj kontrolę w tym miesiącu:</b>
+        <div className="k03-bulk-row" style={{ marginTop: 8 }}>
+          <label>Data kontroli
+            <input type="date" value={newControlDate} onChange={e => setNewControlDate(e.target.value)} />
+          </label>
+          <button type="button" onClick={() => addControl(newControlDate)}>Dodaj kontrolę</button>
         </div>
-      ))}
-      {!controls.length && <p className="hint">Brak kontroli – dodaj datę kontroli powyżej.</p>}
+        <p className="hint">Każda kontrola to osobny arkusz ze wszystkimi stacjami. Lista stacji jak w poprzednim miesiącu lub domyślnie 20+6.</p>
+      </div>
+      {controls.length === 0 && <p className="hint">Brak kontroli – utwórz kartotekę lub dodaj kontrolę powyżej.</p>}
+      {controls.map(doc => {
+        const stations = doc.data?.stations || stationsFromFirst
+        return (
+          <div key={doc.id} className="r04-sheet" style={{ marginBottom: 24 }}>
+            {headR04(doc.data?.document_no)}
+            <div className="r04-meta-row no-print">
+              <label>Nr bieżący dokumentu
+                <input className="cell-input" defaultValue={doc.data?.document_no || ''} onBlur={e => saveDoc(supabase, doc, { document_no: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} />
+              </label>
+              <label>Data kontroli
+                <input type="date" className="cell-input" defaultValue={(doc.data?.control_date || doc.document_date || '').slice(0, 10)}
+                  onBlur={e => saveR04ControlDate(doc, e.target.value)} />
+              </label>
+              <label>{cfg.signLabel}
+                <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+                  <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                </select>
+              </label>
+              <button type="button" className="mini danger no-print" onClick={() => deleteControl(doc)}>Usuń kontrolę</button>
+            </div>
+            <div className="print-only r04-meta-print">
+              <p><b>Nr bieżący dokumentu:</b> {doc.data?.document_no || '—'} &nbsp; <b>Data kontroli:</b> {formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}</p>
+            </div>
+            <div className="no-print k03-bulk-row" style={{ margin: '8px 0' }}>
+              <label>Dodaj stację
+                <select value={previewStationKind} onChange={e => setPreviewStationKind(e.target.value)}>
+                  {(cfg.stationTypes || []).map(t => <option key={t.kind} value={t.kind}>{t.label}</option>)}
+                </select>
+              </label>
+              <button type="button" className="secondary mini" onClick={() => addR04StationToDoc(doc, previewStationKind)}>Dodaj</button>
+            </div>
+            <div className="table-wrap r04-table-wrap">
+              <table className="r04-table">
+                <thead>
+                  <tr>
+                    <th rowSpan={2}>Nr stacji deratyzacyjnej/<br/>pułapki żywołownej</th>
+                    <th colSpan={1}>Ubytek trutki *</th>
+                    <th rowSpan={2}>Obecność gryzoni<br/>w stacji **</th>
+                    <th colSpan={1}>Stan stacji deratyzacyjnej/<br/>pułapki żywołownej ***</th>
+                    <th rowSpan={2}>UWAGI</th>
+                    <th rowSpan={2} className="no-print"> </th>
+                  </tr>
+                  <tr>
+                    <th><small>wpisz np. 0–50%, 75%, 100% lub 25%</small></th>
+                    <th><small>nienaruszona / uszkodzona / zniszczona</small></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stations.map(st => {
+                    const rd = doc.data?.readings?.[st.id] || defaultR04Reading(cfg)
+                    const kindHint = st.kind === 'trap' ? 'Pułapka żywołowna' : 'Stacja deratyzacyjna'
+                    return (
+                      <tr key={st.id}>
+                        <td className="r04-station-label"><b>{st.label}</b><br/><small>{kindHint}</small></td>
+                        <td>
+                          <input className="cell-input no-print" placeholder="np. 25%" defaultValue={rd.bait || ''} onBlur={e => saveR04Reading(doc, st.id, { bait: e.target.value })} />
+                          <span className="print-only">{rd.bait || ''}</span>
+                        </td>
+                        <td>
+                          <input className="cell-input no-print" defaultValue={rd.rodents || cfg.defaultRodents} onBlur={e => saveR04Reading(doc, st.id, { rodents: e.target.value })} />
+                          <span className="print-only">{rd.rodents || cfg.defaultRodents}</span>
+                        </td>
+                        <td>
+                          <input className="cell-input no-print" defaultValue={rd.state || cfg.defaultState} onBlur={e => saveR04Reading(doc, st.id, { state: e.target.value })} />
+                          <span className="print-only">{rd.state || cfg.defaultState}</span>
+                        </td>
+                        <td>
+                          <input className="cell-input no-print" defaultValue={rd.notes || ''} onBlur={e => saveR04Reading(doc, st.id, { notes: e.target.value })} />
+                          <span className="print-only">{rd.notes || ''}</span>
+                        </td>
+                        <td className="no-print">
+                          {stations.length > 1 && <button type="button" className="mini danger" onClick={() => removeR04Station(doc, st.id)}>×</button>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="r04-legend">{cfg.legend}</p>
+          </div>
+        )
+      })}
     </div>
   }
 

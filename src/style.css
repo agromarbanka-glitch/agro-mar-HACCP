@@ -491,6 +491,22 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .r08-meta-input { width: 100%; min-width: 60px; font-size: 10px; padding: 2px 4px; }
 .r08-table .cell-input, .r08-table .mini-select { width: 100%; min-width: 48px; font-size: 10px; }
 .r08-chamber-add { padding: 10px 12px; }
+.r04-paper { overflow-x: auto; }
+.r04-head { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.r04-head td { border: 1px solid #222; padding: 8px; vertical-align: top; font-size: 11px; }
+.r04-company { width: 28%; text-align: left; }
+.r04-title { width: 44%; text-align: center; font-size: 13px; }
+.r04-meta { width: 28%; text-align: left; }
+.r04-meta-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin: 10px 0; }
+.r04-meta-row label { font-size: 12px; font-weight: 700; display: flex; flex-direction: column; gap: 4px; }
+.r04-table-wrap { overflow-x: auto; }
+.r04-table { width: 100%; border-collapse: collapse; font-size: 10px; min-width: 720px; }
+.r04-table th, .r04-table td { border: 1px solid #222; padding: 5px 6px; text-align: center; vertical-align: middle; }
+.r04-table thead th { background: #fafafa; font-weight: 700; line-height: 1.3; }
+.r04-station-label { text-align: center; min-width: 72px; }
+.r04-table .cell-input { width: 100%; min-width: 80px; font-size: 10px; }
+.r04-legend { font-size: 10px; margin-top: 8px; text-align: left; }
+.r04-sheet { page-break-inside: avoid; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }
