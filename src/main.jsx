@@ -1323,7 +1323,7 @@ function App() {
 
   async function deleteR13Month(group) {
     if (!supabase || !group?.docs?.length) return
-    if (!window.confirm(`Usunąć całą kartotekę R13 za ${group.period}? (${group.docs.length} wpisów)`)) return
+    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R13 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów (dni). Tej operacji nie można cofnąć.`)) return
     try {
       for (const doc of group.docs) {
         const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
@@ -1517,13 +1517,14 @@ function App() {
 
   async function deleteR01Month(group) {
     if (!supabase || !group?.docs?.length) return
-    if (!window.confirm(`Usunąć całą kartotekę R01 za ${group.period}? (${group.docs.length} wpisów)`)) return
+    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R01 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów (dni). Tej operacji nie można cofnąć.`)) return
     try {
       for (const doc of group.docs) {
         const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
         if (error) throw error
       }
       await loadHaccpDocs()
+      setSelectedHaccpDoc(null)
       setMessage(`R01: usunięto kartotekę za ${group.period}.`)
     } catch (err) {
       setMessage(`R01: ${err.message}`)
@@ -3793,6 +3794,7 @@ function App() {
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                <button className="mini danger" onClick={() => deleteR01Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>
               </td>
             </tr>
           ))}</tbody>
@@ -3854,6 +3856,7 @@ function App() {
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                <button className="mini danger" onClick={() => deleteR13Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>
               </td>
             </tr>
           })}</tbody>
@@ -4298,7 +4301,10 @@ function App() {
             <button className="secondary" onClick={() => unfreezeK03Document(liveGroup.docs[0])}>Odmroź</button>
           </>
           : <span className="pill">Roboczy – uzupełnij dane; prawidłowy K03 zamraża się automatycznie przy tworzeniu</span>)}
-        <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button><button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
+        <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button>
+        {liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
       <div className="haccp-modal" onClick={e => e.stopPropagation()}>
