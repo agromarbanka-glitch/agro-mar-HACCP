@@ -1,11 +1,20 @@
 import React, { useState } from 'react'
 import { Eye, Printer, Trash2 } from 'lucide-react'
 import { normalizePn as formNormalizePn } from './haccpFormsEngine'
+import { isSundayDate } from './r13Engine'
 import {
-  R_MONTHLY_ENGINE_VERSION, loadRMonthlyColumns, saveRMonthlyColumns, rMonthlyMakeColumn,
-  buildRMonthlyMonthPayloads, buildRMonthlySingleDayPayload, buildRegisterRowPayload,
-  buildStationControlPayload, sortRMonthlyDocs, buildCalendarRows, formatRMonthlyPlDate,
-  columnsFromDocs, isSundayDate
+  R_MONTHLY_ENGINE_VERSION,
+  loadRMonthlyColumns,
+  saveRMonthlyColumns,
+  rMonthlyMakeColumn,
+  buildRMonthlyMonthPayloads,
+  buildRMonthlySingleDayPayload,
+  buildRegisterRowPayload,
+  buildStationControlPayload,
+  sortRMonthlyDocs,
+  buildCalendarRows,
+  formatRMonthlyPlDate,
+  columnsFromDocs
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 
@@ -116,7 +125,7 @@ export function RMonthlyReportSection({
     saveRMonthlyColumns(code, next)
     setColumnDefs(next)
     setNewColumnLabel('')
-    setMessage(`${code}: dodano kolumnę „${col.label}".`)
+    setMessage(`${code}: dodano kolumnę "${col.label}".`)
   }
 
   const periodLabel = cfg.periodMode === 'quarter' ? 'Kwartał (wybierz miesiąc)' : 'Rok i miesiąc'

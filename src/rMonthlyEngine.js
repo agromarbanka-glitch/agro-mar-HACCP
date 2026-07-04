@@ -5,6 +5,8 @@ import { normalizePn } from './haccpFormsEngine'
 import { calendarDaysInMonth, isSundayDate } from './r13Engine'
 import { getRMonthlyConfig, rMonthlyStorageKey } from './rMonthlyConfigs'
 
+export { isSundayDate }
+
 export const R_MONTHLY_ENGINE_VERSION = '1.0'
 
 export function formatRMonthlyPlDate(iso) {
