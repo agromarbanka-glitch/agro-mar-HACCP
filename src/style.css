@@ -471,6 +471,17 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 
 /* R13 – kontrola elementów szklanych */
 .r01-paper, .r02-paper, .r13-paper, .monthly-paper { overflow-x: auto; }
+.r06-paper .r06-form { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+.r06-field, .r06-field-full { display: flex; flex-direction: column; gap: 6px; font-weight: 700; font-size: 13px; }
+.r06-field-full { width: 100%; }
+.r06-field-label { color: var(--text, #1a1a1a); }
+.r06-textarea {
+  width: 100%; min-height: 320px; resize: vertical;
+  font-family: inherit; font-size: 14px; line-height: 1.5;
+  padding: 12px; border: 1px solid var(--line, #ccc); border-radius: 8px;
+}
+.r03-column-bulk label { font-size: 12px; font-weight: 700; min-width: 160px; }
+.r06-print-block { margin-bottom: 16px; text-align: left; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }

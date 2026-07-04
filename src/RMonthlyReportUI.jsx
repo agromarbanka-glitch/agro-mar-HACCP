@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Eye, Printer, Trash2 } from 'lucide-react'
 import { normalizePn as formNormalizePn } from './haccpFormsEngine'
 import { isSundayDate } from './r13Engine'
@@ -238,13 +238,58 @@ export function RMonthlyReportPreview({
 }) {
   const code = group.type
   const cfg = getRMonthlyConfig(code) || group.config
+  const docs = sortRMonthlyDocs(group.docs || [])
+  const singleDoc = cfg?.layout === 'single-month' ? docs[0] : null
+  const [singleForm, setSingleForm] = useState(() => {
+    const init = {}
+    for (const f of cfg?.fields || []) init[f.key] = singleDoc?.data?.[f.key] || ''
+    if (!init.document_no && singleDoc?.data?.document_no) init.document_no = singleDoc.data.document_no
+    if (!init.observations && singleDoc?.data?.observations) init.observations = singleDoc.data.observations
+    return init
+  })
+
+  useEffect(() => {
+    if (cfg?.layout !== 'single-month' || !singleDoc) return
+    const next = {}
+    for (const f of cfg.fields || []) next[f.key] = singleDoc.data?.[f.key] || ''
+    setSingleForm(next)
+  }, [cfg?.layout, singleDoc?.id, singleDoc?.updated_at])
+
   if (!cfg) return <div>Brak konfiguracji {code}</div>
 
   const period = String(group.period || '')
   const year = period.slice(0, 4)
   const month = period.includes('Q') ? period.slice(5) : period.slice(5, 7)
-  const docs = sortRMonthlyDocs(group.docs || [])
   const columns = group.columns || columnsFromDocs(code, docs)
+
+  async function applyColumnMcd(colId, mcdValue, colLabel) {
+    if (!supabase || !mcdValue) return
+    const dayDocs = docs.filter(d => d.data?.cells && !d.data?.is_day_off)
+    if (!dayDocs.length) { setMessage(`${code}: brak dni roboczych do uzupełnienia.`); return }
+    if (!window.confirm(`Ustawić „${mcdValue}" we wszystkich dniach roboczych kolumny „${colLabel}"? (${dayDocs.length} dni)`)) return
+    try {
+      for (const doc of dayDocs) {
+        const cells = { ...(doc.data?.cells || {}) }
+        cells[colId] = { ...(cells[colId] || {}), mcd: mcdValue }
+        const { error } = await supabase.from('haccp_documents').update({
+          data: { ...(doc.data || {}), cells },
+          updated_at: new Date().toISOString()
+        }).eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setMessage(`${code}: ustawiono ${mcdValue} w kolumnie „${colLabel}" (${dayDocs.length} dni). Możesz zmienić pojedyncze komórki ręcznie.`)
+    } catch (err) {
+      setMessage(`${code}: ${err.message}`)
+    }
+  }
+
+  async function saveSingleField(doc, key, value) {
+    if (!doc) return
+    const patch = { [key]: value }
+    if (key === 'document_no') patch.nested = { document_no: value }
+    await saveDoc(supabase, doc, patch, undefined, loadHaccpDocs, setMessage, code)
+  }
 
   async function deleteMonth() {
     if (!supabase || !group?.docs?.length) return
@@ -288,12 +333,49 @@ export function RMonthlyReportPreview({
 
   if (cfg.layout === 'single-month') {
     const doc = docs[0]
-    return <div className="monthly-paper r13-paper">{toolbar}{head}
-      <label>Numer bieżący dokumentu<input className="cell-input" defaultValue={doc?.data?.document_no || ''} onBlur={e => saveDoc(supabase, doc, { document_no: e.target.value, nested: { document_no: e.target.value } }, undefined, loadHaccpDocs, setMessage, code)} /></label>
-      <label>Obserwacje<textarea className="cell-input" rows={14} defaultValue={doc?.data?.observations || ''} onBlur={e => saveDoc(supabase, doc, { observations: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} /></label>
-      <label>{cfg.signLabel}<select className="mini-select" value={doc?.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
-        <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
-      </select></label>
+    const fields = cfg.fields?.length ? cfg.fields : [
+      { key: 'document_no', label: 'Numer bieżący dokumentu', type: 'text' },
+      { key: 'observations', label: 'Obserwacje', type: 'textarea', rows: 16 }
+    ]
+    return <div className="monthly-paper r13-paper r06-paper">{toolbar}{head}
+      <div className="r06-form no-print">
+        {fields.map(f => (
+          <label key={f.key} className={f.type === 'textarea' ? 'r06-field-full' : 'r06-field'}>
+            <span className="r06-field-label">{f.label}</span>
+            {f.type === 'textarea' ? (
+              <textarea
+                className="cell-input r06-textarea"
+                rows={f.rows || 16}
+                value={singleForm[f.key] ?? ''}
+                placeholder="Wpisz opis ręcznie…"
+                onChange={e => setSingleForm(prev => ({ ...prev, [f.key]: e.target.value }))}
+                onBlur={e => saveSingleField(doc, f.key, e.target.value)}
+              />
+            ) : (
+              <input
+                className="cell-input"
+                value={singleForm[f.key] ?? ''}
+                onChange={e => setSingleForm(prev => ({ ...prev, [f.key]: e.target.value }))}
+                onBlur={e => saveSingleField(doc, f.key, e.target.value)}
+              />
+            )}
+          </label>
+        ))}
+        <label className="r06-field">{cfg.signLabel}
+          <select className="mini-select" value={doc?.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+            <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+          </select>
+        </label>
+      </div>
+      <div className="print-only r06-print-body">
+        {fields.map(f => (
+          <div key={f.key} className="r06-print-block">
+            <b>{f.label}:</b>
+            <p style={{ whiteSpace: 'pre-wrap' }}>{singleForm[f.key] || '—'}</p>
+          </div>
+        ))}
+        <p><b>{cfg.signLabel}:</b> {doc?.signed_by_operator || '—'}</p>
+      </div>
     </div>
   }
 
@@ -403,8 +485,29 @@ export function RMonthlyReportPreview({
 
   if (cfg.layout === 'grid-mcd-agent') {
     const calendar = buildCalendarRows(period.length === 7 ? period : `${period}-01`.slice(0, 7), docs)
-    const monthKey = period.length === 7 ? period : period.slice(0, 7)
+    const mcdBulkOptions = (cfg.mcdOptions || ['', 'M', 'C']).filter(o => o)
     return <div className="monthly-paper r02-paper r13-paper">{toolbar}{head}
+      {code === 'R03' && (
+        <div className="no-print r03-column-bulk card inner-card" style={{ marginBottom: 12 }}>
+          <b>Zastosuj M / C / M/C do całej kolumny (dni robocze):</b>
+          <div className="k03-bulk-row" style={{ marginTop: 8 }}>
+            {columns.map(col => (
+              <label key={col.id}>
+                {col.label}
+                <select defaultValue="" onChange={e => {
+                  const val = e.target.value
+                  if (val) applyColumnMcd(col.id, val, col.label)
+                  e.target.value = ''
+                }}>
+                  <option value="">Wybierz…</option>
+                  {mcdBulkOptions.map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+              </label>
+            ))}
+          </div>
+          <p className="hint">Po zastosowaniu możesz nadal edytować pojedyncze dni w tabeli poniżej (np. nazwa środka czyszczącego).</p>
+        </div>
+      )}
       <table className="r13-table"><thead><tr><th>Lp.</th><th>Dzień</th>
         {columns.map(col => <th key={col.id}>{col.label}<br/><small>M/C + środek</small></th>)}
         <th>{cfg.signLabel}</th></tr></thead>

@@ -27,8 +27,8 @@ export const R_MONTHLY_CONFIGS = {
       title: 'R03 - Raport czyszczenia środków transportu',
       version: 'I/2024'
     },
-    mcdOptions: ['', 'M', 'C'],
-    mcdLegend: '* M – mycie, C – czyszczenie',
+    mcdOptions: ['', 'M', 'C', 'M/C'],
+    mcdLegend: '* M – mycie, C – czyszczenie, M/C – mycie i czyszczenie',
     defaultColumns: [
       { id: 'veh-1', label: 'Samochód 1 (nr rej.)' },
       { id: 'veh-2', label: 'Samochód 2 (nr rej.)' }
