@@ -16,6 +16,12 @@ import {
   defaultR01Cleaning, normalizeMcd
 } from './r01Engine'
 import {
+  R02_ENGINE_VERSION, R02_HEADER, R02_MCD_OPTIONS, loadR02Columns, saveR02Columns, buildR02MonthPayloads,
+  buildR02PeriodGroups, buildR02PrintHtml, buildR02ExcelRows, sortR02Docs, r02ColumnsFromDocs, r02CleaningForDoc,
+  r02McdDisplay, formatR02PlDate, buildR02CalendarRows, buildR02SingleDayPayload, r02MakeColumn,
+  defaultR02Cleaning, normalizeMcd as normalizeR02Mcd
+} from './r02Engine'
+import {
   R13_ENGINE_VERSION, R13_HEADER, loadR13Columns, saveR13Columns, buildR13MonthPayloads, buildR13PeriodGroups,
   buildR13PrintHtml, buildR13ExcelRows, sortR13Docs, r13DocStatus, r13ColumnsFromDocs, r13ChecksForDoc,
   r13CheckDisplay, formatR13PlDate, buildR13CalendarRows, buildR13SingleDayPayload, r13MakeColumn,
@@ -299,6 +305,10 @@ function App() {
   const [r01NewMonth, setR01NewMonth] = useState(new Date().toISOString().slice(0, 7))
   const [r01ColumnDefs, setR01ColumnDefs] = useState(() => loadR01Columns())
   const [r01NewColumnLabel, setR01NewColumnLabel] = useState('')
+  const [defaultR02Employee, setDefaultR02Employee] = useState('')
+  const [r02NewMonth, setR02NewMonth] = useState(new Date().toISOString().slice(0, 7))
+  const [r02ColumnDefs, setR02ColumnDefs] = useState(() => loadR02Columns())
+  const [r02NewColumnLabel, setR02NewColumnLabel] = useState('')
   const [defaultK06Employee, setDefaultK06Employee] = useState('')
   const [formsTrace, setFormsTrace] = useState({ operations: [], allocations: [] })
   const [manualHaccpForm, setManualHaccpForm] = useState({})
@@ -460,7 +470,7 @@ function App() {
     { code: 'K05', name: 'Towary wycofane', status: 'w realizacji', note: 'Ręczny rejestr wycofań.' },
     { code: 'K06', name: 'Ocena jakości produktu', status: 'w realizacji', note: 'Auto z produkcji + ręczna edycja P/N.' },
     { code: 'K07', name: 'Kontrola sita CCP1', status: 'w realizacji', note: 'Dzienna kartoteka sita na linii przerobu.' },
-    { code: 'Raporty', name: 'R00–R13', status: 'robocze', note: 'R01/R13 – kartoteki miesięczne (M/C/D, dni wolne, druk/Excel).' },
+    { code: 'Raporty', name: 'R00–R13', status: 'robocze', note: 'R01/R02/R13 – kartoteki miesięczne (M/C/D, dni wolne, druk/Excel).' },
     { code: 'Wykazy', name: 'W01–W10', status: 'robocze', note: 'Kartoteki wykazów 1:1 ze wzorami – wpisy ręczne, druk i Excel.' },
     { code: 'Formularze', name: 'F01–F03', status: 'robocze', note: 'Formularze 1:1 – wpisy ręczne, logika później.' },
     { code: 'Protokoły', name: 'PR01–PR08', status: 'robocze', note: 'Protokoły 1:1 – dokumenty i rejestry.' },
@@ -1593,6 +1603,212 @@ function App() {
     setMessage('R01: usunięto kolumnę z ustawień domyślnych.')
   }
 
+  async function saveR02Cell(doc, patch = {}, signedBy) {
+    if (!supabase || !doc?.id) return
+    const nextData = { ...(doc.data || {}), ...patch }
+    if (patch.cleaning) nextData.cleaning = { ...(doc.data?.cleaning || {}), ...patch.cleaning }
+    const payload = {
+      data: nextData,
+      status: 'P',
+      updated_at: new Date().toISOString()
+    }
+    if (signedBy !== undefined) payload.signed_by_operator = signedBy
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R02: błąd zapisu – ${err.message}`)
+    }
+  }
+
+  async function setR02MachineMcd(doc, columnId, value, columns) {
+    const cols = columns || r02ColumnsFromDocs([doc])
+    const cleaning = r02CleaningForDoc(doc, cols)
+    await saveR02Cell(doc, { cleaning: { ...cleaning, [columnId]: normalizeR02Mcd(value) } })
+  }
+
+  async function updateR02DocsColumns(group, nextColumns) {
+    if (!supabase || !group?.docs?.length) return
+    saveR02Columns(nextColumns)
+    setR02ColumnDefs(nextColumns)
+    try {
+      for (const doc of group.docs) {
+        const old = r02CleaningForDoc(doc, r02ColumnsFromDocs([doc]))
+        const sunday = doc.data?.is_day_off || isSundayDate(doc.document_date)
+        const cleaning = {}
+        for (const col of nextColumns) {
+          cleaning[col.id] = old[col.id] !== undefined && old[col.id] !== '' ? old[col.id] : (sunday ? '' : (col.auto_m ? 'M' : ''))
+        }
+        const { error } = await supabase.from('haccp_documents').update({
+          data: { ...(doc.data || {}), machine_columns: nextColumns, cleaning },
+          updated_at: new Date().toISOString()
+        }).eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R02: ${err.message}`)
+    }
+  }
+
+  async function addR02ColumnToGroup(group, label) {
+    const col = r02MakeColumn(label)
+    const cols = [...(group.columns || r02ColumnsFromDocs(group.docs)), col]
+    await updateR02DocsColumns(group, cols)
+    setR02NewColumnLabel('')
+    setMessage(`R02: dodano kolumnę „${col.label}”.`)
+  }
+
+  async function removeR02ColumnFromGroup(group, columnId) {
+    const allCols = group.columns || r02ColumnsFromDocs(group.docs)
+    const removed = allCols.find(c => c.id === columnId)
+    const cols = allCols.filter(c => c.id !== columnId)
+    if (cols.length < 1) { setMessage('R02: musi zostać co najmniej jedna maszyna.'); return }
+    if (!window.confirm(`Usunąć kolumnę „${removed?.label || columnId}" z tej kartoteki?`)) return
+    await updateR02DocsColumns(group, cols)
+    setMessage('R02: usunięto kolumnę.')
+  }
+
+  async function renameR02ColumnInGroup(group, columnId, newLabel) {
+    const label = String(newLabel || '').trim()
+    if (!label) return
+    const cols = (group.columns || r02ColumnsFromDocs(group.docs)).map(c => c.id === columnId ? { ...c, label } : c)
+    await updateR02DocsColumns(group, cols)
+  }
+
+  async function setEmployeeForVisibleR02Group(group, employeeName, onlyEmpty = false) {
+    if (!supabase || !group || !employeeName) return
+    const docs = sortR02Docs(group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || '').trim())
+    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów R02.' : 'Brak wpisów R02.'); return }
+    try {
+      for (const doc of docs) {
+        const { error } = await supabase.from('haccp_documents').update({
+          signed_by_operator: employeeName,
+          updated_at: new Date().toISOString()
+        }).eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setMessage(`Ustawiono podpis R02 dla ${docs.length} dni.`)
+    } catch (err) {
+      setMessage(`R02: ${err.message}`)
+    }
+  }
+
+  async function createR02MonthKartoteka() {
+    if (!supabase) {
+      setMessage('R02: brak połączenia z bazą (Supabase).')
+      return
+    }
+    const yearMonth = r02NewMonth
+    if (!yearMonth) {
+      setMessage('R02: wybierz rok i miesiąc.')
+      return
+    }
+    const existing = (haccpDocs || []).filter(d => d.document_type === 'R02' && d.data?.month_key === yearMonth)
+    if (existing.length && !window.confirm(`Kartoteka R02 za ${yearMonth} już istnieje (${existing.length} wpisów). Utworzyć ponownie (doda kolejne dni)?`)) return
+    const payloads = buildR02MonthPayloads(yearMonth, defaultR02Employee, r02ColumnDefs)
+    if (!payloads.length) {
+      setMessage('R02: brak dni w wybranym miesiącu.')
+      return
+    }
+    try {
+      let added = 0
+      for (const payload of payloads) {
+        const dup = (haccpDocs || []).some(d => d.document_type === 'R02' && d.document_date === payload.document_date)
+        if (dup) continue
+        const { error } = await supabase.from('haccp_documents').insert(payload)
+        if (error) throw error
+        added++
+      }
+      await loadHaccpDocs()
+      const totalDays = payloads.length
+      const sundays = payloads.filter(p => p.data?.is_day_off).length
+      setMessage(`R02: utworzono kartotekę za ${yearMonth} – ${added} dni (${totalDays - sundays} roboczych do uzupełnienia, ${sundays} niedziel pustych)${defaultR02Employee ? `, podpis: ${defaultR02Employee}` : ''}.`)
+    } catch (err) {
+      setMessage(`R02: błąd tworzenia – ${err.message}`)
+    }
+  }
+
+  async function deleteR02Month(group) {
+    if (!supabase || !group?.docs?.length) return
+    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R02 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów (dni). Tej operacji nie można cofnąć.`)) return
+    try {
+      for (const doc of group.docs) {
+        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        if (error) throw error
+      }
+      await loadHaccpDocs()
+      setSelectedHaccpDoc(null)
+      setMessage(`R02: usunięto kartotekę za ${group.period}.`)
+    } catch (err) {
+      setMessage(`R02: ${err.message}`)
+    }
+  }
+
+  async function saveR02DocumentDate(doc, newDate) {
+    if (!supabase || !doc?.id || !newDate) return
+    const monthKey = doc.data?.month_key || String(doc.document_date || '').slice(0, 7)
+    if (!String(newDate).startsWith(monthKey)) {
+      setMessage('R02: data musi pozostać w tym samym miesiącu kartoteki.')
+      return
+    }
+    const sunday = isSundayDate(newDate)
+    const columns = r02ColumnsFromDocs([doc])
+    const cleaning = r02CleaningForDoc(doc, columns)
+    try {
+      const { error } = await supabase.from('haccp_documents').update({
+        document_date: newDate,
+        data: { ...(doc.data || {}), is_day_off: sunday, cleaning },
+        updated_at: new Date().toISOString()
+      }).eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R02: ${err.message}`)
+    }
+  }
+
+  function shiftR02NewMonth(delta) {
+    const [y, m] = r02NewMonth.split('-').map(Number)
+    const d = new Date(y, m - 1 + delta, 1)
+    setR02NewMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+  }
+
+  async function addMissingR02Day(group, date) {
+    if (!supabase || !date) return
+    const yearMonth = group.period
+    const columns = group.columns || r02ColumnsFromDocs(group.docs)
+    const sunday = isSundayDate(date)
+    const payload = buildR02SingleDayPayload(yearMonth, date, columns, defaultR02Employee || sortR02Docs(group.docs)[0]?.signed_by_operator || '', sunday)
+    try {
+      const { error } = await supabase.from('haccp_documents').insert(payload)
+      if (error) throw error
+      await loadHaccpDocs()
+      setMessage(`R02: dodano wpis na ${formatR02PlDate(date)}${sunday ? ' (dzień wolny – uzupełnij ręcznie)' : ''}.`)
+    } catch (err) {
+      setMessage(`R02: ${err.message}`)
+    }
+  }
+
+  function addR02DefaultColumn() {
+    const col = r02MakeColumn(r02NewColumnLabel)
+    const next = [...r02ColumnDefs, col]
+    saveR02Columns(next)
+    setR02ColumnDefs(next)
+    setR02NewColumnLabel('')
+    setMessage(`R02: dodano domyślną kolumnę „${col.label}” (dla nowych kartotek).`)
+  }
+
+  function removeR02DefaultColumn(columnId) {
+    const next = r02ColumnDefs.filter(c => c.id !== columnId)
+    if (next.length < 1) { setMessage('R02: musi zostać co najmniej jedna maszyna.'); return }
+    saveR02Columns(next)
+    setR02ColumnDefs(next)
+    setMessage('R02: usunięto kolumnę z ustawień domyślnych.')
+  }
+
   async function setEmployeeForVisibleK06Group(group, employeeName, onlyEmpty = false) {
     if (!group || !employeeName) return
     const docs = (group.docs || []).filter(d => !onlyEmpty || !d.signed_by_operator)
@@ -1795,6 +2011,7 @@ function App() {
     const code = activeDocsCode()
     const cfg = getDocFormCfg(code)
     if (!cfg || docsHubSection === 'kartoteki') return []
+    if (code === 'R02') return buildR02PeriodGroups(hubManualDocsForFilter)
     if (code === 'R01') return buildR01PeriodGroups(hubManualDocsForFilter)
     if (code === 'R13') return buildR13PeriodGroups(hubManualDocsForFilter)
     return buildHubDocGroups(hubManualDocsForFilter, code, cfg)
@@ -2234,6 +2451,8 @@ function App() {
         ? buildW03PrintHtml(group.docs || [], w03Meta, escapeHtml)
       : group.type === 'W06'
         ? buildW06PrintHtml(group.docs || [], escapeHtml)
+      : group.type === 'R02'
+        ? buildR02PrintHtml(group, escapeHtml)
       : group.type === 'R01'
         ? buildR01PrintHtml(group, escapeHtml)
       : group.type === 'R13'
@@ -2274,6 +2493,8 @@ function App() {
       rows.push(...buildW03ExcelRows(docs, w03Meta))
     } else if (group.type === 'W06') {
       rows.push(...buildW06ExcelRows(docs))
+    } else if (group.type === 'R02') {
+      rows.push(...buildR02ExcelRows(group))
     } else if (group.type === 'R01') {
       rows.push(...buildR01ExcelRows(group))
     } else if (group.type === 'R13') {
@@ -2575,7 +2796,7 @@ function App() {
       </div>
     }
 
-    if (getDocFormCfg(group.type) && !['r13', 'r01'].includes(getDocFormCfg(group.type).layout)) {
+    if (getDocFormCfg(group.type) && !['r13', 'r01', 'r02'].includes(getDocFormCfg(group.type).layout)) {
       const cfg = getDocFormCfg(group.type)
       if (cfg.layout === 'document') {
         const fields = (cfg.documentFields || cfg.fields).filter(f => f.key !== 'signed_by' && f.key !== 'document_date')
@@ -2645,6 +2866,105 @@ function App() {
             })}
           </tr>)}
         </tbody></table>
+      </div>
+    }
+
+    if (group.type === 'R02') {
+      const r02Docs = sortR02Docs(group.docs || [])
+      const period = String(group.period || r02Docs[0]?.data?.month_key || '')
+      const year = period.slice(0, 4)
+      const month = period.slice(5, 7)
+      const columns = group.columns || r02ColumnsFromDocs(r02Docs)
+      const calendar = buildR02CalendarRows(period, r02Docs)
+      const renderMcdCell = (doc, col) => {
+        const cleaning = r02CleaningForDoc(doc, columns)
+        const val = cleaning[col.id] || ''
+        const display = r02McdDisplay(val)
+        return <td key={col.id}>
+          <select className="mini-select no-print" value={val} onChange={e => setR02MachineMcd(doc, col.id, e.target.value, columns)}>
+            {R02_MCD_OPTIONS.map(o => <option key={o || 'empty'} value={o}>{o || '—'}</option>)}
+          </select>
+          <span className="print-only">{display}</span>
+        </td>
+      }
+      return <div className="monthly-paper r02-paper r13-paper">
+        <div className="no-print employee-signature-row" style={{ marginBottom: '10px' }}>
+          <label>Podpis uzupełniającego (zbiorczo)
+            <select value={defaultR02Employee} onChange={e => setDefaultR02Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleR02Group(group, defaultR02Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleR02Group(group, defaultR02Employee, true)}>Uzupełnij puste</button>
+          <button className="secondary danger" onClick={() => deleteR02Month(group)}>Usuń kartotekę</button>
+          <span className="hint">Niedziele na różowo – domyślnie puste, uzupełnij ręcznie M/C/D przy każdej maszynie.</span>
+        </div>
+        <div className="no-print r13-columns-panel">
+          <b>Maszyny / urządzenia w tej kartotece:</b>
+          <div className="r13-columns-list">
+            {columns.map(col => (
+              <span key={col.id} className="r13-column-chip">
+                <input className="cell-input r13-col-rename" defaultValue={col.label} onBlur={e => { if (e.target.value.trim() && e.target.value.trim() !== col.label) renameR02ColumnInGroup(group, col.id, e.target.value) }} />
+                {columns.length > 1 && <button type="button" className="mini danger" title="Usuń kolumnę" onClick={() => removeR02ColumnFromGroup(group, col.id)}>×</button>}
+              </span>
+            ))}
+          </div>
+          <div className="r13-add-column-row">
+            <input value={r02NewColumnLabel} onChange={e => setR02NewColumnLabel(e.target.value)} placeholder="np. Separator magnetyczny" onKeyDown={e => { if (e.key === 'Enter' && r02NewColumnLabel.trim()) addR02ColumnToGroup(group, r02NewColumnLabel) }} />
+            <button type="button" className="secondary" onClick={() => addR02ColumnToGroup(group, r02NewColumnLabel)} disabled={!r02NewColumnLabel.trim()}>Dodaj maszynę</button>
+          </div>
+        </div>
+        <table className="r02-head r13-head"><tbody><tr>
+          <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+          <td className="r13-title"><b>{R02_HEADER.title}</b></td>
+          <td className="r13-meta"><b>Rok:</b> {year}<br/><b>Miesiąc:</b> {month}<br/><b>Str.</b> 1 z 1<br/><b>Wersja</b> {R02_HEADER.version}</td>
+        </tr></tbody></table>
+        <table className="r02-table r13-table">
+          <thead><tr>
+            <th>Lp.</th><th>Dzień w miesiącu</th>
+            {columns.map(col => <th key={col.id}>{col.label}<br/><small>(M/C/D*)</small></th>)}
+            <th>Podpis osoby uzupełniającej wpisy</th><th className="no-print">Akcje</th>
+          </tr></thead>
+          <tbody>
+            {calendar.map(row => {
+              const dayOff = row.isSunday
+              const doc = row.doc
+              if (!doc) {
+                return <tr key={row.date} className={`${dayOff ? 'r13-day-off' : ''} r13-missing no-print`.trim()}>
+                  <td>{row.lp}</td>
+                  <td>{formatR02PlDate(row.date)}{dayOff ? <small className="r13-off-tag"> (dzień wolny)</small> : ''}</td>
+                  {columns.map(col => <td key={col.id}>—</td>)}
+                  <td className="hint">{dayOff ? 'Niedziela – pusty wpis' : 'Brak wpisu'}</td>
+                  <td className="no-print">
+                    <button type="button" className="mini secondary" onClick={() => addMissingR02Day(group, row.date)}>{dayOff ? 'Dodaj wpis' : 'Dodaj dzień'}</button>
+                  </td>
+                </tr>
+              }
+              const isOff = dayOff || doc.data?.is_day_off
+              return <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
+                <td>{row.lp}</td>
+                <td>
+                  <input className="cell-input no-print" type="date" defaultValue={doc.document_date} onBlur={e => { if (e.target.value !== doc.document_date) saveR02DocumentDate(doc, e.target.value) }} />
+                  <span className="print-only">{formatR02PlDate(doc.document_date)}{isOff ? ' (dzień wolny)' : ''}</span>
+                </td>
+                {columns.map(col => renderMcdCell(doc, col))}
+                <td>
+                  <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveR02Cell(doc, {}, e.target.value)}>
+                    <option value="">Wybierz</option>
+                    {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                  </select>
+                  <span className="print-only">{doc.signed_by_operator || ''}</span>
+                </td>
+                <td className="no-print"></td>
+              </tr>
+            })}
+          </tbody>
+        </table>
+        <div className="r13-legend">
+          * <b>M</b> – Mycie; <b>C</b> – Czyszczenie; <b>D</b> – Dezynfekcja (można łączyć: M/C, C/D itd.).<br/>
+          Niedziele oznaczone na różowo – domyślnie puste, uzupełniane ręcznie w razie pracy.
+        </div>
       </div>
     }
 
@@ -3743,6 +4063,66 @@ function App() {
     setMessage('R13: usunięto kolumnę z ustawień domyślnych.')
   }
 
+  function renderR02Section() {
+    return <>
+      <div className="card inner-card no-print r13-add-panel">
+        <h3>Dodaj kartotekę R02 za miesiąc</h3>
+        <p className="hint">System uzupełni <b>cały miesiąc</b> – dni robocze puste do wpisania M/C/D przy każdej maszynie, <b>niedziele puste</b> (jasny czerwony) z możliwością ręcznego uzupełnienia.</p>
+        <div className="r13-columns-panel">
+          <b>Maszyny / urządzenia (domyślne dla nowych kartotek):</b>
+          <div className="r13-columns-list">
+            {r02ColumnDefs.map(col => (
+              <span key={col.id} className="r13-column-chip">{col.label}
+                {r02ColumnDefs.length > 1 && <button type="button" className="mini danger" title="Usuń z domyślnych" onClick={() => removeR02DefaultColumn(col.id)}>×</button>}
+              </span>
+            ))}
+          </div>
+          <div className="r13-add-column-row">
+            <input value={r02NewColumnLabel} onChange={e => setR02NewColumnLabel(e.target.value)} placeholder="np. Separator magnetyczny" onKeyDown={e => { if (e.key === 'Enter' && r02NewColumnLabel.trim()) addR02DefaultColumn() }} />
+            <button type="button" className="secondary" onClick={addR02DefaultColumn} disabled={!r02NewColumnLabel.trim()}>Dodaj maszynę</button>
+          </div>
+          <p className="hint">Kolumny można też dopisać do istniejącej kartoteki w podglądzie (Otwórz).</p>
+        </div>
+        <div className="k03-bulk-row">
+          <label>Rok i miesiąc
+            <div className="r13-month-picker">
+              <button type="button" className="mini secondary" onClick={() => shiftR02NewMonth(-1)} title="Poprzedni miesiąc">◀</button>
+              <input type="month" value={r02NewMonth} onChange={e => setR02NewMonth(e.target.value)} />
+              <button type="button" className="mini secondary" onClick={() => shiftR02NewMonth(1)} title="Następny miesiąc">▶</button>
+            </div>
+          </label>
+          <label>Podpis uzupełniającego
+            <select value={defaultR02Employee} onChange={e => setDefaultR02Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button onClick={createR02MonthKartoteka}>Utwórz kartotekę</button>
+        </div>
+        <p className="hint">Wersja silnika R02: {R02_ENGINE_VERSION}. Maszyny: {r02ColumnDefs.length} (ze wzoru Word I/2024).</p>
+      </div>
+      {hubManualGroups.length === 0 && <p className="hint">Brak kartotek R02 – utwórz pierwszą kartotekę miesięczną powyżej.</p>}
+      {hubManualGroups.length > 0 && <>
+        <h3>Lista kartotek R02</h3>
+        <div className="table-wrap docs-table-wrap"><table className="docs-table">
+          <thead><tr><th>Miesiąc</th><th>Dni w miesiącu</th><th>Akcje</th></tr></thead>
+          <tbody>{hubManualGroups.map(g => (
+            <tr key={g.key}>
+              <td><b>{g.period}</b> <span className="hint">({(g.columns || r02ColumnsFromDocs(g.docs)).length} maszyn)</span></td>
+              <td>{g.docs.length}</td>
+              <td className="row-actions">
+                <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
+                <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
+                <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                <button className="mini danger" onClick={() => deleteR02Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </>}
+    </>
+  }
+
   function renderR01Section() {
     return <>
       <div className="card inner-card no-print r13-add-panel">
@@ -3882,7 +4262,7 @@ function App() {
               <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
-          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : <>
+          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : <>
           {cfg && renderManualHaccpEntrySection()}
           {hubManualGroups.length === 0 && <p className="hint">Brak wpisów. Dodaj pierwszy wpis powyżej.</p>}
           {hubManualGroups.length > 0 && <>
@@ -4302,6 +4682,7 @@ function App() {
           </>
           : <span className="pill">Roboczy – uzupełnij dane; prawidłowy K03 zamraża się automatycznie przy tworzeniu</span>)}
         <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button>
+        {liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>

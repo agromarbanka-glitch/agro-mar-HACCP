@@ -9,7 +9,7 @@ export const RAPORTY_ENGINE_VERSION = '1.2'
 export const RAPORTY_CARDS = [
   ['R00', 'R00 – Dopuszczenie do pracy', 'Raport dopuszczenia pracowników do pracy', 'register'],
   ['R01', 'R01 – Mycie pomieszczeń', 'Raport mycia i czyszczenia pomieszczeń – kartoteka miesięczna', 'month'],
-  ['R02', 'R02 – Mycie maszyn', 'Raport mycia/czyszczenia maszyn i urządzeń', 'month'],
+  ['R02', 'R02 – Mycie maszyn', 'Raport mycia/czyszczenia maszyn i urządzeń – kartoteka miesięczna', 'month'],
   ['R03', 'R03 – Czyszczenie transportu', 'Raport czyszczenia środków transportu', 'month'],
   ['R04', 'R04 – Stacje deratyzacyjne', 'Raport wewnętrznej kontroli stacji deratyzacyjnych', 'month'],
   ['R05', 'R05 – Niezgodność / wycofanie', 'Raport niezgodności i wycofania wyrobu', 'register'],
@@ -76,11 +76,11 @@ export const RAPORTY_FORMS = {
   },
   R02: {
     code: 'R02',
-    layout: 'table',
+    layout: 'r02',
     periodMode: 'month',
     title: 'Raport R02 – Raport mycia/czyszczenia maszyn i urządzeń',
-    columns: cleaningColumns('Maszyna / urządzenie'),
-    fields: cleaningFields('Maszyna / urządzenie')
+    columns: [],
+    fields: []
   },
   R03: {
     code: 'R03',
