@@ -1,7 +1,8 @@
 /**
- * Rejestr wszystkich konfiguracji dokumentów HACCP (K, W, F, PR, S).
+ * Rejestr wszystkich konfiguracji dokumentów HACCP (K, R, W, F, PR, S).
  */
 import { MANUAL_HACCP_FORMS } from './haccpFormsEngine'
+import { RAPORTY_FORMS } from './raportyEngine'
 import { WYKAZY_FORMS } from './wykazyEngine'
 import { FORMULARZE_FORMS } from './formularzeEngine'
 import { PROTOKOLY_FORMS } from './protokolyEngine'
@@ -10,6 +11,7 @@ import { buildPeriodGroups, periodLabel, buildDocumentHtml } from './haccpDocSha
 
 export function getHaccpDocForm(type) {
   return MANUAL_HACCP_FORMS[type]
+    || RAPORTY_FORMS[type]
     || WYKAZY_FORMS[type]
     || FORMULARZE_FORMS[type]
     || PROTOKOLY_FORMS[type]

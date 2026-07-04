@@ -8,6 +8,7 @@ import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
+import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
 import {
   W03_HEADER, W03_FREQ_KEYS, sortW03Docs, buildW03InsertPayload,
   buildW03SeedPayloads, buildW03PrintHtml, buildW03ExcelRows, loadW03Meta, saveW03Meta, w03Freq
@@ -33,6 +34,7 @@ const PRODUCTS = [
 
 const DOCS_HUB_SECTIONS = [
   ['kartoteki', 'Kartoteki', 'K01–K07 karty kontrolne HACCP'],
+  ['raporty', 'Raporty', 'R00–R13'],
   ['wykazy', 'Wykazy', 'W01–W10'],
   ['formularze', 'Formularze', 'F01–F03'],
   ['protokoly', 'Protokoły', 'PR01–PR08'],
@@ -249,12 +251,14 @@ function App() {
   const [haccpDocs, setHaccpDocs] = useState([])
   const [docsFilter, setDocsFilter] = useState('K01')
   const [docsWykazFilter, setDocsWykazFilter] = useState('W01')
+  const [docsRaportFilter, setDocsRaportFilter] = useState('R00')
   const [docsFormularzFilter, setDocsFormularzFilter] = useState('F01')
   const [docsProtokolFilter, setDocsProtokolFilter] = useState('PR01')
   const [docsSpecFilter, setDocsSpecFilter] = useState('S01')
   const [docsHubSection, setDocsHubSection] = useState('kartoteki')
   const [docsFlyoutOpen, setDocsFlyoutOpen] = useState(false)
   const [docsWykazFlyoutOpen, setDocsWykazFlyoutOpen] = useState(false)
+  const [docsRaportFlyoutOpen, setDocsRaportFlyoutOpen] = useState(false)
   const [docsFormularzFlyoutOpen, setDocsFormularzFlyoutOpen] = useState(false)
   const [docsProtokolFlyoutOpen, setDocsProtokolFlyoutOpen] = useState(false)
   const [docsSpecFlyoutOpen, setDocsSpecFlyoutOpen] = useState(false)
@@ -378,6 +382,7 @@ function App() {
 
   function activeDocsCode() {
     if (docsHubSection === 'wykazy') return docsWykazFilter
+    if (docsHubSection === 'raporty') return docsRaportFilter
     if (docsHubSection === 'formularze') return docsFormularzFilter
     if (docsHubSection === 'protokoly') return docsProtokolFilter
     if (docsHubSection === 'specyfikacje') return docsSpecFilter
@@ -390,6 +395,7 @@ function App() {
 
   function activeHubCards() {
     if (docsHubSection === 'wykazy') return WYKAZY_CARDS
+    if (docsHubSection === 'raporty') return RAPORTY_CARDS
     if (docsHubSection === 'formularze') return FORMULARZE_CARDS
     if (docsHubSection === 'protokoly') return PROTOKOLY_CARDS
     if (docsHubSection === 'specyfikacje') return SPECYFIKACJE_CARDS
@@ -399,6 +405,7 @@ function App() {
   function closeHubFlyouts(except) {
     if (except !== 'kartoteki') setDocsFlyoutOpen(false)
     if (except !== 'wykazy') setDocsWykazFlyoutOpen(false)
+    if (except !== 'raporty') setDocsRaportFlyoutOpen(false)
     if (except !== 'formularze') setDocsFormularzFlyoutOpen(false)
     if (except !== 'protokoly') setDocsProtokolFlyoutOpen(false)
     if (except !== 'specyfikacje') setDocsSpecFlyoutOpen(false)
@@ -410,6 +417,7 @@ function App() {
     closeHubFlyouts(null)
     if (section === 'kartoteki') setDocsFlyoutOpen(true)
     else if (section === 'wykazy') setDocsWykazFlyoutOpen(true)
+    else if (section === 'raporty') setDocsRaportFlyoutOpen(true)
     else if (section === 'formularze') setDocsFormularzFlyoutOpen(true)
     else if (section === 'protokoly') setDocsProtokolFlyoutOpen(true)
     else if (section === 'specyfikacje') setDocsSpecFlyoutOpen(true)
@@ -433,7 +441,7 @@ function App() {
     { code: 'K05', name: 'Towary wycofane', status: 'w realizacji', note: 'Ręczny rejestr wycofań.' },
     { code: 'K06', name: 'Ocena jakości produktu', status: 'w realizacji', note: 'Auto z produkcji + ręczna edycja P/N.' },
     { code: 'K07', name: 'Kontrola sita CCP1', status: 'w realizacji', note: 'Dzienna kartoteka sita na linii przerobu.' },
-    { code: 'Raporty', name: 'R00–R13', status: 'do wykonania', note: 'Po kartach K.' },
+    { code: 'Raporty', name: 'R00–R13', status: 'robocze', note: 'Raporty 1:1 – wpisy ręczne, druk i Excel.' },
     { code: 'Wykazy', name: 'W01–W10', status: 'robocze', note: 'Kartoteki wykazów 1:1 ze wzorami – wpisy ręczne, druk i Excel.' },
     { code: 'Formularze', name: 'F01–F03', status: 'robocze', note: 'Formularze 1:1 – wpisy ręczne, logika później.' },
     { code: 'Protokoły', name: 'PR01–PR08', status: 'robocze', note: 'Protokoły 1:1 – dokumenty i rejestry.' },
@@ -645,6 +653,10 @@ function App() {
 
   function selectWykaz(code) {
     selectHubDoc(code, 'wykazy', setDocsWykazFilter)
+  }
+
+  function selectRaport(code) {
+    selectHubDoc(code, 'raporty', setDocsRaportFilter)
   }
 
   function selectFormularz(code) {
@@ -1348,14 +1360,14 @@ function App() {
           data.auditors, data.scope, data.crisis_situation, data.subject
         ].join(' ')).includes(q)
       })
-  }, [haccpDocs, docsHubSection, docsWykazFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter, docsDateFrom, docsDateTo, haccpSearch, haccpStatusFilter])
+  }, [haccpDocs, docsHubSection, docsWykazFilter, docsRaportFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter, docsDateFrom, docsDateTo, haccpSearch, haccpStatusFilter])
 
   const hubManualGroups = useMemo(() => {
     const code = activeDocsCode()
     const cfg = getDocFormCfg(code)
     if (!cfg || docsHubSection === 'kartoteki') return []
     return buildHubDocGroups(hubManualDocsForFilter, code, cfg)
-  }, [hubManualDocsForFilter, docsHubSection, docsWykazFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter])
+  }, [hubManualDocsForFilter, docsHubSection, docsWykazFilter, docsRaportFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter])
 
   const hubManualFilterStats = useMemo(() => {
     const code = activeDocsCode()
@@ -1368,7 +1380,7 @@ function App() {
       filteredGroups: hubManualGroups.length,
       filtersActive
     }
-  }, [hubManualDocsForFilter, hubManualGroups, docsHubSection, docsWykazFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter, haccpDocs, docsDateFrom, docsDateTo, haccpSearch, haccpStatusFilter])
+  }, [hubManualDocsForFilter, hubManualGroups, docsHubSection, docsWykazFilter, docsRaportFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter, haccpDocs, docsDateFrom, docsDateTo, haccpSearch, haccpStatusFilter])
 
   function buildK01MonthlyGroupForPeriod(period) {
     const docs = haccpDocs
@@ -2538,7 +2550,7 @@ function App() {
     const sourceDocs = isHub ? hubManualDocsForFilter : haccpPeriodDocs
     const periodDocs = sourceDocs.filter(d => d.document_type === type)
     const autoCount = periodDocs.filter(d => d.synthetic || d.data?.auto_source).length
-    const hubLabel = { wykazy: 'Wykaz', formularze: 'Formularz', protokoly: 'Protokół', specyfikacje: 'Specyfikacja' }[docsHubSection] || ''
+    const hubLabel = { wykazy: 'Wykaz', raporty: 'Raport', formularze: 'Formularz', protokoly: 'Protokół', specyfikacje: 'Specyfikacja' }[docsHubSection] || ''
     const pdfCfg = PDF_IMPORT_DOC_TYPES[type]
     return <>
       <div className="card inner-card no-print">
@@ -4885,7 +4897,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     ['pz', 'PZ / FIFO', Database],
     ['magazyn', 'Magazyn', Warehouse],
     ['kartoteki', 'Dokumentacja HACCP', ClipboardList],
-    ['raporty', 'Raporty', FileText],
     ['ustawienia', 'Ustawienia', Settings]
   ]
 
@@ -5034,7 +5045,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
       </div>
-      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
+      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
     </header>
 
     <section className="warning">
@@ -5312,7 +5323,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {activeTab === 'kartoteki' && <>
     <div className="docs-hub">
       <header className="docs-hub-head">
-        <div className="section-title"><ClipboardList/><div><h2>Dokumentacja HACCP</h2><p>Kartoteki, wykazy, formularze i protokoły w jednym miejscu.</p></div></div>
+        <div className="section-title"><ClipboardList/><div><h2>Dokumentacja HACCP</h2><p>Kartoteki, raporty, wykazy, formularze i protokoły w jednym miejscu.</p></div></div>
       </header>
 
       <nav className="docs-hub-nav" ref={docsHubNavRef}>
@@ -5342,6 +5353,39 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                       >
                         <b>{code}</b>
                         <span>{title.replace(/^K[0-9.]+ – /, '')}</span>
+                        <small>{cardDesc}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          }
+          if (key === 'raporty') {
+            return (
+              <div
+                key={key}
+                className={`docs-hub-tab-wrap ${docsHubSection === key ? 'active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className={`docs-hub-tab has-flyout ${docsHubSection === key ? 'active' : ''} ${docsRaportFlyoutOpen ? 'flyout-open' : ''}`}
+                  onClick={() => openHubTab(key)}
+                  aria-expanded={docsRaportFlyoutOpen}
+                >
+                  <b>{label}</b><small>{desc}</small>
+                </button>
+                {docsRaportFlyoutOpen && docsHubSection === key && (
+                  <div className="docs-k-flyout">
+                    {RAPORTY_CARDS.map(([code, title, cardDesc]) => (
+                      <button
+                        key={code}
+                        type="button"
+                        className={docsRaportFilter === code && docsHubSection === 'raporty' ? 'active' : ''}
+                        onClick={() => selectRaport(code)}
+                      >
+                        <b>{code}</b>
+                        <span>{title.replace(/^R[0-9]+ – /, '')}</span>
                         <small>{cardDesc}</small>
                       </button>
                     ))}
@@ -5454,7 +5498,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         })}
       </nav>
 
-      {['wykazy', 'formularze', 'protokoly', 'specyfikacje'].includes(docsHubSection) && renderHubManualSection()}
+      {['raporty', 'wykazy', 'formularze', 'protokoly', 'specyfikacje'].includes(docsHubSection) && renderHubManualSection()}
 
       {docsHubSection === 'kartoteki' && <>
       {renderK03UnfreezeBanner()}
@@ -5623,8 +5667,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     {renderK03WzModal()}
     </>}
-
-    {activeTab === 'raporty' && <section className="card"><div className="section-title"><FileText/><div><h2>Raporty</h2><p>Tu będą raporty temperatur, FIFO, identyfikowalności i wydruki PDF.</p></div></div><p className="hint">Moduł raportów będzie rozbudowany w kolejnym etapie.</p></section>}
 
     {activeTab === 'ustawienia' && <>
     <section className="two">
