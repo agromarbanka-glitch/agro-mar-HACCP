@@ -4,11 +4,11 @@
 import { normalizePn } from './haccpFormsEngine'
 import { col, dval, buildPeriodGroups, periodLabel, buildManualMonthlyHtml, buildManualExcelRows } from './haccpDocShared'
 
-export const RAPORTY_ENGINE_VERSION = '1.1'
+export const RAPORTY_ENGINE_VERSION = '1.2'
 
 export const RAPORTY_CARDS = [
   ['R00', 'R00 – Dopuszczenie do pracy', 'Raport dopuszczenia pracowników do pracy', 'register'],
-  ['R01', 'R01 – Mycie pomieszczeń', 'Raport mycia i czyszczenia pomieszczeń', 'month'],
+  ['R01', 'R01 – Mycie pomieszczeń', 'Raport mycia i czyszczenia pomieszczeń – kartoteka miesięczna', 'month'],
   ['R02', 'R02 – Mycie maszyn', 'Raport mycia/czyszczenia maszyn i urządzeń', 'month'],
   ['R03', 'R03 – Czyszczenie transportu', 'Raport czyszczenia środków transportu', 'month'],
   ['R04', 'R04 – Stacje deratyzacyjne', 'Raport wewnętrznej kontroli stacji deratyzacyjnych', 'month'],
@@ -68,11 +68,11 @@ export const RAPORTY_FORMS = {
   },
   R01: {
     code: 'R01',
-    layout: 'table',
+    layout: 'r01',
     periodMode: 'month',
     title: 'Raport R01 – Raport mycia i czyszczenia pomieszczeń',
-    columns: cleaningColumns('Pomieszczenie'),
-    fields: cleaningFields('Pomieszczenie')
+    columns: [],
+    fields: []
   },
   R02: {
     code: 'R02',
