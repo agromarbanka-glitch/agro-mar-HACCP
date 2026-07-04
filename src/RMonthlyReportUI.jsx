@@ -14,7 +14,8 @@ import {
   sortRMonthlyDocs,
   buildCalendarRows,
   formatRMonthlyPlDate,
-  columnsFromDocs
+  columnsFromDocs,
+  r08MakeChamber
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 
@@ -39,6 +40,7 @@ export function RMonthlyReportSection({
   const [newMonth, setNewMonth] = useState(new Date().toISOString().slice(0, 7))
   const [columnDefs, setColumnDefs] = useState(() => loadRMonthlyColumns(code))
   const [newColumnLabel, setNewColumnLabel] = useState('')
+  const [newChamberKind, setNewChamberKind] = useState('raw')
   const [defaultEmployee, setDefaultEmployee] = useState('')
   const [newRow, setNewRow] = useState(() => defaultNewRow(cfg))
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
@@ -120,6 +122,10 @@ export function RMonthlyReportSection({
   }
 
   function addDefaultColumn() {
+    if (code === 'R08') {
+      addR08Chamber(newChamberKind)
+      return
+    }
     const col = rMonthlyMakeColumn(newColumnLabel, code.toLowerCase())
     const next = [...columnDefs, col]
     saveRMonthlyColumns(code, next)
@@ -128,10 +134,18 @@ export function RMonthlyReportSection({
     setMessage(`${code}: dodano kolumnę "${col.label}".`)
   }
 
-  const periodLabel = cfg.periodMode === 'quarter' ? 'Kwartał (wybierz miesiąc)' : 'Rok i miesiąc'
-  const colPanel = (cfg.defaultColumns || cfg.defaultStations) && cfg.storageKey ? (
+  function addR08Chamber(kind) {
+    const col = r08MakeChamber(kind, columnDefs)
+    if (!col) return
+    const next = [...columnDefs, col]
+    saveRMonthlyColumns(code, next)
+    setColumnDefs(next)
+    setMessage(`${code}: dodano ${col.label}.`)
+  }
+
+  const colPanel = (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers) && cfg.storageKey ? (
     <div className="r13-columns-panel">
-      <b>{cfg.columnLabel || 'Stacje'} (domyślne):</b>
+      <b>{cfg.columnLabel || 'Stacje'}:</b>
       <div className="r13-columns-list">
         {columnDefs.map(col => (
           <span key={col.id} className="r13-column-chip">{col.label}
@@ -143,10 +157,25 @@ export function RMonthlyReportSection({
           </span>
         ))}
       </div>
-      <div className="r13-add-column-row">
-        <input value={newColumnLabel} onChange={e => setNewColumnLabel(e.target.value)} placeholder="Dodaj…" />
-        <button type="button" className="secondary" onClick={addDefaultColumn} disabled={!newColumnLabel.trim()}>{cfg.addColumnLabel || 'Dodaj'}</button>
-      </div>
+      {code === 'R08' ? (
+        <div className="r13-add-column-row">
+          <label>Typ chłodni
+            <select value={newChamberKind} onChange={e => setNewChamberKind(e.target.value)}>
+              {(cfg.chamberTypes || []).map(t => (
+                <option key={t.kind} value={t.kind}>
+                  {t.kind === 'raw' ? 'Chłodnia surowców (kolejna)' : 'Chłodnia produktów gotowych (kolejna)'}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="secondary" onClick={addDefaultColumn}>{cfg.addColumnLabel || 'Dodaj chłodnię'}</button>
+        </div>
+      ) : (
+        <div className="r13-add-column-row">
+          <input value={newColumnLabel} onChange={e => setNewColumnLabel(e.target.value)} placeholder="Dodaj…" />
+          <button type="button" className="secondary" onClick={addDefaultColumn} disabled={!newColumnLabel.trim()}>{cfg.addColumnLabel || 'Dodaj'}</button>
+        </div>
+      )}
     </div>
   ) : null
 
@@ -167,6 +196,8 @@ export function RMonthlyReportSection({
       {hubManualGroups[0] && <button style={{ marginTop: 8 }} onClick={() => addRegisterRow(hubManualGroups[0])}>Dodaj wpis do {hubManualGroups[0].period}</button>}
     </div>
   ) : null
+
+  const periodLabel = cfg.periodMode === 'quarter' ? 'Kwartał (wybierz miesiąc)' : 'Rok i miesiąc'
 
   return <>
     <div className="card inner-card no-print r13-add-panel">
@@ -247,6 +278,7 @@ export function RMonthlyReportPreview({
     if (!init.observations && singleDoc?.data?.observations) init.observations = singleDoc.data.observations
     return init
   })
+  const [previewChamberKind, setPreviewChamberKind] = useState('raw')
 
   useEffect(() => {
     if (cfg?.layout !== 'single-month' || !singleDoc) return
@@ -582,38 +614,177 @@ export function RMonthlyReportPreview({
 
   if (cfg.layout === 'daily-calibration') {
     const calendar = buildCalendarRows(period, docs)
-    const chambers = cfg.chambers || []
-    return <div className="monthly-paper r13-paper">{toolbar}{head}
-      <table className="r13-table"><thead><tr><th>Data</th><th>Waga (odczyt)</th>
-        {chambers.slice(1).map(ch => <th key={ch.id}>{ch.label}<br/><small>w chłodni / P-W</small></th>)}
-        <th>{cfg.signLabel}</th></tr></thead>
-        <tbody>{calendar.map(row => {
-          const doc = row.doc
-          const off = row.isSunday
-          if (!doc) return <tr key={row.date} className={`${off ? 'r13-day-off' : ''} no-print`}><td>{formatRMonthlyPlDate(row.date)}</td><td colSpan={6}><button type="button" className="mini secondary" onClick={() => addMissingDay(row.date)}>Dodaj</button></td></tr>
+    const chambers = columns.length ? columns : (cfg.defaultChambers || [])
+    const thermoSpan = Math.max(chambers.length * 3, 1)
+    const meta = docs[0]?.data?.calibration || {}
+
+    async function saveR08Meta(field, value) {
+      if (!supabase) return
+      try {
+        for (const doc of docs) {
+          const cal = { ...(doc.data?.calibration || {}), [field]: value }
+          const { error } = await supabase.from('haccp_documents').update({
+            data: { ...(doc.data || {}), calibration: cal },
+            updated_at: new Date().toISOString()
+          }).eq('id', doc.id)
+          if (error) throw error
+        }
+        await loadHaccpDocs()
+      } catch (err) {
+        setMessage(`${code}: ${err.message}`)
+      }
+    }
+
+    async function addR08ChamberToGroup(kind) {
+      if (!supabase) return
+      const newCol = r08MakeChamber(kind, chambers)
+      if (!newCol) return
+      const nextCols = [...chambers, newCol]
+      saveRMonthlyColumns(code, nextCols)
+      try {
+        for (const doc of docs) {
           const cal = doc.data?.calibration || {}
-          const isOff = off || doc.data?.is_day_off
-          return <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
-            <td>{formatRMonthlyPlDate(doc.document_date)}</td>
-            <td><input className="cell-input" defaultValue={cal.scale_reading || ''} onBlur={e => saveDoc(supabase, doc, { calibration: { ...cal, scale_reading: e.target.value } }, undefined, loadHaccpDocs, setMessage, code)} /></td>
-            {chambers.slice(1).map(ch => {
-              const c = cal.chambers?.[ch.id] || {}
-              return <td key={ch.id}>
-                <input className="cell-input" placeholder="Wskazanie" defaultValue={c.reading || ''} onBlur={e => {
-                  const chambersData = { ...(cal.chambers || {}), [ch.id]: { ...c, reading: e.target.value } }
-                  saveDoc(supabase, doc, { calibration: { ...cal, chambers: chambersData } }, undefined, loadHaccpDocs, setMessage, code)
-                }} />
-                <select className="mini-select" value={c.action || ''} onChange={e => {
-                  const chambersData = { ...(cal.chambers || {}), [ch.id]: { ...c, action: e.target.value } }
-                  saveDoc(supabase, doc, { calibration: { ...cal, chambers: chambersData } }, undefined, loadHaccpDocs, setMessage, code)
-                }}>{cfg.pwOptions.map(o => <option key={o || 'e'} value={o}>{o || '—'}</option>)}</select>
-              </td>
+          const chData = { ...(cal.chambers || {}), [newCol.id]: { ref: '', reading: '', action: doc.data?.is_day_off ? '' : 'P' } }
+          const { error } = await supabase.from('haccp_documents').update({
+            data: { ...(doc.data || {}), chamber_columns: nextCols, calibration: { ...cal, chambers: chData } },
+            updated_at: new Date().toISOString()
+          }).eq('id', doc.id)
+          if (error) throw error
+        }
+        await loadHaccpDocs()
+        setMessage(`${code}: dodano ${newCol.label} do kartoteki.`)
+      } catch (err) {
+        setMessage(`${code}: ${err.message}`)
+      }
+    }
+
+    function saveCal(doc, calPatch) {
+      const cal = { ...(doc.data?.calibration || {}), ...calPatch }
+      saveDoc(supabase, doc, { calibration: cal }, undefined, loadHaccpDocs, setMessage, code)
+    }
+
+    function saveChamber(doc, chId, patch) {
+      const cal = doc.data?.calibration || {}
+      const chambersData = { ...(cal.chambers || {}), [chId]: { ...(cal.chambers?.[chId] || {}), ...patch } }
+      saveDoc(supabase, doc, { calibration: { ...cal, chambers: chambersData } }, undefined, loadHaccpDocs, setMessage, code)
+    }
+
+    const pwOpts = (cfg.pwOptions || ['', 'P', 'W']).filter(o => o !== undefined)
+
+    return <div className="monthly-paper r08-paper r13-paper">{toolbar}{head}
+      <div className="no-print r08-chamber-add card inner-card" style={{ marginBottom: 10 }}>
+        <b>Dodaj chłodnię do tej kartoteki:</b>
+        <div className="k03-bulk-row" style={{ marginTop: 8 }}>
+          <label>Typ
+            <select value={previewChamberKind} onChange={e => setPreviewChamberKind(e.target.value)}>
+              {(cfg.chamberTypes || []).map(t => (
+                <option key={t.kind} value={t.kind}>
+                  {t.kind === 'raw' ? 'Chłodnia surowców (kolejna)' : 'Chłodnia produktów gotowych (kolejna)'}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button type="button" className="secondary" onClick={() => addR08ChamberToGroup(previewChamberKind)}>Dodaj chłodnię</button>
+        </div>
+      </div>
+      <div className="table-wrap r08-table-wrap">
+        <table className="r08-table">
+          <thead>
+            <tr>
+              <th rowSpan={4} className="r08-date-col">Data</th>
+              <th colSpan={2}>Waga 1</th>
+              <th colSpan={thermoSpan}>Termometry</th>
+              <th rowSpan={4}>{cfg.signLabel}</th>
+            </tr>
+            <tr>
+              <th>Wzorzec -</th>
+              <th>Tolerancja -</th>
+              <th colSpan={thermoSpan}>
+                Tolerancja temperatury -
+                <input className="cell-input no-print r08-meta-input" defaultValue={meta.temp_tolerance || ''} onBlur={e => saveR08Meta('temp_tolerance', e.target.value)} />
+                <span className="print-only">{meta.temp_tolerance || ''}</span>
+              </th>
+            </tr>
+            <tr>
+              <th>
+                <input className="cell-input no-print r08-meta-input" placeholder="Wzorzec" defaultValue={meta.scale_reference || ''} onBlur={e => saveR08Meta('scale_reference', e.target.value)} />
+                <span className="print-only">{meta.scale_reference || ''}</span>
+              </th>
+              <th>
+                <input className="cell-input no-print r08-meta-input" placeholder="Tolerancja" defaultValue={meta.scale_tolerance || ''} onBlur={e => saveR08Meta('scale_tolerance', e.target.value)} />
+                <span className="print-only">{meta.scale_tolerance || ''}</span>
+              </th>
+              {chambers.map(ch => <th key={ch.id} colSpan={3}>{ch.label}</th>)}
+            </tr>
+            <tr>
+              <th>Wskazania urządzenia<br/>w pom. prod.</th>
+              <th>Podjęte działania<br/>(P/W)*</th>
+              {chambers.flatMap(ch => [
+                <th key={`${ch.id}-ref`}>Wskazania urządzenia wzorcowego</th>,
+                <th key={`${ch.id}-read`}>Wskazania w chłodni</th>,
+                <th key={`${ch.id}-act`}>Podjęte działania (P/W)*</th>
+              ])}
+            </tr>
+          </thead>
+          <tbody>
+            {calendar.map(row => {
+              const doc = row.doc
+              const off = row.isSunday
+              if (!doc) return (
+                <tr key={row.date} className={`${off ? 'r13-day-off' : ''} no-print`}>
+                  <td>{formatRMonthlyPlDate(row.date)}</td>
+                  <td colSpan={2 + thermoSpan}><button type="button" className="mini secondary" onClick={() => addMissingDay(row.date)}>Dodaj dzień</button></td>
+                  <td></td>
+                </tr>
+              )
+              const cal = doc.data?.calibration || {}
+              const isOff = off || doc.data?.is_day_off
+              return (
+                <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
+                  <td>{formatRMonthlyPlDate(doc.document_date)}</td>
+                  <td>
+                    <input className="cell-input no-print" defaultValue={cal.scale_reading || ''} onBlur={e => saveCal(doc, { scale_reading: e.target.value })} />
+                    <span className="print-only">{cal.scale_reading || ''}</span>
+                  </td>
+                  <td>
+                    <select className="mini-select no-print" value={cal.scale_action || (isOff ? '' : 'P')} onChange={e => saveCal(doc, { scale_action: e.target.value })}>
+                      {pwOpts.map(o => <option key={o || 'e'} value={o}>{o || '—'}</option>)}
+                    </select>
+                    <span className="print-only">{cal.scale_action || (isOff ? '' : 'P')}</span>
+                  </td>
+                  {chambers.flatMap(ch => {
+                    const c = cal.chambers?.[ch.id] || {}
+                    const defPw = isOff ? '' : 'P'
+                    return [
+                      <td key={`${doc.id}-${ch.id}-ref`}>
+                        <input className="cell-input no-print" defaultValue={c.ref || ''} onBlur={e => saveChamber(doc, ch.id, { ref: e.target.value })} />
+                        <span className="print-only">{c.ref || ''}</span>
+                      </td>,
+                      <td key={`${doc.id}-${ch.id}-read`}>
+                        <input className="cell-input no-print" defaultValue={c.reading || ''} onBlur={e => saveChamber(doc, ch.id, { reading: e.target.value })} />
+                        <span className="print-only">{c.reading || ''}</span>
+                      </td>,
+                      <td key={`${doc.id}-${ch.id}-act`}>
+                        <select className="mini-select no-print" value={c.action || defPw} onChange={e => saveChamber(doc, ch.id, { action: e.target.value })}>
+                          {pwOpts.map(o => <option key={o || 'e'} value={o}>{o || '—'}</option>)}
+                        </select>
+                        <span className="print-only">{c.action || defPw}</span>
+                      </td>
+                    ]
+                  })}
+                  <td>
+                    <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+                      <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                    </select>
+                    <span className="print-only">{doc.signed_by_operator || ''}</span>
+                  </td>
+                </tr>
+              )
             })}
-            <td><select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
-              <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
-          </tr>
-        })}</tbody></table>
-      <p className="r13-legend">* P – dalsze użytkowanie; W – wymiana/naprawa</p>
+          </tbody>
+        </table>
+      </div>
+      <p className="r13-legend">{cfg.pwLegend || '* P – dalsze użytkowanie; W – wymiana/naprawa'}</p>
     </div>
   }
 

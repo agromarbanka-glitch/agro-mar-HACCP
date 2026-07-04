@@ -25,7 +25,7 @@ export function normalizeMcd(value) {
 export function loadRMonthlyColumns(code) {
   const cfg = getRMonthlyConfig(code)
   if (!cfg) return []
-  const fallback = cfg.defaultColumns || cfg.defaultStations || []
+  const fallback = cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || []
   if (!cfg.storageKey) return fallback.map(c => ({ ...c }))
   try {
     const raw = localStorage.getItem(cfg.storageKey)
@@ -35,6 +35,7 @@ export function loadRMonthlyColumns(code) {
     return parsed.map((c, i) => ({
       id: String(c.id || `col-${i + 1}`),
       label: String(c.label || `Kolumna ${i + 1}`),
+      kind: String(c.kind || ''),
       auto_m: Boolean(c.auto_m)
     }))
   } catch {
@@ -65,16 +66,29 @@ export function sortRMonthlyDocs(docs) {
 export function columnsFromDocs(code, docs, fallback) {
   const cfg = getRMonthlyConfig(code)
   const first = sortRMonthlyDocs(docs)[0]
-  const key = cfg?.layout === 'station-matrix' ? 'stations' : 'columns'
-  const stored = first?.data?.[key] || first?.data?.machine_columns || first?.data?.room_columns
+  const key = cfg?.layout === 'station-matrix' ? 'stations'
+    : cfg?.layout === 'daily-calibration' ? 'chamber_columns'
+    : 'columns'
+  const stored = first?.data?.[key] || first?.data?.machine_columns || first?.data?.room_columns || first?.data?.columns
   if (Array.isArray(stored) && stored.length) {
     return stored.map((c, i) => ({
       id: String(c.id || `col-${i + 1}`),
       label: String(c.label || `Kolumna ${i + 1}`),
+      kind: String(c.kind || ''),
       auto_m: Boolean(c.auto_m)
     }))
   }
   return (fallback || loadRMonthlyColumns(code)).map(c => ({ ...c }))
+}
+
+export function r08MakeChamber(kind, existing = []) {
+  const cfg = getRMonthlyConfig('R08')
+  const type = (cfg?.chamberTypes || []).find(t => t.kind === kind)
+  if (!type) return null
+  const n = existing.filter(c => c.kind === kind).length + 1
+  const label = String(type.labelTemplate || '{n}').replace('{n}', String(n))
+  const id = `${kind}-${n}-${Date.now().toString(36).slice(-4)}`
+  return { id, kind, label }
 }
 
 export function buildRMonthlyPeriodGroups(code, docs) {
@@ -140,18 +154,20 @@ function defaultDayCells(columns, sunday, layout) {
   return {}
 }
 
-function defaultCalibration(sunday) {
-  if (sunday) return { scale_tolerance: '', scale_reading: '', chambers: {} }
+function defaultCalibration(sunday, chamberDefs = []) {
+  const chambers = {}
+  for (const ch of chamberDefs) {
+    chambers[ch.id] = sunday
+      ? { ref: '', reading: '', action: '' }
+      : { ref: '', reading: '', action: 'P' }
+  }
   return {
+    scale_reference: '',
     scale_tolerance: '',
+    temp_tolerance: '',
     scale_reading: '',
-    chambers: {
-      prod: { ref: '', reading: '', action: '' },
-      'raw-1': { ref: '', reading: '', action: '' },
-      'raw-2': { ref: '', reading: '', action: '' },
-      'fg-1': { ref: '', reading: '', action: '' },
-      'fg-2': { ref: '', reading: '', action: '' }
-    }
+    scale_action: sunday ? '' : 'P',
+    chambers
   }
 }
 
@@ -261,7 +277,7 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
     } else if (cfg.layout === 'grid-mcd-agent') {
       data = { ...base, cells: defaultDayCells(cols, sunday, cfg.layout) }
     } else if (cfg.layout === 'daily-calibration') {
-      data = { ...base, calibration: defaultCalibration(sunday) }
+      data = { ...base, chamber_columns: cols, calibration: defaultCalibration(sunday, cols) }
     }
     return {
       document_type: code,
@@ -286,7 +302,7 @@ export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs,
   let data = { ...base }
   if (cfg?.layout === 'daily-employees') data = { ...base, godzina: '', employees: emptyEmployees(cfg.employeeSlots || 12) }
   else if (cfg?.layout === 'grid-mcd-agent') data = { ...base, cells: defaultDayCells(cols, isSunday, cfg.layout) }
-  else if (cfg?.layout === 'daily-calibration') data = { ...base, calibration: defaultCalibration(isSunday) }
+  else if (cfg?.layout === 'daily-calibration') data = { ...base, chamber_columns: cols, calibration: defaultCalibration(isSunday, cols) }
   return {
     document_type: code,
     document_date: date,
@@ -397,15 +413,42 @@ ${rows.map((doc, i) => `<tr><td>${i + 1}</td>${cfg.rowFields.map(f => `<td>${esc
     body = `<table><thead><tr><th>Data / godz.</th><th>Nr 1–4 (nazwisko / P/N)*</th><th colspan="3"></th><th>Podpis</th></tr></thead><tbody>${rows}</tbody></table>
 <p>* P – prawidłowo, N – nieprawidłowo (odzież)</p>`
   } else if (cfg.layout === 'daily-calibration') {
+    const chambers = group.columns || columnsFromDocs(code, docs)
+    const thermoSpan = Math.max(chambers.length * 3, 1)
+    const meta = docs[0]?.data?.calibration || {}
+    const subHead = chambers.map(ch => `<th colspan="3">${escapeHtml(ch.label)}</th>`).join('')
+    const subSub = chambers.flatMap(() => [
+      '<th>Wskazania urządzenia wzorcowego</th>',
+      '<th>Wskazania w chłodni</th>',
+      '<th>Podjęte działania (P/W)*</th>'
+    ]).join('')
     const calendar = buildCalendarRows(period, docs)
     const rows = calendar.map(row => {
       const doc = row.doc
       const off = row.isSunday || doc?.data?.is_day_off ? 'day-off' : ''
       const cal = doc?.data?.calibration || {}
-      if (!doc) return `<tr class="${off}"><td>${formatRMonthlyPlDate(row.date)}</td><td colspan="6">—</td></tr>`
-      return `<tr class="${off}"><td>${formatRMonthlyPlDate(doc.document_date)}</td><td>${escapeHtml(cal.scale_reading || '—')}</td><td>${escapeHtml(cal.chambers?.['raw-1']?.reading || '—')}</td><td>${escapeHtml(cal.chambers?.['raw-2']?.reading || '—')}</td><td>${escapeHtml(cal.chambers?.['fg-1']?.reading || '—')}</td><td>${escapeHtml(cal.chambers?.['fg-2']?.reading || '—')}</td><td>${escapeHtml(doc.signed_by_operator || '')}</td></tr>`
+      if (!doc) return `<tr class="${off}"><td>${formatRMonthlyPlDate(row.date)}</td><td colspan="${2 + thermoSpan}">—</td><td></td></tr>`
+      const thermoCells = chambers.flatMap(ch => {
+        const c = cal.chambers?.[ch.id] || {}
+        return [
+          `<td>${escapeHtml(c.ref || '—')}</td>`,
+          `<td>${escapeHtml(c.reading || '—')}</td>`,
+          `<td>${escapeHtml(c.action || '—')}</td>`
+        ]
+      }).join('')
+      return `<tr class="${off}"><td>${formatRMonthlyPlDate(doc.document_date)}</td>
+        <td>${escapeHtml(cal.scale_reading || '—')}</td>
+        <td>${escapeHtml(cal.scale_action || '—')}</td>
+        ${thermoCells}
+        <td>${escapeHtml(doc.signed_by_operator || '')}</td></tr>`
     }).join('')
-    body = `<table><thead><tr><th>Data</th><th>Waga 1</th><th>Chł. surowca 1</th><th>Chł. surowca 2</th><th>Chł. gotowe 1</th><th>Chł. gotowe 2</th><th>Podpis</th></tr></thead><tbody>${rows}</tbody></table>`
+    body = `<table><thead>
+      <tr><th rowspan="4">Data</th><th colspan="2">Waga 1</th><th colspan="${thermoSpan}">Termometry</th><th rowspan="4">Podpis</th></tr>
+      <tr><th>Wzorzec -</th><th>Tolerancja -</th><th colspan="${thermoSpan}">Tolerancja temperatury - ${escapeHtml(meta.temp_tolerance || '')}</th></tr>
+      <tr><th>${escapeHtml(meta.scale_reference || '')}</th><th>${escapeHtml(meta.scale_tolerance || '')}</th>${subHead}</tr>
+      <tr><th>Wskazania urządzenia w pom. prod.</th><th>Podjęte działania (P/W)*</th>${subSub}</tr>
+    </thead><tbody>${rows}</tbody></table>
+    <p>${escapeHtml(cfg.pwLegend || '')}</p>`
   } else if (cfg.layout === 'quarter-trend') {
     const doc = docs[0]
     const months = doc?.data?.months || []
@@ -475,18 +518,32 @@ export function buildRMonthlyExcelRows(code, group) {
       ])
     })
   } else if (cfg?.layout === 'daily-calibration') {
-    const chambers = cfg.chambers || []
-    rows.push(['Data', 'Waga', ...chambers.slice(1).map(ch => ch.label), cfg.signLabel])
+    const chambers = group.columns || columnsFromDocs(code, docs)
+    const meta = docs[0]?.data?.calibration || {}
+    rows.push(['Wzorzec', meta.scale_reference || ''])
+    rows.push(['Tolerancja wagi', meta.scale_tolerance || ''])
+    rows.push(['Tolerancja temperatury', meta.temp_tolerance || ''])
+    rows.push([
+      'Data',
+      'Waga – wskazania w pom. prod.',
+      'Waga – działania P/W',
+      ...chambers.flatMap(ch => [`${ch.label} wzorcowe`, `${ch.label} w chłodni`, `${ch.label} P/W`]),
+      cfg.signLabel
+    ])
     buildCalendarRows(period, docs).forEach(row => {
       const doc = row.doc
       const cal = doc?.data?.calibration || {}
-      if (!doc) { rows.push([formatRMonthlyPlDate(row.date), ...chambers.slice(1).map(() => ''), '']); return }
+      if (!doc) {
+        rows.push([formatRMonthlyPlDate(row.date), ...Array(2 + chambers.length * 3).fill(''), ''])
+        return
+      }
       rows.push([
         formatRMonthlyPlDate(doc.document_date),
         cal.scale_reading || '',
-        ...chambers.slice(1).map(ch => {
+        cal.scale_action || '',
+        ...chambers.flatMap(ch => {
           const c = cal.chambers?.[ch.id] || {}
-          return [c.reading || '', c.action || ''].filter(Boolean).join(' ')
+          return [c.ref || '', c.reading || '', c.action || '']
         }),
         doc.signed_by_operator || ''
       ])

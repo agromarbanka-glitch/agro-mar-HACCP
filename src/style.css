@@ -482,6 +482,15 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 }
 .r03-column-bulk label { font-size: 12px; font-weight: 700; min-width: 160px; }
 .r06-print-block { margin-bottom: 16px; text-align: left; }
+.r08-paper { overflow-x: auto; }
+.r08-table-wrap { overflow-x: auto; margin-top: 8px; }
+.r08-table { width: 100%; border-collapse: collapse; font-size: 10px; min-width: 1100px; }
+.r08-table th, .r08-table td { border: 1px solid #222; padding: 4px 5px; text-align: center; vertical-align: middle; }
+.r08-table thead th { background: #fafafa; font-weight: 700; line-height: 1.25; }
+.r08-table .r08-date-col { min-width: 72px; }
+.r08-meta-input { width: 100%; min-width: 60px; font-size: 10px; padding: 2px 4px; }
+.r08-table .cell-input, .r08-table .mini-select { width: 100%; min-width: 48px; font-size: 10px; }
+.r08-chamber-add { padding: 10px 12px; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }

@@ -112,19 +112,26 @@ export const R_MONTHLY_CONFIGS = {
     code: 'R08',
     layout: 'daily-calibration',
     periodMode: 'month',
+    storageKey: 'agro-mar-r08-chambers-v1',
     header: {
       title: 'Raport R08 – Raport wzorcowania urządzeń kontrolno-pomiarowych',
       version: 'I/2024'
     },
-    chambers: [
-      { id: 'prod', label: 'W pom. prod.' },
-      { id: 'raw-1', label: 'Chłodnia surowców nr 1' },
-      { id: 'raw-2', label: 'Chłodnia surowców nr 2' },
-      { id: 'fg-1', label: 'Chłodnia produktów gotowych nr 1' },
-      { id: 'fg-2', label: 'Chłodnia produktów gotowych nr 2' }
+    chamberTypes: [
+      { kind: 'raw', labelTemplate: 'Chłodnia surowców nr {n}' },
+      { kind: 'fg', labelTemplate: 'Chłodnia produktów gotowych nr {n}' }
     ],
+    defaultChambers: [
+      { id: 'raw-1', kind: 'raw', label: 'Chłodnia surowców nr 1' },
+      { id: 'raw-2', kind: 'raw', label: 'Chłodnia surowców nr 2' },
+      { id: 'fg-1', kind: 'fg', label: 'Chłodnia produktów gotowych nr 1' },
+      { id: 'fg-2', kind: 'fg', label: 'Chłodnia produktów gotowych nr 2' }
+    ],
+    columnLabel: 'Termometry (chłodnie)',
+    addColumnLabel: 'Dodaj chłodnię',
     pwOptions: ['', 'P', 'W'],
-    createHint: 'Cały miesiąc – wiersze na każdy dzień; wagi, termometry i działania P/W.',
+    pwLegend: '* P – dalsze użytkowanie; W – wymiana/naprawa',
+    createHint: 'Cały miesiąc – waga i termometry wg wzoru; domyślnie P we wszystkich działaniach (dni robocze).',
     signLabel: 'Podpis'
   },
   R09: {
