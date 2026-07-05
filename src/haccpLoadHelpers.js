@@ -5,8 +5,8 @@ export const HACCP_DOC_LIST_SELECT =
 /** Maks. liczba kartotek wczytywanych do przeglądarki (kilka sezonów). */
 export const HACCP_DOCS_LOAD_MAX = 50000
 
-/** Rozmiar paczki przy pobieraniu (Supabase API domyślnie max 1000/wywołanie – ustaw w Project Settings → API → Max Rows). */
-export const HACCP_DOCS_PAGE_SIZE = 2000
+/** Rozmiar paczki przy pobieraniu (domyślny limit Supabase to 1000/wywołanie – działa bez zmian w panelu). */
+export const HACCP_DOCS_PAGE_SIZE = 1000
 
 /** Pobiera kartoteki stronicowane – omija stary limit 5000 w jednym zapytaniu. */
 export async function fetchAllHaccpDocuments(client, { maxRows = HACCP_DOCS_LOAD_MAX, pageSize = HACCP_DOCS_PAGE_SIZE } = {}) {
