@@ -269,6 +269,7 @@ function App() {
   const [authSession, setAuthSession] = useState(null)
   const [authReady, setAuthReady] = useState(skipAuth)
   const [haccpBusy, setHaccpBusy] = useState(false)
+  const [importDeleting, setImportDeleting] = useState(false)
   const loadedForUserRef = useRef(null)
   const haccpLoadInFlightRef = useRef(null)
   const userRole = authProfile?.role || 'magazynier'
@@ -6063,31 +6064,43 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   async function deleteImportedFile(fileId, fileNameForConfirm) {
     if (!supabase) return
     if (!ensureCanDelete()) return
-    if (!confirmDelete(`Import Excel: ${fileNameForConfirm || fileId}.\n\nOperacja usunie powiązane operacje, partie i rozliczenia FIFO.`)) return
-    const typed = window.prompt('Drugie potwierdzenie. Wpisz dokładnie: USUŃ IMPORT')
-    if (normalizeText(typed) !== normalizeText('USUŃ IMPORT')) {
-      setMessage('Usuwanie anulowane — wpisano nieprawidłowe potwierdzenie.')
+    if (!confirmDelete(`Import Excel: ${fileNameForConfirm || fileId}.\n\nOperacja usunie powiązane operacje, partie, FIFO i kartoteki K powiązane z tym importem.`)) return
+    const typed = window.prompt('Potwierdź wpisując: USUN IMPORT (bez polskich znaków)')
+    if (normalizeText(typed) !== 'usun import') {
+      setMessage('Usuwanie anulowane — wpisz dokładnie: USUN IMPORT')
       return
     }
-    const reason = window.prompt('Podaj powód usunięcia importu:')
+    const reason = window.prompt('Podaj powód usunięcia importu (np. dane testowe):')
     if (!String(reason || '').trim()) {
       setMessage('Usuwanie anulowane — powód jest wymagany.')
       return
     }
+    setImportDeleting(true)
     try {
       const { error } = await supabase.rpc('delete_import_excel_admin', {
         p_imported_file_id: fileId,
-        p_reason: reason,
-        p_user_role: userRole
+        p_reason: String(reason).trim(),
+        p_user_role: isAdmin(authProfile) ? 'admin' : (authProfile?.role || 'magazynier')
       })
       if (error) throw error
-      setMessage('Import został usunięty przez administratora. Zapisano ślad w audycie.')
+      setMessage('Import usunięty. Powiązane operacje, partie i FIFO zostały wyczyszczone.')
       setImportPreview([])
+      setRows([])
+      setFileName('')
       await loadImports()
       await loadFifoData()
       await loadHaccpDocs()
+      await loadK03TraceData()
+      await loadPzManagementData()
     } catch (err) {
-      setMessage(`Błąd usuwania importu: ${err.message}`)
+      const msg = String(err?.message || err)
+      if (/permission denied|42501|function.*does not exist/i.test(msg)) {
+        setMessage(`Błąd usuwania importu: ${msg}. Uruchom w Supabase SQL: 2026-v37-fix-delete-import.sql`)
+      } else {
+        setMessage(`Błąd usuwania importu: ${msg}`)
+      }
+    } finally {
+      setImportDeleting(false)
     }
   }
 
@@ -6657,7 +6670,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
           <td>{f.rows_count || f.row_count || '-'}</td>
           <td><span className="pill">{f.status || 'wczytany'}</span></td>
-          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> Usuń</button>}</td>
+          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
         </tr>)}</tbody>
       </table></div>}
       {importPreview.length > 0 && <><h3>Podgląd pozycji z importu</h3><div className="table-wrap small"><table>
