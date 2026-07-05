@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.5'
+export const K03_ENGINE_VERSION = '3.6'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -34,21 +34,37 @@ export function inferProductCode(productName, product) {
 }
 
 export function formatK03PzNo(row) {
-  const raw = String(row?.pz_no || row?.source_lot_no || '').trim()
+  const raw = String(row?.pz_no_display ?? row?.pz_no ?? row?.source_lot_no ?? '').trim()
   if (!raw) return ''
   if (row?.isShortage) return raw
-  const match = raw.match(/\b(PZ[\s./-]?\d[\d./-]*|F[\s./-]?V[\s./-]?\d[\d./-]*)\b/i)
-  if (match) return match[1].replace(/\s+/g, '')
+
+  let text = raw.replace(/agro[-\s]*mar[^/]*/gi, '').replace(/^\s*\/\s*/, '').trim()
+
+  const pzIndex = text.search(/\bPZ[\s./-]?\d/i)
+  if (pzIndex >= 0) {
+    text = text.slice(pzIndex).trim()
+    text = text.replace(/\s+-\s+.+$/, '').trim()
+    return text
+      .replace(/^PZ\s+/i, 'PZ')
+      .replace(/\s*\/\s*/g, '/')
+      .replace(/\s+/g, '')
+  }
+
+  const fvIndex = text.search(/\bF[\s./-]?V[\s./-]?\d/i)
+  if (fvIndex >= 0) {
+    return text.slice(fvIndex).replace(/\s+-\s+.+$/, '').trim().replace(/\s*\/\s*/g, '/').replace(/\s+/g, '')
+  }
+
   if (isAgromarName(raw)) return ''
-  const cleaned = raw.replace(/agro[-\s]*mar[^/]*/gi, '').trim()
-  if (/^[a-z]\d+\/\d{3}\/\d{4}$/i.test(cleaned)) return ''
-  return cleaned
+  if (/^[a-z]\d+\/\d{3}\/\d{4}$/i.test(text)) return ''
+  return text
 }
 
-/** W kolumnie „Dostawca” pokazujemy wyłącznie numer PZ (bez nazwy AGRO-MAR). */
+/** W kolumnie „Dostawca” – nazwa kontrahenta; gdy brak, numer PZ. */
 export function formatK03Dostawca(row) {
-  if (row?.isShortage) return ''
-  return formatK03PzNo(row)
+  if (row?.isShortage) return row?.supplier || ''
+  const supplier = formatK03Receiver(row?.supplier || '')
+  return supplier || formatK03PzNo(row)
 }
 
 export function formatK03Receiver(value) {
@@ -614,17 +630,66 @@ export async function loadK03Forms(client) {
   return { forms, diag, message }
 }
 
-export function mergeK03Overrides(forms, overrides = {}) {
-  return (forms || []).map(doc => {
-    const ov = overrides[doc.id] || {}
-    const signed = ov.signed_by_operator || doc.signed_by_operator || ''
-    const saleRows = (doc.data?.saleRows || []).map(r => ({ ...r, signed_by: signed }))
-    return {
-      ...doc,
-      signed_by_operator: signed,
-      data: { ...doc.data, saleRows }
+export function applyRawRowPatches(rawRows, patches) {
+  if (!patches || typeof patches !== 'object') return rawRows || []
+  return (rawRows || []).map((row, i) => {
+    const patch = patches[i] ?? patches[String(i)]
+    if (!patch) return row
+    const next = { ...row }
+    if (patch.pz_no != null) {
+      next.pz_no = patch.pz_no
+      next.pz_no_display = patch.pz_no
     }
+    if (patch.pz_date != null) next.pz_date = patch.pz_date
+    if (patch.supplier != null) next.supplier = patch.supplier
+    return next
   })
+}
+
+export function applyK03DocEdits(doc, edits = {}) {
+  if (!doc || !edits || !Object.keys(edits).length) return doc
+
+  const wzDate = edits.wz_date ?? edits.document_date ?? doc.document_date
+  const lotNo = edits.lot_no ?? doc.lot_no
+  const signed = edits.signed_by_operator ?? doc.signed_by_operator ?? ''
+  const rawRows = Array.isArray(edits.rawRows)
+    ? edits.rawRows
+    : applyRawRowPatches(doc.data?.rawRows, edits.rawRowPatches)
+
+  const saleRows = (doc.data?.saleRows || []).map(r => ({
+    ...r,
+    wz_date: wzDate,
+    signed_by: signed
+  }))
+
+  return {
+    ...doc,
+    lot_no: lotNo,
+    document_date: wzDate,
+    signed_by_operator: signed,
+    data: {
+      ...doc.data,
+      wz_date: wzDate,
+      rawRows,
+      saleRows
+    }
+  }
+}
+
+export function k03EditsFromSnapshot(snap) {
+  if (!snap) return {}
+  const stored = snap.data?.k03_edits || {}
+  return {
+    lot_no: stored.lot_no ?? snap.lot_no,
+    wz_date: stored.wz_date ?? snap.data?.wz_date ?? snap.document_date,
+    signed_by_operator: snap.signed_by_operator,
+    rawRowPatches: stored.rawRowPatches,
+    rawRows: stored.rawRows
+  }
+}
+
+export function mergeK03Overrides(forms, overrides = {}) {
+  return (forms || []).map(doc => applyK03DocEdits(doc, overrides[doc.id] || {}))
 }
 
 export async function loadK03Snapshots(client) {
@@ -653,13 +718,16 @@ export function mergeK03Snapshots(forms, snapshots = []) {
     if (!snap) return form
     const signed = snap.signed_by_operator || form.signed_by_operator || ''
     const frozen = snap.data?.frozen === true
+    const edits = k03EditsFromSnapshot(snap)
+
     if (frozen && Array.isArray(snap.data?.rawRows)) {
-      return {
+      const frozenDoc = {
         ...form,
         haccp_doc_id: snap.id,
         frozen: true,
         frozen_at: snap.data?.frozen_at || snap.updated_at,
         lot_no: snap.lot_no || form.lot_no,
+        document_date: snap.document_date || form.document_date,
         signed_by_operator: signed,
         status: snap.status || form.status,
         data: {
@@ -672,16 +740,20 @@ export function mergeK03Snapshots(forms, snapshots = []) {
           shortage: snap.data.shortage ?? form.data?.shortage
         }
       }
+      return applyK03DocEdits(frozenDoc, edits)
     }
-    return {
+
+    const openDoc = {
       ...form,
       haccp_doc_id: snap.id,
       signed_by_operator: signed,
       data: {
         ...form.data,
+        ...snap.data,
         saleRows: (form.data?.saleRows || []).map(r => ({ ...r, signed_by: signed }))
       }
     }
+    return applyK03DocEdits(openDoc, edits)
   })
 }
 
@@ -702,6 +774,11 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
       ...(doc.data || {}),
       k03_key: doc.id,
       form_id: doc.id,
+      k03_edits: doc.data?.k03_edits || {
+        lot_no: doc.lot_no,
+        wz_date: doc.data?.wz_date || doc.document_date,
+        rawRowPatches: doc.data?.k03_edits?.rawRowPatches || null
+      },
       frozen: unfreeze ? false : (freeze || (wasFrozen && !unfreeze)),
       frozen_at: freeze ? new Date().toISOString() : (unfreeze ? null : (doc.data?.frozen_at || null)),
       rawRows: doc.data?.rawRows || [],
@@ -727,7 +804,10 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
     if (existing.data?.frozen === true && !freeze && !unfreeze) {
       payload.data.frozen = true
       payload.data.frozen_at = existing.data?.frozen_at
-      payload.data.rawRows = existing.data?.rawRows || payload.data.rawRows
+      const manualEdits = payload.data?.k03_edits?.rawRowPatches || payload.data?.k03_edits?.lot_no || payload.data?.k03_edits?.wz_date
+      if (!manualEdits) {
+        payload.data.rawRows = existing.data?.rawRows || payload.data.rawRows
+      }
     }
     const { error } = await client.from('haccp_documents').update(payload).eq('id', existing.id)
     if (error) throw error

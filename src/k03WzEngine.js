@@ -7,6 +7,7 @@ import {
   mergeK03Snapshots,
   buildK03FormDoc,
   saveK03Snapshot,
+  applyK03DocEdits,
   inferProductCode,
   productGroupForName,
   K03_ENGINE_VERSION
@@ -50,6 +51,9 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
     fifo_cutoff_date: cutoffDate
   }
 
+  const existingEdits = line.k03Form?.data?.k03_edits || {}
+  const preservedLotNo = existingEdits.lot_no ?? line.k03Form?.lot_no ?? workflow.lot_no ?? ''
+
   let doc = buildK03FormDoc(
     {
       key: line.key,
@@ -63,7 +67,7 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
     productMap,
     new Map(),
     'baza',
-    { fifoCutoffDate: cutoffDate, workflow, lotNo: line.k03Form?.lot_no || workflow.lot_no || '' }
+    { fifoCutoffDate: cutoffDate, workflow, lotNo: preservedLotNo }
   )
 
   const saleQty = Number(line.qty || 0)
@@ -71,9 +75,9 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
   const shortage = Number(fifoResult.shortage || 0)
   const mismatch = shortage > 0.0005 || Math.abs(rawTotal - saleQty) >= 0.001
 
-  doc = {
+  doc = applyK03DocEdits({
     ...doc,
-    lot_no: line.k03Form?.lot_no || workflow.lot_no || doc.lot_no,
+    lot_no: preservedLotNo || doc.lot_no,
     signed_by_operator: line.k03Form?.signed_by_operator || '',
     status: mismatch ? 'N' : 'P',
     data: {
@@ -81,9 +85,14 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
       shortage,
       rawTotal,
       quantitiesMatch: !mismatch,
-      k03_workflow: workflow
+      k03_workflow: workflow,
+      k03_edits: existingEdits
     }
-  }
+  }, {
+    lot_no: existingEdits.lot_no,
+    wz_date: existingEdits.wz_date,
+    rawRowPatches: existingEdits.rawRowPatches
+  })
 
   const canAutoFreeze = isK03CompleteAndValid(doc)
   await saveK03Snapshot(client, doc, { freeze: canAutoFreeze, userRole: changedBy })

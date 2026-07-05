@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
@@ -922,27 +922,57 @@ function App() {
   }, [wzQueueLines, k03BulkMonth])
 
   function setK03GroupEmployee(doc, employeeName) {
+    patchK03Document(doc, { signed_by_operator: employeeName })
+  }
+
+  function patchK03Document(doc, patch) {
     if (!doc?.id) return
-    setK03Overrides(prev => ({ ...prev, [doc.id]: { ...(prev[doc.id] || {}), signed_by_operator: employeeName } }))
+    const current = k03Overrides[doc.id] || {}
+    const rawRowPatches = patch.rawRowPatches
+      ? { ...(current.rawRowPatches || {}), ...patch.rawRowPatches }
+      : current.rawRowPatches
+    const mergedOverride = {
+      ...current,
+      ...patch,
+      ...(rawRowPatches ? { rawRowPatches } : {})
+    }
+    setK03Overrides(prev => ({ ...prev, [doc.id]: mergedOverride }))
+
+    const mergedDoc = applyK03DocEdits(doc, mergedOverride)
+    const toSave = {
+      ...mergedDoc,
+      data: {
+        ...mergedDoc.data,
+        k03_edits: {
+          lot_no: mergedDoc.lot_no,
+          wz_date: mergedDoc.data?.wz_date || mergedDoc.document_date,
+          rawRowPatches: mergedOverride.rawRowPatches || null
+        }
+      }
+    }
+
     setSelectedHaccpDoc(prev => {
       if (!prev?.groupPreview) return prev
       const group = prev.group
       if (!group?.docs?.some(d => d.id === doc.id)) return prev
-      return { ...prev, group: { ...group, docs: group.docs.map(d => d.id === doc.id ? { ...d, signed_by_operator: employeeName, data: { ...(d.data || {}), saleRows: (d.data?.saleRows || []).map(r => ({ ...r, signed_by: employeeName })) } } : d) } }
-    })
-    const nextDoc = {
-      ...doc,
-      signed_by_operator: employeeName,
-      data: {
-        ...(doc.data || {}),
-        saleRows: (doc.data?.saleRows || []).map(r => ({ ...r, signed_by: employeeName }))
+      return {
+        ...prev,
+        group: {
+          ...group,
+          docs: group.docs.map(d => d.id === doc.id ? toSave : d)
+        }
       }
-    }
+    })
+
     if (supabase) {
-      saveK03Snapshot(supabase, nextDoc, { freeze: doc.frozen === true, userRole: userRole }).catch(err => {
-        console.warn('K03 signature save', err)
+      saveK03Snapshot(supabase, toSave, { freeze: doc.frozen === true, userRole: userRole }).catch(err => {
+        console.warn('K03 save', err)
       })
     }
+  }
+
+  function patchK03RawRow(doc, rowIndex, field, value) {
+    patchK03Document(doc, { rawRowPatches: { [rowIndex]: { [field]: value } } })
   }
 
   async function unfreezeK03Document(doc) {
@@ -3468,15 +3498,33 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg.`}</span>
+          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg. Numer partii, datę WZ i nr PZ możesz poprawić ręcznie – zapis następuje po wyjściu z pola.`}</span>
         </div>
         <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {paper.year}<br/><b>Miesiąc:</b> {paper.month}<br/><b>Strona:</b></td></tr></tbody></table>
-        <table className="k03-fields"><tbody><tr><td><b>Nazwa produktu:</b> {paper.productName}</td><td><b>Data sprzedaży (WZ):</b> {paper.wzDate}</td></tr><tr><td><b>Numer WZ:</b> {paper.wzNo}</td><td><b>Ilość WZ (kg):</b> {paper.saleTotal.toLocaleString('pl-PL')}</td></tr><tr><td><b>Nadany numer partii wyrobu gotowego:</b> {paper.lotNo || '-'}</td><td><b>Odbiorca:</b> {paper.receiver || '-'}</td></tr></tbody></table>
+        <table className="k03-fields"><tbody>
+          <tr><td><b>Nazwa produktu:</b> {paper.productName}</td><td><b>Data sprzedaży (WZ):</b>
+            <input className="cell-input no-print" type="date" defaultValue={paper.wzDate} key={`k03-wz-date-${doc.id}-${paper.wzDate}`} onBlur={e => { if (e.target.value && e.target.value !== paper.wzDate) patchK03Document(doc, { wz_date: e.target.value, document_date: e.target.value }) }} />
+            <span className="print-only">{paper.wzDate}</span>
+          </td></tr>
+          <tr><td><b>Numer WZ:</b> {paper.wzNo}</td><td><b>Ilość WZ (kg):</b> {paper.saleTotal.toLocaleString('pl-PL')}</td></tr>
+          <tr><td><b>Nadany numer partii wyrobu gotowego:</b>
+            <input className="cell-input no-print" type="text" defaultValue={paper.lotNo || ''} key={`k03-lot-${doc.id}-${paper.lotNo}`} placeholder="np. Mp/001/2024" onBlur={e => { if (e.target.value !== (paper.lotNo || '')) patchK03Document(doc, { lot_no: e.target.value.trim() }) }} />
+            <span className="print-only">{paper.lotNo || '-'}</span>
+          </td><td><b>Odbiorca:</b> {paper.receiver || '-'}</td></tr>
+        </tbody></table>
         <table className="k03-table"><colgroup><col className="col-lp"/><col className="col-pz"/><col className="col-date"/><col className="col-dost"/><col className="col-qty"/><col className="col-lp"/><col className="col-wz"/><col className="col-date"/><col className="col-odb"/><col className="col-qty"/><col className="col-sign"/></colgroup><thead><tr><th colSpan="5">Dane dotyczące dostaw surowców składających się na partię (PZ)</th><th className="right-start" colSpan="6">Dane dotyczące sprzedaży (WZ)</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th className="right-start">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>
           {paper.rows.map((r, i) => {
             const shortageRow = rawRows[i]?.isShortage
+            const rawPz = rawRows[i]?.pz_no_display ?? rawRows[i]?.pz_no ?? ''
             return <tr key={`k03-${i}`} className={shortageRow ? 'k03-shortage-row' : ''}>
-              <td>{r.lp}</td><td className="cell-wrap">{r.pzNo}</td><td>{r.pzDate}</td><td className="cell-wrap">{r.dostawca}</td><td>{r.qty !== '' ? Number(r.qty).toLocaleString('pl-PL') : ''}</td>
+              <td>{r.lp}</td>
+              <td className="cell-wrap">
+                {shortageRow ? r.pzNo : <>
+                  <input className="cell-input no-print" type="text" defaultValue={rawPz} key={`k03-pz-${doc.id}-${i}-${rawPz}`} onBlur={e => { if (e.target.value !== rawPz) patchK03RawRow(doc, i, 'pz_no', e.target.value.trim()) }} />
+                  <span className="print-only">{r.pzNo}</span>
+                </>}
+              </td>
+              <td>{r.pzDate}</td><td className="cell-wrap">{r.dostawca}</td><td>{r.qty !== '' ? Number(r.qty).toLocaleString('pl-PL') : ''}</td>
               {r.lp === 1
                 ? <><td className="right-start">1</td><td className="cell-wrap">{r.wzNo}</td><td>{r.wzDate}</td><td className="cell-wrap">{r.wzReceiver}</td><td>{Number(r.wzQty).toLocaleString('pl-PL')}</td><td className="cell-wrap">{r.signed}</td></>
                 : <><td className="right-start">{r.wzLp}</td><td></td><td></td><td></td><td></td><td></td></>}
@@ -7380,7 +7428,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                       <button className="mini" onClick={() => openK03WzModal(line, 'przerob')}>Przerób</button>
                       <button className="mini secondary" onClick={() => openK03WzModal(line, 'bez_przerobu')}>Bez przerobu</button>
                     </>}
-                    {line.k03Form && <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [line.k03Form] } })}><Eye size={14}/></button>}
+                    {line.k03Form && (() => {
+                      const k03Doc = syntheticK03Docs.find(d => d.id === line.formId) || line.k03Form
+                      return <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [k03Doc] } })}><Eye size={14}/></button>
+                    })()}
                     {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && isAdmin(authProfile) && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                   </td>
                 </tr>
