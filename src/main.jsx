@@ -4825,6 +4825,7 @@ function App() {
         {isAdmin(authProfile) && liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {isAdmin(authProfile) && String(liveGroup.type || '').startsWith('K') && <button className="secondary danger" onClick={() => deleteKartotekaGroup(liveGroup)} disabled={haccpBusy}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
           if (!supabase || !ensureCanDelete() || !confirmDelete(`Kartotekę ${liveGroup.type} za ${liveGroup.period}.`)) return
           await auditDeleteHaccpDocuments(supabase, liveGroup.docs || [], getAuditActor(), `${liveGroup.type} ${liveGroup.period}`)
@@ -4923,6 +4924,48 @@ function App() {
 
   function getAuditActor() {
     return auditActor(authProfile, authSession)
+  }
+
+  function isPersistedHaccpDoc(doc) {
+    if (!doc?.id || doc.synthetic) return false
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(doc.id))
+  }
+
+  function kartotekaGroupLabel(group) {
+    if (!group) return ''
+    if (group.type === 'K03') {
+      const d = group.docs?.[0]
+      return `WZ ${d?.document_no || ''} · ${d?.product_name || group.product || ''}`.trim()
+    }
+    const parts = [group.period, group.product, group.chamber].filter(Boolean)
+    return parts.join(' · ')
+  }
+
+  async function deleteKartotekaGroup(group) {
+    if (!supabase || !group?.docs?.length) return
+    if (!ensureCanDelete()) return
+    const deletable = group.docs.filter(isPersistedHaccpDoc)
+    if (!deletable.length) {
+      setMessage(`${group.type}: ta kartoteka jest generowana automatycznie z magazynu (partie/FIFO). Usuń import Excel lub partie w Magazynie – wpisy znikną same.`)
+      return
+    }
+    const label = kartotekaGroupLabel(group)
+    const fifoNote = group.type === 'K03'
+      ? '\n\nFIFO i rozliczenia partii NIE zostaną zmienione – znika tylko dokumentacja K03. WZ wróci do kolejki do ponownego utworzenia K03.'
+      : ''
+    if (!confirmDelete(`Całą kartotekę ${group.type}${label ? `: ${label}` : ''} (${deletable.length} wpisów).\n\nWpis trafi do historii – administrator może przywrócić.${fifoNote}`)) return
+    setHaccpBusy(true)
+    try {
+      await auditDeleteHaccpDocuments(supabase, deletable, getAuditActor(), `${group.type} ${label || group.period || ''}`.trim())
+      setHaccpDocs(prev => prev.filter(d => !deletable.some(x => x.id === d.id)))
+      if (group.type === 'K03') await loadK03TraceData()
+      setSelectedHaccpDoc(null)
+      setMessage(`${group.type}: usunięto kartotekę (${deletable.length} wpisów) – zapis w Historii.`)
+    } catch (err) {
+      setMessage(`${group.type}: ${err.message}`)
+    } finally {
+      setHaccpBusy(false)
+    }
   }
 
   function ensureCanDelete() {
@@ -7072,6 +7115,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                     <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })} title="Otwórz / edytuj"><Eye size={14}/></button>
                     <button className="mini secondary" onClick={() => printHaccpGroup(g)} title="Druk"><Printer size={14}/></button>
                     <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)} title="Excel">XLS</button>
+                    {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy} title="Usuń kartotekę (Historia)"><Trash2 size={14}/></button>}
                   </td>
                 </tr>
               }
@@ -7084,6 +7128,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                   <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                   <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                   <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                  {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy} title="Usuń kartotekę (Historia)"><Trash2 size={14}/> Usuń</button>}
                 </td>
               </tr>
             })}</tbody>
