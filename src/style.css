@@ -507,6 +507,31 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .r04-table .cell-input { width: 100%; min-width: 80px; font-size: 10px; }
 .r04-legend { font-size: 10px; margin-top: 8px; text-align: left; }
 .r04-sheet { page-break-inside: avoid; }
+
+.r09-paper { overflow-x: auto; }
+.r09-range-panel { margin-bottom: 12px; }
+.r09-tables-row { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; margin-bottom: 24px; }
+.r09-data-table { border-collapse: collapse; font-size: 11px; }
+.r09-data-table th, .r09-data-table td { border: 1px solid #222; padding: 5px 8px; text-align: center; }
+.r09-data-table th { background: #fafafa; font-weight: 700; }
+.r09-chart-block { margin: 28px 0 36px; page-break-inside: avoid; }
+.r09-chart-title { font-size: 13px; font-weight: 700; text-align: center; margin: 0 0 14px; line-height: 1.35; max-width: 920px; margin-left: auto; margin-right: auto; }
+.r09-chart-area { position: relative; padding-left: 32px; max-width: 100%; overflow-x: auto; }
+.r09-y-title { position: absolute; left: 0; top: 42%; transform: rotate(-90deg); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.r09-chart-inner { display: flex; gap: 8px; min-height: 260px; border-left: 1px solid #333; border-bottom: 1px solid #333; padding: 8px 6px 0; }
+.r09-y-axis { display: flex; flex-direction: column; justify-content: space-between; font-size: 10px; width: 28px; height: 220px; flex-shrink: 0; }
+.r09-y-tick span { display: block; text-align: right; width: 100%; }
+.r09-plot { display: flex; align-items: flex-end; gap: 4px; flex: 1; min-height: 220px; min-width: 480px; padding-bottom: 2px; }
+.r09-bar-group { display: flex; flex-direction: column; align-items: center; flex: 1; min-width: 22px; max-width: 52px; }
+.r09-bars { display: flex; align-items: flex-end; gap: 2px; height: 200px; width: 100%; justify-content: center; }
+.r09-bar { width: 8px; min-height: 1px; border: 1px solid rgba(0,0,0,.12); transition: height .15s; }
+.r09-bar-empty { width: 8px; height: 1px; background: #eee; }
+.r09-x-label { font-size: 9px; margin-top: 4px; text-align: center; }
+.r09-x-title { text-align: center; font-weight: 700; font-size: 11px; margin-top: 10px; }
+.r09-legend { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 12px; font-size: 11px; }
+.r09-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.r09-legend-item i { width: 14px; height: 14px; display: inline-block; border: 1px solid #666; flex-shrink: 0; }
+.r09-chart-footer { text-align: left; font-size: 11px; margin-top: 12px; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }

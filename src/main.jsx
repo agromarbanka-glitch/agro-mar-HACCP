@@ -39,6 +39,7 @@ import {
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows } from './rMonthlyEngine'
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
+import { R09TrendSection } from './R09TrendUI'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
@@ -4282,7 +4283,9 @@ function App() {
               <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
-          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : isRMonthlyReport(code) ? (
+          {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : code === 'R09' ? (
+            <R09TrendSection haccpDocs={haccpDocs} escapeHtml={escapeHtml} printHtmlInIframe={printHtmlInIframe} />
+          ) : isRMonthlyReport(code) ? (
             <RMonthlyReportSection
               code={code}
               supabase={supabase}

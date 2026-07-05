@@ -139,18 +139,6 @@ export const R_MONTHLY_CONFIGS = {
     createHint: 'Cały miesiąc – waga i termometry wg wzoru; domyślnie P we wszystkich działaniach (dni robocze).',
     signLabel: 'Podpis'
   },
-  R09: {
-    code: 'R09',
-    layout: 'quarter-trend',
-    periodMode: 'quarter',
-    header: {
-      title: 'Raport R09 - Trend aktywności szkodników',
-      version: 'I/2024'
-    },
-    monthRows: 3,
-    createHint: 'Kartoteka kwartalna (3 miesiące) – trend na podstawie R04.',
-    signLabel: 'Data i podpis'
-  },
   R11: {
     code: 'R11',
     layout: 'register-rows',
