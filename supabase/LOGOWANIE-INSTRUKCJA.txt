@@ -29,6 +29,10 @@ KROK 1 – Tabele w bazie (SQL)
 7. Kliknij RUN (lub Ctrl+Enter)
 8. Na dole powinno być: Success. No rows returned
 
+Jeśli błąd: column "auth_user_id" does not exist
+  → Uruchom zamiast tego plik: LOGOWANIE-KROK-1-NAPRAW.sql (całość → RUN)
+  → Potem kontynuuj od KROKU 2
+
 --------------------------------------------------------------------------------
 KROK 2 – Konto administratora (hasło do logowania)
 --------------------------------------------------------------------------------
@@ -85,5 +89,8 @@ PROBLEMY?
 
 Biały ekran / brak połączenia
   → Sprawdź VITE_SUPABASE_URL i VITE_SUPABASE_ANON_KEY na Vercel.
+
+column "auth_user_id" does not exist (SQL krok 1)
+  → Uruchom LOGOWANIE-KROK-1-NAPRAW.sql w SQL Editor.
 
 ================================================================================

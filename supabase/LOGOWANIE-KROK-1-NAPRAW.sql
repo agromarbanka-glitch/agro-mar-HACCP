@@ -1,12 +1,11 @@
 -- =============================================================================
--- AGRO-MAR HACCP – KROK 1: Tabele logowania i historii
--- Uruchom RAZ w Supabase → SQL Editor → New query → wklej → Run
--- Projekt: AGRO-MAR-HACCP (NIE stara baza opakowań!)
+-- NAPRAWA błędu: column "auth_user_id" does not exist
+-- Uruchom TEN plik w Supabase SQL Editor → Run (całość)
+-- Bezpieczne PRZED dodaniem kont admina (tabele puste lub uszkodzone)
 -- =============================================================================
 
 BEGIN;
 
--- Jeśli wcześniejsza próba utworzyła złą wersję tabel – usuń i utwórz od nowa
 DROP TABLE IF EXISTS public.app_audit_log CASCADE;
 DROP TABLE IF EXISTS public.app_users CASCADE;
 
@@ -21,8 +20,8 @@ CREATE TABLE public.app_users (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_app_users_auth ON public.app_users(auth_user_id);
-CREATE INDEX IF NOT EXISTS idx_app_users_email ON public.app_users(email);
+CREATE INDEX idx_app_users_auth ON public.app_users(auth_user_id);
+CREATE INDEX idx_app_users_email ON public.app_users(email);
 
 CREATE TABLE public.app_audit_log (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -40,9 +39,9 @@ CREATE TABLE public.app_audit_log (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_app_audit_created ON public.app_audit_log(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_app_audit_entity ON public.app_audit_log(entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS idx_app_audit_action ON public.app_audit_log(action);
+CREATE INDEX idx_app_audit_created ON public.app_audit_log(created_at DESC);
+CREATE INDEX idx_app_audit_entity ON public.app_audit_log(entity_type, entity_id);
+CREATE INDEX idx_app_audit_action ON public.app_audit_log(action);
 
 ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_audit_log ENABLE ROW LEVEL SECURITY;
@@ -87,5 +86,4 @@ CREATE POLICY "app_audit_anon_all" ON public.app_audit_log FOR ALL TO anon USING
 
 COMMIT;
 
--- Sprawdzenie (powinno zwrócić 0 wierszy – to normalne przed krokiem 3):
--- SELECT * FROM public.app_users;
+-- Po sukcesie: kontynuuj KROK 2 (Authentication → Add user) i KROK 3 (LOGOWANIE-KROK-3-admin.sql)
