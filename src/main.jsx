@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot } from './k03Engine'
@@ -40,6 +40,13 @@ import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRo
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import { R09TrendSection } from './R09TrendUI'
+import { LoginScreen } from './LoginScreen'
+import { HistorySection } from './HistorySection'
+import { UsersAdminSection } from './UsersAdminSection'
+import {
+  getCurrentSession, loadAppProfile, signOut, isAdmin, isMagazynier, canDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
+} from './authEngine'
+import { auditActor, auditDeleteHaccpDocument, auditDeleteHaccpDocuments, auditDeleteGeneric, auditUpdateHaccpDocument, logAudit } from './auditEngine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
 import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
@@ -254,7 +261,11 @@ function App() {
   const [fifoRows, setFifoRows] = useState([])
   const [loadingStock, setLoadingStock] = useState(false)
   const [chamberRows, setChamberRows] = useState([])
-  const [userRole, setUserRole] = useState('admin')
+  const skipAuth = import.meta.env.VITE_SKIP_AUTH === 'true'
+  const [authProfile, setAuthProfile] = useState(skipAuth ? { role: 'admin', display_name: 'Tryb dev', email: 'dev@local', is_active: true } : null)
+  const [authSession, setAuthSession] = useState(null)
+  const [authReady, setAuthReady] = useState(skipAuth)
+  const userRole = authProfile?.role || 'magazynier'
   const [productionInputLotId, setProductionInputLotId] = useState('')
   const [productionInputQty, setProductionInputQty] = useState('')
   const [productionOutputName, setProductionOutputName] = useState('Malina pulpa')
@@ -267,7 +278,7 @@ function App() {
   const [moveLotId, setMoveLotId] = useState('')
   const [targetChamberId, setTargetChamberId] = useState('')
   const [moveReason, setMoveReason] = useState('')
-  const [activeTab, setActiveTab] = useState('dashboard')
+  const [activeTab, setActiveTab] = useState(skipAuth ? 'dashboard' : 'kartoteki')
   const [importRows, setImportRows] = useState([])
   const [importPreview, setImportPreview] = useState([])
   const [haccpDocs, setHaccpDocs] = useState([])
@@ -1337,15 +1348,13 @@ function App() {
 
   async function deleteR13Month(group) {
     if (!supabase || !group?.docs?.length) return
-    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R13 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów (dni). Tej operacji nie można cofnąć.`)) return
+    if (!ensureCanDelete()) return
+    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R13 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów. Wpis trafi do historii – administrator może przywrócić.`)) return
     try {
-      for (const doc of group.docs) {
-        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-        if (error) throw error
-      }
+      await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R13 ${group.period}`)
       await loadHaccpDocs()
       setSelectedHaccpDoc(null)
-      setMessage(`R13: usunięto kartotekę za ${group.period}.`)
+      setMessage(`R13: usunięto kartotekę za ${group.period} (zapis w historii).`)
     } catch (err) {
       setMessage(`R13: ${err.message}`)
     }
@@ -1531,15 +1540,13 @@ function App() {
 
   async function deleteR01Month(group) {
     if (!supabase || !group?.docs?.length) return
-    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R01 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów (dni). Tej operacji nie można cofnąć.`)) return
+    if (!ensureCanDelete()) return
+    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R01 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów. Wpis trafi do historii.`)) return
     try {
-      for (const doc of group.docs) {
-        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-        if (error) throw error
-      }
+      await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R01 ${group.period}`)
       await loadHaccpDocs()
       setSelectedHaccpDoc(null)
-      setMessage(`R01: usunięto kartotekę za ${group.period}.`)
+      setMessage(`R01: usunięto kartotekę za ${group.period} (zapis w historii).`)
     } catch (err) {
       setMessage(`R01: ${err.message}`)
     }
@@ -1737,15 +1744,13 @@ function App() {
 
   async function deleteR02Month(group) {
     if (!supabase || !group?.docs?.length) return
-    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R02 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów (dni). Tej operacji nie można cofnąć.`)) return
+    if (!ensureCanDelete()) return
+    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R02 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów. Wpis trafi do historii.`)) return
     try {
-      for (const doc of group.docs) {
-        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-        if (error) throw error
-      }
+      await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R02 ${group.period}`)
       await loadHaccpDocs()
       setSelectedHaccpDoc(null)
-      setMessage(`R02: usunięto kartotekę za ${group.period}.`)
+      setMessage(`R02: usunięto kartotekę za ${group.period} (zapis w historii).`)
     } catch (err) {
       setMessage(`R02: ${err.message}`)
     }
@@ -2814,6 +2819,11 @@ function App() {
         loadHaccpDocs={loadHaccpDocs}
         setMessage={setMessage}
         defaultEmployee=""
+        allowDelete={isAdmin(authProfile)}
+        onAuditDelete={async (docs, reason) => {
+          if (!ensureCanDelete()) return
+          await auditDeleteHaccpDocuments(supabase, docs, getAuditActor(), reason)
+        }}
       />
     }
 
@@ -2841,7 +2851,7 @@ function App() {
             <div className="no-print row-actions" style={{ marginTop: '8px' }}>
               <button className="mini secondary" onClick={() => { editManualHaccpEntry(doc); setSelectedHaccpDoc(null) }}>Edytuj</button>
               <button className="mini secondary" onClick={() => printHaccpDocument(doc)}><Printer size={14}/> Druk</button>
-              {!doc.synthetic && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
+              {isAdmin(authProfile) && !doc.synthetic && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
             </div>
           </div>)}
         </div>
@@ -3374,13 +3384,13 @@ function App() {
 
   async function deleteManualHaccpEntry(doc) {
     if (!supabase || !doc?.id) return
+    if (!ensureCanDelete()) return
     if (!window.confirm(`Usunąć wpis ${doc.document_type}: ${doc.product_name || doc.lot_no || ''}?`)) return
     try {
-      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-      if (error) throw error
+      await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
       if (manualHaccpForm.id === doc.id) resetManualHaccpForm(doc.document_type)
       await loadHaccpDocs()
-      setMessage(`${doc.document_type}: usunięto wpis.`)
+      setMessage(`${doc.document_type}: usunięto wpis (zapis w historii).`)
     } catch (err) {
       setMessage(`Błąd usuwania: ${err.message}`)
     }
@@ -3526,7 +3536,7 @@ function App() {
             })}
             <td className="no-print row-actions">
               {!doc.synthetic && <button className="mini secondary" onClick={() => editManualHaccpEntry(doc)}>Edytuj</button>}
-              {!doc.lot_id && !doc.synthetic && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
+              {isAdmin(authProfile) && !doc.lot_id && !doc.synthetic && <button className="mini danger" onClick={() => deleteManualHaccpEntry(doc)}>Usuń</button>}
               {doc.synthetic && <span className="hint">auto</span>}
             </td>
           </tr>)}
@@ -3640,12 +3650,12 @@ function App() {
 
   async function deleteW03Row(doc) {
     if (!supabase || !doc?.id) return
+    if (!ensureCanDelete()) return
     if (!window.confirm(`Usunąć obiekt W03: ${doc.data?.object_name || doc.product_name || ''}?`)) return
     try {
-      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-      if (error) throw error
+      await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
       await loadHaccpDocs()
-      setMessage('W03: usunięto obiekt.')
+      setMessage('W03: usunięto obiekt (zapis w historii).')
     } catch (err) {
       setMessage(`W03: błąd usuwania – ${err.message}`)
     }
@@ -3863,13 +3873,13 @@ function App() {
 
   async function deleteW06Row(doc) {
     if (!supabase || !doc?.id) return
+    if (!ensureCanDelete()) return
     const label = doc.data?.company_name || doc.data?.supplier_name || ''
     if (!window.confirm(`Usunąć z W06: ${label}?`)) return
     try {
-      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-      if (error) throw error
+      await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
       await loadHaccpDocs()
-      setMessage('W06: usunięto wpis.')
+      setMessage('W06: usunięto wpis (zapis w historii).')
     } catch (err) {
       setMessage(`W06: błąd usuwania – ${err.message}`)
     }
@@ -3967,7 +3977,7 @@ function App() {
                   <span className="print-only">{d.item_name || doc.product_name || ''}</span>
                 </td>
                 <td>{d.source_doc_kind || ''}</td>
-                <td className="no-print row-actions"><button className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń</button></td>
+                <td className="no-print row-actions">{isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń</button>}</td>
               </tr>
             })}
           </tbody>
@@ -4040,7 +4050,7 @@ function App() {
                 <span className="print-only">{w03Freq(doc, key)}</span>
               </td>)}
               <td className="no-print row-actions">
-                <button className="mini danger" onClick={() => deleteW03Row(doc)}>Usuń</button>
+                {isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteW03Row(doc)}>Usuń</button>}
               </td>
             </tr>)}
           </tbody>
@@ -4135,7 +4145,7 @@ function App() {
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
-                <button className="mini danger" onClick={() => deleteR02Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>
+                {isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteR02Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>}
               </td>
             </tr>
           ))}</tbody>
@@ -4195,7 +4205,7 @@ function App() {
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
-                <button className="mini danger" onClick={() => deleteR01Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>
+                {isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteR01Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>}
               </td>
             </tr>
           ))}</tbody>
@@ -4257,7 +4267,7 @@ function App() {
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
-                <button className="mini danger" onClick={() => deleteR13Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>
+                {isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteR13Month(g)} title="Usuń całą kartotekę za ten miesiąc"><Trash2 size={14}/> Usuń</button>}
               </td>
             </tr>
           })}</tbody>
@@ -4297,6 +4307,11 @@ function App() {
               setSelectedHaccpDoc={setSelectedHaccpDoc}
               printHaccpGroup={printHaccpGroup}
               exportHaccpGroupExcel={exportHaccpGroupExcel}
+              allowDelete={isAdmin(authProfile)}
+              onAuditDelete={async (docs, reason) => {
+                if (!ensureCanDelete()) return
+                await auditDeleteHaccpDocuments(supabase, docs, getAuditActor(), reason)
+              }}
             />
           ) : <>
           {cfg && renderManualHaccpEntrySection()}
@@ -4718,15 +4733,15 @@ function App() {
           </>
           : <span className="pill">Roboczy – uzupełnij dane; prawidłowy K03 zamraża się automatycznie przy tworzeniu</span>)}
         <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button>
-        {liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
-        {liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
-        {liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
-        {isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
-          if (!supabase || !window.confirm(`Usunąć kartotekę ${liveGroup.type} za ${liveGroup.period}?`)) return
-          for (const d of liveGroup.docs || []) await supabase.from('haccp_documents').delete().eq('id', d.id)
+        {isAdmin(authProfile) && liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {isAdmin(authProfile) && liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {isAdmin(authProfile) && liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {isAdmin(authProfile) && isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
+          if (!supabase || !ensureCanDelete() || !window.confirm(`Usunąć kartotekę ${liveGroup.type} za ${liveGroup.period}?`)) return
+          await auditDeleteHaccpDocuments(supabase, liveGroup.docs || [], getAuditActor(), `${liveGroup.type} ${liveGroup.period}`)
           await loadHaccpDocs()
           setSelectedHaccpDoc(null)
-          setMessage(`${liveGroup.type}: usunięto kartotekę.`)
+          setMessage(`${liveGroup.type}: usunięto kartotekę (zapis w historii).`)
         }}><Trash2 size={16}/> Usuń kartotekę</button>}
         <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
@@ -4765,6 +4780,59 @@ function App() {
     const count = (haccpDocs || []).filter(d => d.document_type === 'W03').length
     if (count === 0) ensureW03Seed(false)
   }, [docsHubSection, docsWykazFilter, haccpDocs, supabase])
+
+  useEffect(() => {
+    if (skipAuth || !supabase) {
+      if (!skipAuth) setAuthReady(true)
+      return
+    }
+    let mounted = true
+    ;(async () => {
+      const { session, profile } = await getCurrentSession()
+      if (!mounted) return
+      setAuthSession(session)
+      setAuthProfile(profile)
+      setAuthReady(true)
+      if (profile && isMagazynier(profile)) setActiveTab('kartoteki')
+    })()
+    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      setAuthSession(session)
+      if (session?.user?.id) {
+        try {
+          const profile = await loadAppProfile(supabase, session.user.id)
+          setAuthProfile(profile)
+          if (profile && isMagazynier(profile)) setActiveTab(t => t === 'dashboard' ? 'kartoteki' : t)
+        } catch {
+          setAuthProfile(null)
+        }
+      } else {
+        setAuthProfile(null)
+      }
+    })
+    return () => {
+      mounted = false
+      sub?.subscription?.unsubscribe()
+    }
+  }, [])
+
+  function getAuditActor() {
+    return auditActor(authProfile, authSession)
+  }
+
+  function ensureCanDelete() {
+    if (!canDelete(authProfile)) {
+      setMessage('Tylko administrator może usuwać wpisy.')
+      return false
+    }
+    return true
+  }
+
+  async function handleLogout() {
+    await signOut()
+    setAuthProfile(null)
+    setAuthSession(null)
+    setMessage('Wylogowano.')
+  }
 
   useEffect(() => {
     if (activeTab === 'kartoteki' && docsFilter === 'K03') {
@@ -5900,24 +5968,36 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function deleteEmployee(employee) {
     if (!supabase || !employee) return
-    if (userRole !== 'admin') {
-      setMessage('Tylko administrator może usuwać pracowników.')
-      return
-    }
+    if (!ensureCanDelete()) return
     const ok = window.confirm(`Czy usunąć pracownika z listy podpisów: ${employee.full_name}?`)
     if (!ok) return
     try {
+      const before = { ...employee }
       const { error } = await supabase
         .from('haccp_employees')
         .update({ is_active: false })
         .eq('id', employee.id)
       if (error) throw error
+      await logAuditSoftDeleteEmployee(before)
       await loadEmployees()
       loadAuxMaterials()
       setMessage('Pracownik został ukryty z listy podpisów.')
     } catch (err) {
       setMessage(`Błąd usuwania pracownika: ${err.message}`)
     }
+  }
+
+  async function logAuditSoftDeleteEmployee(employee) {
+    await logAudit(supabase, {
+      entity_type: 'haccp_employee',
+      entity_id: employee.id,
+      action: 'delete',
+      summary: `Pracownik: ${employee.full_name}`,
+      before_data: employee,
+      changed_by: getAuditActor().changedBy,
+      changed_by_email: getAuditActor().changedByEmail,
+      can_restore: false
+    })
   }
 
   async function setDocumentEmployee(doc, employeeName) {
@@ -6115,14 +6195,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
-  const tabs = [
+  const allTabs = [
     ['dashboard', 'Start', LayoutDashboard],
     ['importy', 'Importy Excel', Upload],
     ['pz', 'PZ / FIFO', Database],
     ['magazyn', 'Magazyn', Warehouse],
     ['kartoteki', 'Dokumentacja HACCP', ClipboardList],
+    ['historia', 'Historia', History],
     ['ustawienia', 'Ustawienia', Settings]
   ]
+  const tabs = allTabs.filter(([key]) => canSeeTab(authProfile, key))
 
   async function saveToSupabase() {
     if (!supabase) {
@@ -6262,12 +6344,37 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  if (!authReady) {
+    return <div className="login-screen"><div className="login-card"><p>Ładowanie sesji…</p></div></div>
+  }
+
+  if (!authProfile && !skipAuth) {
+    return (
+      <LoginScreen
+        supabaseConfigured={isSupabaseConfigured}
+        onSuccess={({ session, profile }) => {
+          setAuthSession(session)
+          setAuthProfile(profile)
+          if (isMagazynier(profile)) setActiveTab('kartoteki')
+        }}
+      />
+    )
+  }
+
   return <div className="page">
     <header>
       <div>
         <p className="eyebrow">AGRO-MAR</p>
         <h1>HACCP / IFS / FIFO</h1>
         <p className="lead">Osobny system do importu operacji, numerów partii, FIFO i dokumentacji jakościowej.</p>
+        {authProfile && (
+          <p className="hint user-bar">
+            {authDisplayName(authProfile, authSession)} · {authProfile.role === 'admin' ? 'Administrator' : 'Magazynier'}
+            {!skipAuth && (
+              <button type="button" className="linkish" onClick={handleLogout} style={{ marginLeft: 12 }}><LogOut size={14} /> Wyloguj</button>
+            )}
+          </p>
+        )}
       </div>
       <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R13 {R13_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
     </header>
@@ -6456,12 +6563,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     <details className="card collapsible">
       <summary><div className="section-title"><Package/><div><h2>Przerób partii (magazyn)</h2><p>Fizyczne przekształcenie partii surowca w produkt gotowy. Decyzja papierowa K03/WZ jest w Dokumentacja → K03.</p></div></div></summary>
       <div className="form-grid">
-        <label>Rola użytkownika
-          <select value={userRole} onChange={e => setUserRole(e.target.value)}>
-            <option value="admin">Administrator</option>
-            <option value="magazynier">Magazynier</option>
-          </select>
-        </label>
         <label>Partia wejściowa
           <select value={productionInputLotId} onChange={e => setProductionInputLotId(e.target.value)}>
             <option value="">Wybierz partię z magazynu</option>
@@ -6551,7 +6652,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </header>
 
       <nav className="docs-hub-nav" ref={docsHubNavRef}>
-        {DOCS_HUB_SECTIONS.map(([key, label, desc]) => {
+        {DOCS_HUB_SECTIONS.filter(([key]) => canSeeDocsHubSection(authProfile, key)).map(([key, label, desc]) => {
           if (key === 'kartoteki') {
             return (
               <div
@@ -6892,7 +6993,26 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {renderK03WzModal()}
     </>}
 
+    {activeTab === 'historia' && isAdmin(authProfile) && (
+      <HistorySection
+        supabase={supabase}
+        authProfile={authProfile}
+        authSession={authSession}
+        setMessage={setMessage}
+        onRestored={() => { loadHaccpDocs(); loadEmployees() }}
+      />
+    )}
+
     {activeTab === 'ustawienia' && <>
+    {isAdmin(authProfile) && (
+      <UsersAdminSection
+        supabase={supabase}
+        authProfile={authProfile}
+        authSession={authSession}
+        setMessage={setMessage}
+        onLogout={handleLogout}
+      />
+    )}
     <section className="two">
       <div className="card"><h2>Produkty i kody partii</h2><div className="chips">{PRODUCTS.map(([n,c]) => <span key={c}>{n} <b>{c}/001/2026</b></span>)}</div></div>
       <div className="card"><h2>Zakładki dokumentów</h2>{DOCS.map(d => <div className="doc" key={d[0]}><b>{d[0]}</b><span>{d[1]}</span><small>{d[2]}</small></div>)}</div>
@@ -6904,7 +7024,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <div className="actions employee-actions"><button className="secondary" onClick={addEmployee}>Dodaj pracownika</button></div>
       </div>
       {employees.length === 0 && <p className="hint">Brak pracowników. Dodaj pierwszą osobę, żeby można było wybierać podpis w K01.</p>}
-      {employees.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Pracownik</th><th>Rola</th><th>Akcje</th></tr></thead><tbody>{employees.map(emp => <tr key={emp.id}><td><b>{emp.full_name}</b></td><td>{emp.role_name || 'przyjmujący'}</td><td><button className="mini danger" onClick={() => deleteEmployee(emp)}><Trash2 size={14}/> Usuń</button></td></tr>)}</tbody></table></div>}
+      {employees.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Pracownik</th><th>Rola</th>{isAdmin(authProfile) && <th>Akcje</th>}</tr></thead><tbody>{employees.map(emp => <tr key={emp.id}><td><b>{emp.full_name}</b></td><td>{emp.role_name || 'przyjmujący'}</td>{isAdmin(authProfile) && <td><button className="mini danger" onClick={() => deleteEmployee(emp)}><Trash2 size={14}/> Usuń</button></td>}</tr>)}</tbody></table></div>}
     </section>
     </>}
   </div>

@@ -533,6 +533,19 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .r09-legend-item i { width: 14px; height: 14px; display: inline-block; border: 1px solid #666; flex-shrink: 0; }
 .r11-paper .r11-table thead th { font-size: 10px; line-height: 1.25; }
 .r11-paper .r11-table { min-width: 900px; }
+
+.login-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; background: linear-gradient(160deg, #f4f7f4 0%, #e8efe8 100%); }
+.login-card { width: 100%; max-width: 420px; background: #fff; border: 1px solid #d8e0d8; border-radius: 12px; padding: 28px 32px; box-shadow: 0 8px 32px rgba(0,0,0,.08); display: flex; flex-direction: column; gap: 14px; }
+.login-brand { display: flex; gap: 14px; align-items: center; margin-bottom: 8px; }
+.login-brand h1 { margin: 0; font-size: 1.35rem; }
+.login-brand p { margin: 4px 0 0; color: #666; font-size: .9rem; }
+.login-foot { font-size: .8rem; margin-top: 8px; }
+.user-bar { margin-top: 6px; }
+button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); cursor: pointer; font: inherit; padding: 0; display: inline-flex; align-items: center; gap: 4px; }
+.audit-delete-row td { background: #fff5f5; }
+.audit-pill-delete { background: #fde8e8; color: #a33; }
+.audit-pill-update { background: #e8f0fd; color: #255; }
+.audit-pill-restore { background: #e8fde8; color: #363; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }

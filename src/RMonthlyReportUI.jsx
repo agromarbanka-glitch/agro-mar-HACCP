@@ -42,7 +42,8 @@ function defaultNewRow(cfg) {
 
 export function RMonthlyReportSection({
   code, supabase, employees, haccpDocs, hubManualGroups, loadHaccpDocs, setMessage,
-  setSelectedHaccpDoc, printHaccpGroup, exportHaccpGroupExcel
+  setSelectedHaccpDoc, printHaccpGroup, exportHaccpGroupExcel,
+  allowDelete = false, onAuditDelete
 }) {
   const cfg = getRMonthlyConfig(code)
   const [newMonth, setNewMonth] = useState(new Date().toISOString().slice(0, 7))
@@ -98,11 +99,15 @@ export function RMonthlyReportSection({
 
   async function deleteMonth(group) {
     if (!supabase || !group?.docs?.length) return
-    if (!window.confirm(`Usunąć całą kartotekę ${code} za ${group.period}? (${group.docs.length} wpisów)`)) return
+    if (!allowDelete) { setMessage('Tylko administrator może usuwać kartoteki.'); return }
+    if (!window.confirm(`Usunąć całą kartotekę ${code} za ${group.period}? (${group.docs.length} wpisów trafi do historii)`)) return
     try {
-      for (const doc of group.docs) {
-        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-        if (error) throw error
+      if (onAuditDelete) await onAuditDelete(group.docs, `${code} ${group.period}`)
+      else {
+        for (const doc of group.docs) {
+          const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+          if (error) throw error
+        }
       }
       await loadHaccpDocs()
       setSelectedHaccpDoc?.(null)
@@ -279,7 +284,7 @@ export function RMonthlyReportSection({
               <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
               <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
               <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
-              <button className="mini danger" onClick={() => deleteMonth(g)}><Trash2 size={14}/> Usuń</button>
+              {allowDelete && <button className="mini danger" onClick={() => deleteMonth(g)}><Trash2 size={14}/> Usuń</button>}
             </td>
           </tr>
         ))}</tbody>
@@ -308,7 +313,8 @@ async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage
 }
 
 export function RMonthlyReportPreview({
-  group, supabase, employees, haccpDocs, loadHaccpDocs, setMessage, defaultEmployee
+  group, supabase, employees, haccpDocs, loadHaccpDocs, setMessage, defaultEmployee,
+  allowDelete = false, onAuditDelete
 }) {
   const code = group.type
   const cfg = getRMonthlyConfig(code) || group.config
@@ -371,12 +377,20 @@ export function RMonthlyReportPreview({
 
   async function deleteMonth() {
     if (!supabase || !group?.docs?.length) return
+    if (!allowDelete) { setMessage('Tylko administrator może usuwać kartoteki.'); return }
     if (!window.confirm(`Usunąć kartotekę ${code} za ${group.period}?`)) return
-    for (const doc of group.docs) {
-      await supabase.from('haccp_documents').delete().eq('id', doc.id)
+    try {
+      if (onAuditDelete) await onAuditDelete(group.docs, `${code} ${group.period}`)
+      else {
+        for (const doc of group.docs) {
+          await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        }
+      }
+      await loadHaccpDocs()
+      setMessage(`${code}: usunięto.`)
+    } catch (err) {
+      setMessage(`${code}: ${err.message}`)
     }
-    await loadHaccpDocs()
-    setMessage(`${code}: usunięto.`)
   }
 
   async function addMissingDay(date) {
@@ -414,8 +428,10 @@ export function RMonthlyReportPreview({
 
   async function deleteControl(doc) {
     if (!supabase || !doc?.id) return
+    if (!allowDelete) { setMessage('Tylko administrator może usuwać.'); return }
     if (!window.confirm(`Usunąć kontrolę z dnia ${formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}?`)) return
-    await supabase.from('haccp_documents').delete().eq('id', doc.id)
+    if (onAuditDelete) await onAuditDelete([doc], `${code} kontrola`)
+    else await supabase.from('haccp_documents').delete().eq('id', doc.id)
     await loadHaccpDocs()
     setMessage(`${code}: usunięto kontrolę.`)
   }
@@ -475,7 +491,7 @@ export function RMonthlyReportPreview({
   const toolbar = (
     <div className="no-print employee-signature-row" style={{ marginBottom: 10 }}>
       <span className="hint">{cfg.createHint}</span>
-      <button className="secondary danger" onClick={deleteMonth}>Usuń kartotekę</button>
+      {allowDelete && <button className="secondary danger" onClick={deleteMonth}>Usuń kartotekę</button>}
     </div>
   )
 
@@ -623,7 +639,7 @@ export function RMonthlyReportPreview({
                   <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
                 </select>
               </label>
-              <button type="button" className="mini danger no-print" onClick={() => deleteControl(doc)}>Usuń kontrolę</button>
+              {allowDelete && <button type="button" className="mini danger no-print" onClick={() => deleteControl(doc)}>Usuń kontrolę</button>}
             </div>
             <div className="print-only r04-meta-print">
               <p><b>Nr bieżący dokumentu:</b> {doc.data?.document_no || '—'} &nbsp; <b>Data kontroli:</b> {formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}</p>
