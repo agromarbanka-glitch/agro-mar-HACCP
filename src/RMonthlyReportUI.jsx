@@ -22,6 +22,10 @@ import {
   findPreviousR04Control
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
+import {
+  buildR11CalendarRows, r11ColumnsFromDocs, r11MagnetsForDoc, r11UwagiForDoc,
+  r11MakeColumn, R11_HEADER
+} from './r11Engine'
 
 export { isRMonthlyReport, getRMonthlyConfig }
 
@@ -135,6 +139,15 @@ export function RMonthlyReportSection({
       addR04Station(newStationKind)
       return
     }
+    if (code === 'R11') {
+      const col = r11MakeColumn(newColumnLabel)
+      const next = [...columnDefs, col]
+      saveRMonthlyColumns(code, next)
+      setColumnDefs(next)
+      setNewColumnLabel('')
+      setMessage(`${code}: dodano kolumnę „${col.label}”.`)
+      return
+    }
     const col = rMonthlyMakeColumn(newColumnLabel, code.toLowerCase())
     const next = [...columnDefs, col]
     saveRMonthlyColumns(code, next)
@@ -161,7 +174,7 @@ export function RMonthlyReportSection({
     setMessage(`${code}: dodano ${col.label}.`)
   }
 
-  const colPanel = (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control') && cfg.storageKey ? (
+  const colPanel = (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey ? (
     <div className="r13-columns-panel">
       <b>{cfg.columnLabel || 'Stacje'}:</b>
       <div className="r13-columns-list">
@@ -310,6 +323,7 @@ export function RMonthlyReportPreview({
   })
   const [previewChamberKind, setPreviewChamberKind] = useState('raw')
   const [previewStationKind, setPreviewStationKind] = useState('derat')
+  const [newColumnLabel, setNewColumnLabel] = useState('')
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
 
   useEffect(() => {
@@ -947,6 +961,118 @@ export function RMonthlyReportPreview({
         </table>
       </div>
       <p className="r13-legend">{cfg.pwLegend || '* P – dalsze użytkowanie; W – wymiana/naprawa'}</p>
+    </div>
+  }
+
+  if (cfg.layout === 'r11-magnets') {
+    const magnetCols = columns.length ? columns : r11ColumnsFromDocs(docs)
+    const calendar = buildR11CalendarRows(period, docs)
+    const colSpan = Math.max(magnetCols.length, 1)
+
+    async function addR11ColumnToGroup(label) {
+      if (!supabase) return
+      const col = r11MakeColumn(label)
+      const nextCols = [...magnetCols, col]
+      saveRMonthlyColumns(code, nextCols)
+      try {
+        for (const doc of docs) {
+          const dayOff = doc.data?.is_day_off
+          const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [col.id]: dayOff ? '' : '-' }
+          const { error } = await supabase.from('haccp_documents').update({
+            data: { ...(doc.data || {}), magnet_columns: nextCols, magnets },
+            updated_at: new Date().toISOString()
+          }).eq('id', doc.id)
+          if (error) throw error
+        }
+        await loadHaccpDocs()
+        setMessage(`${code}: dodano kolumnę „${col.label}” do kartoteki.`)
+      } catch (err) {
+        setMessage(`${code}: ${err.message}`)
+      }
+    }
+
+    function saveMagnet(doc, colId, value) {
+      const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [colId]: value }
+      saveDoc(supabase, doc, { magnets }, undefined, loadHaccpDocs, setMessage, code)
+    }
+
+    function saveUwagi(doc, value) {
+      const v = value === '' ? '' : formNormalizePn(value)
+      saveDoc(supabase, doc, { uwagi_pn: v, status: v === 'N' ? 'N' : 'P' }, undefined, loadHaccpDocs, setMessage, code)
+    }
+
+    const headR11 = (
+      <table className="r13-head"><tbody><tr>
+        <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+        <td className="r13-title"><b>{R11_HEADER.title}</b><br/>{R11_HEADER.subtitle}</td>
+        <td className="r13-meta"><b>Rok:</b> {year}<br/><b>Miesiąc:</b> {month}<br/><b>Str.</b> 1 z 1<br/><b>Wersja</b> {cfg.header.version}</td>
+      </tr></tbody></table>
+    )
+
+    return <div className="monthly-paper r13-paper r11-paper">{toolbar}{headR11}
+      <div className="no-print card inner-card" style={{ marginBottom: 12 }}>
+        <b>Dodaj miejsce kontroli magnesu do tej kartoteki:</b>
+        <div className="r13-add-column-row" style={{ marginTop: 8 }}>
+          <input value={newColumnLabel} onChange={e => setNewColumnLabel(e.target.value)} placeholder="np. Przy separatorze metalu" />
+          <button type="button" className="secondary" disabled={!newColumnLabel.trim()} onClick={() => { addR11ColumnToGroup(newColumnLabel); setNewColumnLabel('') }}>{cfg.addColumnLabel || 'Dodaj miejsce magnesu'}</button>
+        </div>
+      </div>
+      <table className="r13-table r11-table"><thead>
+        <tr>
+          <th rowSpan={2}>Lp.</th>
+          <th rowSpan={2}>Data</th>
+          <th colSpan={colSpan}>Miejsce magnesów (*P/N)/</th>
+          <th rowSpan={2}>{cfg.signLabel}</th>
+          <th rowSpan={2}>Uwagi (skuteczność)<br/>(magnesy czyste) (P/N)*</th>
+        </tr>
+        <tr>{magnetCols.map(col => <th key={col.id}>{col.label}</th>)}</tr>
+      </thead><tbody>
+        {calendar.map(row => {
+          const doc = row.doc
+          const off = row.isSunday
+          if (!doc) {
+            return <tr key={row.date} className={`${off ? 'r13-day-off' : ''} r13-missing no-print`}>
+              <td>{row.lp}</td><td>{formatRMonthlyPlDate(row.date)}</td>
+              {magnetCols.map(col => <td key={col.id}>—</td>)}
+              <td colSpan={2}><button type="button" className="mini secondary" onClick={() => addMissingDay(row.date)}>Dodaj dzień</button></td>
+            </tr>
+          }
+          const isOff = off || doc.data?.is_day_off
+          const magnets = r11MagnetsForDoc(doc, magnetCols)
+          const uwagi = r11UwagiForDoc(doc, isOff)
+          return <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
+            <td>{row.lp}</td>
+            <td><span className="print-only">{formatRMonthlyPlDate(doc.document_date)}</span>
+              <span className="no-print">{formatRMonthlyPlDate(doc.document_date)}{isOff ? ' (dzień wolny)' : ''}</span></td>
+            {magnetCols.map(col => {
+              const val = magnets[col.id] ?? (isOff ? '' : '-')
+              return <td key={col.id}>
+                <select className="mini-select no-print" value={val} onChange={e => saveMagnet(doc, col.id, e.target.value)}>
+                  <option value="">—</option><option value="+">+</option><option value="-">-</option>
+                </select>
+                <span className="print-only">{val || '—'}</span>
+              </td>
+            })}
+            <td>
+              <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+                <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+              </select>
+              <span className="print-only">{doc.signed_by_operator || ''}</span>
+            </td>
+            <td>
+              <select className="mini-select no-print" value={isOff ? (doc.data?.uwagi_pn || '') : (doc.data?.uwagi_pn ?? 'P')} onChange={e => saveUwagi(doc, e.target.value)}>
+                <option value="">—</option><option value="P">P</option><option value="N">N</option>
+              </select>
+              <span className="print-only">{uwagi || '—'}</span>
+            </td>
+          </tr>
+        })}
+      </tbody></table>
+      <div className="r13-legend">
+        * <b>+</b> – wykryto metal; <b>–</b> – brak wykrycia metalu.<br/>
+        ** <b>P</b> – prawidłowo (magnesy czyste, skuteczne); <b>N</b> – nieprawidłowo.<br/>
+        Dni wolne od pracy (niedziele) oznaczone jasnoczerwonym – domyślnie puste, uzupełniane ręcznie w razie pracy.
+      </div>
     </div>
   }
 

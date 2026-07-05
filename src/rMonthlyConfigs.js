@@ -141,20 +141,20 @@ export const R_MONTHLY_CONFIGS = {
   },
   R11: {
     code: 'R11',
-    layout: 'register-rows',
+    layout: 'r11-magnets',
     periodMode: 'month',
+    storageKey: 'agro-mar-r11-columns-v1',
     header: {
-      title: 'Raport R11 – Raport kontroli magnesów',
+      title: 'Raport R11 - Raport kontroli magnesów',
       version: 'I/2024'
     },
-    rowFields: [
-      { key: 'document_date', label: 'Data kontroli', type: 'date' },
-      { key: 'location', label: 'Lokalizacja magnesu / separatora', type: 'text' },
-      { key: 'magnet_strength', label: 'Siła pola / stan techniczny', type: 'text' },
-      { key: 'metal_found', label: 'Wychwycone ciała obce', type: 'text' },
-      { key: 'result', label: 'Wynik kontroli (P/N)', type: 'pn' }
+    defaultColumns: [
+      { id: 'magnet-mill', label: 'Przed młynkiem do rozdrabniania (za wanną zasypową) (+/-)*' },
+      { id: 'magnet-tanks', label: 'Przy zbiornikach na pulpę (po rozdrobnieniu) (+/-)*' }
     ],
-    createHint: 'Kartoteka miesięczna – dodawaj wpisy kontroli magnesów.',
+    columnLabel: 'Miejsca kontroli magnesów',
+    addColumnLabel: 'Dodaj miejsce magnesu',
+    createHint: 'Cały miesiąc – dni robocze: w kolumnach magnesów „–”, uwagi „P”; niedziele jasnoczerwone (puste). Można dodać kolejne miejsca kontroli.',
     signLabel: 'Podpis'
   }
 }

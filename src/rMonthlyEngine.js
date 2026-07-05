@@ -3,6 +3,10 @@
  */
 import { normalizePn } from './haccpFormsEngine'
 import { calendarDaysInMonth, isSundayDate } from './r13Engine'
+import {
+  buildR11MonthPayloads, buildR11SingleDayPayload, buildR11PrintHtml, buildR11ExcelRows,
+  r11ColumnsFromDocs
+} from './r11Engine'
 import { getRMonthlyConfig, rMonthlyStorageKey } from './rMonthlyConfigs'
 
 export { isSundayDate }
@@ -70,6 +74,7 @@ export function columnsFromDocs(code, docs, fallback) {
   const key = cfg?.layout === 'r04-control' ? 'stations'
     : cfg?.layout === 'station-matrix' ? 'stations'
     : cfg?.layout === 'daily-calibration' ? 'chamber_columns'
+    : cfg?.layout === 'r11-magnets' ? 'magnet_columns'
     : 'columns'
   const stored = first?.data?.[key] || first?.data?.machine_columns || first?.data?.room_columns || first?.data?.columns
   if (Array.isArray(stored) && stored.length) {
@@ -374,6 +379,12 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
     return [buildR04ControlPayload(yearMonth, `${yearMonth}-01`, stations, signedBy, '', prevDoc)]
   }
 
+  if (cfg.layout === 'r11-magnets') {
+    const cols = (columnDefs?.length ? columnDefs : loadRMonthlyColumns(code)).map(c => ({ ...c }))
+    saveRMonthlyColumns(code, cols)
+    return buildR11MonthPayloads(yearMonth, signedBy, cols)
+  }
+
   if (cfg.layout === 'station-matrix') {
     return [{
       document_type: code,
@@ -427,6 +438,10 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
 
 export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs, signedBy = '', sunday = false) {
   const cfg = getRMonthlyConfig(code)
+  if (cfg?.layout === 'r11-magnets') {
+    const cols = (columnDefs?.length ? columnDefs : loadRMonthlyColumns(code)).map(c => ({ ...c }))
+    return buildR11SingleDayPayload(yearMonth, date, cols, signedBy, sunday)
+  }
   const cols = columnDefs.map(c => ({ ...c }))
   const isSunday = sunday || isSundayDate(date)
   const sortOrder = calendarDaysInMonth(yearMonth).findIndex(d => d.date === date) + 1
@@ -616,6 +631,8 @@ ${months.map((m, i) => `<tr><td>${i + 1}</td><td>${m.month || ''}</td><td>Szt.: 
       </div>`
     }).join('') || '<p>Brak kontroli w tym miesiącu.</p>'
     body += `<p style="font-size:9pt">${escapeHtml(cfg.legend || '')}</p>`
+  } else if (cfg.layout === 'r11-magnets') {
+    return buildR11PrintHtml({ ...group, columns: group.columns || r11ColumnsFromDocs(docs) }, escapeHtml)
   } else if (cfg.layout === 'station-matrix') {
     const controls = docs.filter(d => d.data?.readings)
     body = controls.map(doc => {
@@ -641,6 +658,9 @@ table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:3p
 
 export function buildRMonthlyExcelRows(code, group) {
   const cfg = getRMonthlyConfig(code) || group.config
+  if (cfg?.layout === 'r11-magnets') {
+    return buildR11ExcelRows({ ...group, columns: group.columns || r11ColumnsFromDocs(group.docs) })
+  }
   const period = String(group.period || '')
   const docs = sortRMonthlyDocs(group.docs || [])
   const rows = [['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'], [cfg?.header?.title || code, '', `Okres: ${period}`]]

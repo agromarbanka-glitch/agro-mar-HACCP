@@ -531,7 +531,8 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .r09-legend { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 12px; font-size: 11px; }
 .r09-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .r09-legend-item i { width: 14px; height: 14px; display: inline-block; border: 1px solid #666; flex-shrink: 0; }
-.r09-chart-footer { text-align: left; font-size: 11px; margin-top: 12px; }
+.r11-paper .r11-table thead th { font-size: 10px; line-height: 1.25; }
+.r11-paper .r11-table { min-width: 900px; }
 .r01-table, .r02-table { min-width: 960px; }
 .r13-head { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .r13-table { width: 100%; border-collapse: collapse; table-layout: auto; min-width: 720px; }
