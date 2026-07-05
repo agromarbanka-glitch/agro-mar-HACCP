@@ -58,6 +58,12 @@ KROK 3 – Powiązanie konta z aplikacją (SQL)
      role = admin, is_active = true
 
 --------------------------------------------------------------------------------
+KROK 4 – Naprawa RLS (jeśli błąd: infinite recursion… app_users)
+--------------------------------------------------------------------------------
+1. SQL Editor → wklej plik: LOGOWANIE-KROK-4-fix-rls.sql → RUN
+2. Odśwież stronę aplikacji i zaloguj się ponownie
+
+--------------------------------------------------------------------------------
 KROK 4 – Wyłącz samodzielną rejestrację (opcjonalnie, zalecane)
 --------------------------------------------------------------------------------
 1. Authentication → Providers → Email
@@ -92,5 +98,8 @@ Biały ekran / brak połączenia
 
 column "auth_user_id" does not exist (SQL krok 1)
   → Uruchom LOGOWANIE-KROK-1-NAPRAW.sql w SQL Editor.
+
+infinite recursion detected in policy for relation "app_users"
+  → Uruchom LOGOWANIE-KROK-4-fix-rls.sql w SQL Editor.
 
 ================================================================================

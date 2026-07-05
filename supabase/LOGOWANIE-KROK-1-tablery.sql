@@ -47,19 +47,46 @@ CREATE INDEX IF NOT EXISTS idx_app_audit_action ON public.app_audit_log(action);
 ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_audit_log ENABLE ROW LEVEL SECURITY;
 
+CREATE OR REPLACE FUNCTION public.is_app_admin()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.app_users
+    WHERE auth_user_id = auth.uid()
+      AND role = 'admin'
+      AND is_active = true
+  );
+$$;
+
+REVOKE ALL ON FUNCTION public.is_app_admin() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_app_admin() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_app_admin() TO anon;
+
 DROP POLICY IF EXISTS "app_users_read_authenticated" ON public.app_users;
 CREATE POLICY "app_users_read_authenticated" ON public.app_users
   FOR SELECT TO authenticated USING (true);
 
 DROP POLICY IF EXISTS "app_users_admin_write" ON public.app_users;
-CREATE POLICY "app_users_admin_write" ON public.app_users
-  FOR ALL TO authenticated
-  USING (
-    EXISTS (SELECT 1 FROM public.app_users u WHERE u.auth_user_id = auth.uid() AND u.role = 'admin' AND u.is_active)
-  )
-  WITH CHECK (
-    EXISTS (SELECT 1 FROM public.app_users u WHERE u.auth_user_id = auth.uid() AND u.role = 'admin' AND u.is_active)
-  );
+DROP POLICY IF EXISTS "app_users_admin_insert" ON public.app_users;
+DROP POLICY IF EXISTS "app_users_admin_update" ON public.app_users;
+DROP POLICY IF EXISTS "app_users_admin_delete" ON public.app_users;
+
+CREATE POLICY "app_users_admin_insert" ON public.app_users
+  FOR INSERT TO authenticated
+  WITH CHECK (public.is_app_admin());
+
+CREATE POLICY "app_users_admin_update" ON public.app_users
+  FOR UPDATE TO authenticated
+  USING (public.is_app_admin())
+  WITH CHECK (public.is_app_admin());
+
+CREATE POLICY "app_users_admin_delete" ON public.app_users
+  FOR DELETE TO authenticated
+  USING (public.is_app_admin());
 
 DROP POLICY IF EXISTS "app_users_read_own" ON public.app_users;
 CREATE POLICY "app_users_read_own" ON public.app_users
@@ -68,12 +95,8 @@ CREATE POLICY "app_users_read_own" ON public.app_users
 DROP POLICY IF EXISTS "app_audit_admin_all" ON public.app_audit_log;
 CREATE POLICY "app_audit_admin_all" ON public.app_audit_log
   FOR ALL TO authenticated
-  USING (
-    EXISTS (SELECT 1 FROM public.app_users u WHERE u.auth_user_id = auth.uid() AND u.role = 'admin' AND u.is_active)
-  )
-  WITH CHECK (
-    EXISTS (SELECT 1 FROM public.app_users u WHERE u.auth_user_id = auth.uid() AND u.role = 'admin' AND u.is_active)
-  );
+  USING (public.is_app_admin())
+  WITH CHECK (public.is_app_admin());
 
 DROP POLICY IF EXISTS "app_audit_insert_authenticated" ON public.app_audit_log;
 CREATE POLICY "app_audit_insert_authenticated" ON public.app_audit_log
