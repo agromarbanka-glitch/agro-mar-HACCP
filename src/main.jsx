@@ -7,6 +7,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
+import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import { computeDashboardCompliance, complianceStatusLabel, complianceStatusClass } from './dashboardComplianceEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
 import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
@@ -75,6 +76,7 @@ const DOCS_HUB_SECTIONS = [
 ]
 
 const DOCS_FILTERS_STORAGE_KEY = 'agro-mar-docs-filters-v1'
+const K01_DEFAULT_EMPLOYEE_KEY = 'agro-mar-k01-default-employee'
 
 const WORKFLOW_PILL_LABELS = {
   do_zatwierdzenia: 'Do zatwierdzenia',
@@ -316,7 +318,9 @@ function App() {
   const [selectedHaccpDoc, setSelectedHaccpDoc] = useState(null)
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
-  const [defaultK01Employee, setDefaultK01Employee] = useState('')
+  const [defaultK01Employee, setDefaultK01Employee] = useState(() => {
+    try { return localStorage.getItem(K01_DEFAULT_EMPLOYEE_KEY) || '' } catch { return '' }
+  })
   const [k02Overrides, setK02Overrides] = useState({})
   const [k04Overrides, setK04Overrides] = useState({})
   const [k07Overrides, setK07Overrides] = useState({})
@@ -2756,7 +2760,11 @@ function App() {
       return <div className="monthly-paper k01-original">
         <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
           <label>Podpis przyjmującego dla całej kartoteki
-            <select value={defaultK01Employee} onChange={e => setDefaultK01Employee(e.target.value)}>
+            <select value={defaultK01Employee} onChange={e => {
+              const v = e.target.value
+              setDefaultK01Employee(v)
+              try { localStorage.setItem(K01_DEFAULT_EMPLOYEE_KEY, v) } catch (_) {}
+            }}>
               <option value="">Wybierz pracownika</option>
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
@@ -5972,7 +5980,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         const k06Added = await syncAutoK06Documents(lotsData, traceOperations || [], k06Existing || [])
         const { data: k07Existing } = await supabase.from('haccp_documents').select('id, document_type, operation_id, data').eq('document_type', 'K07')
         const k07Added = await syncAutoK07Documents(lotsData, traceOperations || [], traceAllocations || [], k07Existing || [])
-        if (k06Added > 0 || k07Added > 0) await loadHaccpDocs()
+        const k01Added = await syncAutoK01Documents(lotsData)
+        if (k06Added > 0 || k07Added > 0 || k01Added > 0) await loadHaccpDocs()
       } catch {
         setFormsTrace({ allocations: [], operations: [] })
       }
@@ -6546,6 +6555,63 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
   }
 
+  async function syncAutoK01Documents(lotsData = null) {
+    if (!supabase) return 0
+    const { data: k01Existing } = await supabase
+      .from('haccp_documents')
+      .select('id, document_type, lot_id, lot_no')
+      .eq('document_type', 'K01')
+    const existingLotIds = new Set((k01Existing || []).map(d => d.lot_id).filter(Boolean))
+
+    let lots = lotsData
+    if (!lots) {
+      const { data: lotsRaw, error: lotsErr } = await supabase
+        .from('lots')
+        .select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, storage_chamber_id')
+        .limit(50000)
+      if (lotsErr) throw lotsErr
+      const productIds = Array.from(new Set((lotsRaw || []).map(l => l.product_id).filter(Boolean)))
+      const chamberIds = Array.from(new Set((lotsRaw || []).map(l => l.storage_chamber_id).filter(Boolean)))
+      const [productsRaw, chambersRaw] = await Promise.all([
+        productIds.length ? fetchSupabaseInChunks('products', 'id, name, product_group', 'id', productIds) : Promise.resolve([]),
+        chamberIds.length ? fetchSupabaseInChunks('storage_chambers', 'id, code', 'id', chamberIds) : Promise.resolve([])
+      ])
+      const productMap = new Map((productsRaw || []).map(p => [p.id, p]))
+      const chamberMap = new Map((chambersRaw || []).map(c => [c.id, c]))
+      lots = (lotsRaw || []).map(l => ({
+        ...l,
+        products: productMap.get(l.product_id) || null,
+        chamber: chamberMap.get(l.storage_chamber_id) || null
+      }))
+    }
+
+    const candidateLots = (lots || []).filter(l => !existingLotIds.has(l.id))
+    if (!candidateLots.length) return 0
+
+    const opIds = Array.from(new Set(candidateLots.map(l => l.source_operation_id).filter(Boolean)))
+    const operations = opIds.length
+      ? await fetchSupabaseInChunks(
+        'operations',
+        'id, operation_type, operation_date, document_no, contractor_id, contractors(name)',
+        'id',
+        opIds
+      )
+      : []
+
+    const trace = { lots: candidateLots, operations }
+    const pending = buildSyntheticK01DocsFromTrace(trace, k01Existing || [], {
+      defaultSignature: defaultK01Employee || ''
+    })
+    if (!pending.length) return 0
+
+    let inserted = 0
+    for (const doc of pending) {
+      const { error } = await supabase.from('haccp_documents').insert(buildK01InsertPayload(doc))
+      if (!error) inserted += 1
+    }
+    return inserted
+  }
+
   async function syncAutoK07Documents(lotsData, operations, allocations, currentDocs) {
     if (!supabase) return 0
     const trace = { lots: lotsData, operations, allocations }
@@ -6577,8 +6643,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (haccpLoadInFlightRef.current) return haccpLoadInFlightRef.current
     haccpLoadInFlightRef.current = (async () => {
       try {
+        const k01Added = await syncAutoK01Documents()
         const data = await fetchAllHaccpDocuments(supabase)
         setHaccpDocs(data)
+        if (k01Added > 0) {
+          setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
+        }
         if (data.length >= HACCP_DOCS_LOAD_MAX) {
           setMessage(`Wczytano ${data.length.toLocaleString('pl-PL')} kartotek (górny limit). Użyj filtra dat w panelu bocznym, aby zawęzić widok.`)
         }
