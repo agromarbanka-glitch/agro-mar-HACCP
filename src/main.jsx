@@ -7,6 +7,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
+import { computeDashboardCompliance, complianceStatusLabel, complianceStatusClass } from './dashboardComplianceEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
 import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
 import {
@@ -286,6 +287,7 @@ function App() {
   const [targetChamberId, setTargetChamberId] = useState('')
   const [moveReason, setMoveReason] = useState('')
   const [activeTab, setActiveTab] = useState(skipAuth ? 'dashboard' : 'kartoteki')
+  const [dashboardMonth, setDashboardMonth] = useState(() => new Date().toISOString().slice(0, 7))
   const [importRows, setImportRows] = useState([])
   const [importPreview, setImportPreview] = useState([])
   const [haccpDocs, setHaccpDocs] = useState([])
@@ -483,36 +485,26 @@ function App() {
     return () => document.removeEventListener('mousedown', onDocPointerDown)
   }, [])
 
-  const MODULE_STATUS = [
-    { code: 'K01', name: 'Przyjęcie surowca', status: 'gotowe', note: 'Kartoteka miesięczna, jeden asortyment, podpis z listy, druk/Excel.' },
-    { code: 'K01.1', name: 'Materiały pomocnicze', status: 'robocze', note: 'Import PDF faktur v' + PDF_IMPORT_VERSION + ' – podgląd i zapis.' },
-    { code: 'K02', name: 'Magazynowanie surowca', status: 'w realizacji', note: 'Następny formularz do dopracowania 1:1 z oryginałem.' },
-    { code: 'K03', name: 'Identyfikacja partii produktu', status: 'w realizacji', note: 'Jeden formularz = jeden WZ. PZ po lewej, WZ po prawej, sumy zgodne z FIFO.' },
-    { code: 'K04', name: 'Magazynowanie produktów gotowych', status: 'w realizacji', note: 'Miesięczna kartoteka dzienna per komora CP3/CCP1 – jak K02.' },
-    { code: 'K04.1', name: 'Transport produktu', status: 'w realizacji', note: 'Ręczne wpisy transportu – druk/Excel.' },
-    { code: 'K05', name: 'Towary wycofane', status: 'w realizacji', note: 'Ręczny rejestr wycofań.' },
-    { code: 'K06', name: 'Ocena jakości produktu', status: 'w realizacji', note: 'Auto z produkcji + ręczna edycja P/N.' },
-    { code: 'K07', name: 'Kontrola sita CCP1', status: 'w realizacji', note: 'Dzienna kartoteka sita na linii przerobu.' },
-    { code: 'Raporty', name: 'R00–R13', status: 'robocze', note: 'R01/R02/R13 – kartoteki miesięczne (M/C/D, dni wolne, druk/Excel).' },
-    { code: 'Wykazy', name: 'W01–W10', status: 'robocze', note: 'Kartoteki wykazów 1:1 ze wzorami – wpisy ręczne, druk i Excel.' },
-    { code: 'Formularze', name: 'F01–F03', status: 'robocze', note: 'Formularze 1:1 – wpisy ręczne, logika później.' },
-    { code: 'Protokoły', name: 'PR01–PR08', status: 'robocze', note: 'Protokoły 1:1 – dokumenty i rejestry.' },
-    { code: 'Specyfikacje', name: 'S01–S09', status: 'robocze', note: 'Specyfikacje produktów i opakowań 1:1.' }
-  ]
+  function lastDayOfMonth(yearMonth) {
+    const [y, m] = String(yearMonth || '').split('-').map(Number)
+    if (!y || !m) return ''
+    return new Date(y, m, 0).toISOString().slice(0, 10)
+  }
 
-  const BACKLOG = [
-    { prio: 'A', title: 'K02 1:1 z oryginałem', desc: 'Miesięczne kartoteki, podpis, P/N, druk, PDF, Excel.' },
-    { prio: 'A', title: 'Stabilność importu/FIFO', desc: 'Pełne przeliczanie chronologiczne po imporcie starszych plików.' },
-    { prio: 'A', title: 'Formularze do pracy', desc: 'K03, K04, K06 oraz wydruki zgodne ze wzorami.' },
-    { prio: 'B', title: 'Graficzny podgląd komór', desc: 'CP2, CP3, CCP1 z zajętością i grupą asortymentową.' },
-    { prio: 'B', title: 'OCR faktur PDF', desc: 'Odczyt faktur do K01.1 z podglądem i ręczną korektą.' },
-    { prio: 'C', title: 'QR / aplikacja mobilna', desc: 'Po wersji produkcyjnej systemu.' }
-  ]
-
-  function statusClass(status) {
-    if (status === 'gotowe') return 'status-green'
-    if (status === 'robocze' || status === 'w realizacji') return 'status-yellow'
-    return 'status-gray'
+  function goToComplianceForm(code) {
+    const ym = dashboardMonth
+    setDocsDateFrom(`${ym}-01`)
+    setDocsDateTo(lastDayOfMonth(ym))
+    setActiveTab('kartoteki')
+    if (code === 'K01.1') {
+      selectKartoteka('K01.1')
+    } else if (code.startsWith('K')) {
+      selectKartoteka(code)
+    } else if (code.startsWith('R')) {
+      selectRaport(code)
+    } else if (code.startsWith('W')) {
+      selectWykaz(code)
+    }
   }
 
   function k02TempForProducts(productNames = []) {
@@ -594,6 +586,25 @@ function App() {
       String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
     )
   }, [haccpDocs, syntheticK07Docs])
+
+  const dashboardSyntheticK02 = useMemo(() => buildSyntheticK02Docs(haccpDocs), [haccpDocs, k02Overrides])
+
+  const dashboardCompliance = useMemo(() => {
+    const year = String(dashboardMonth).slice(0, 4)
+    return computeDashboardCompliance({
+      yearMonth: dashboardMonth,
+      haccpDocs,
+      haccpDocsK01: haccpDocs.filter(d => d.document_type === 'K01'),
+      syntheticK02Docs: dashboardSyntheticK02,
+      syntheticK04Docs,
+      mergedK06Docs,
+      mergedK07Docs,
+      wzQueueLines,
+      stockRows,
+      operations: formsTrace.operations || [],
+      auxCount: auxRows.filter(r => String(r.delivery_date || '').slice(0, 4) === year).length
+    })
+  }, [dashboardMonth, haccpDocs, dashboardSyntheticK02, syntheticK04Docs, mergedK06Docs, mergedK07Docs, wzQueueLines, stockRows, formsTrace, auxRows])
 
   function matchesDocsDateRange(dateStr, from = docsDateFrom, to = docsDateTo) {
     const date = String(dateStr || '').slice(0, 10)
@@ -6795,30 +6806,45 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'dashboard' && canSeeTab(authProfile, 'dashboard') && <>
     <div className="grid stats">
-      <StatCard icon={Package} value={PRODUCTS.length} label="produktów startowych" />
-      <StatCard icon={FileText} value="40+" label="szablonów dokumentów" />
+      <StatCard icon={Package} value={dashboardCompliance.summary.ok} label="formularzy uzupełnionych" />
+      <StatCard icon={AlertTriangle} value={dashboardCompliance.summary.warn + dashboardCompliance.summary.missing} label="wymaga uwagi" />
       <StatCard icon={Database} value={isSupabaseConfigured ? 'TAK' : 'NIE'} label="Supabase skonfigurowany" />
-      <StatCard icon={Printer} value="PDF/druk" label="zaplanowane w kolejnym etapie" />
+      <StatCard icon={ClipboardList} value={dashboardCompliance.period} label="sprawdzany okres" />
     </div>
 
     <section className="card">
-      <div className="section-title"><ClipboardList/><div><h2>Status modułów HACCP/IFS</h2><p>Lista postępu projektu. Od teraz zamykamy jeden formularz/moduł do końca, zanim przejdziemy do kolejnego.</p></div></div>
-      <div className="module-status-grid">
-        {MODULE_STATUS.map(m => <div key={m.code} className="module-status-card">
-          <div className="module-status-head"><b>{m.code}</b><span className={statusClass(m.status)}>{m.status}</span></div>
-          <strong>{m.name}</strong>
-          <small>{m.note}</small>
-        </div>)}
+      <div className="section-title"><ClipboardList/><div>
+        <h2>Status formularzy HACCP</h2>
+        <p>Sprawdzenie uzupełnienia wg harmonogramu. Kliknij kartę, aby przejść do formularza z filtrem wybranego miesiąca.</p>
+      </div></div>
+      <div className="dashboard-period-row no-print">
+        <label>Okres kontroli (miesiąc)
+          <input type="month" value={dashboardMonth} onChange={e => setDashboardMonth(e.target.value)} />
+        </label>
+        <button className="secondary" onClick={() => { loadHaccpDocs(); loadFifoData(); loadK03TraceData(); loadAuxMaterials() }}><RefreshCcw size={16}/> Odśwież dane</button>
       </div>
-    </section>
-
-    <section className="card">
-      <div className="section-title"><LayoutDashboard/><div><h2>Priorytety wdrożenia</h2><p>A = niezbędne do uruchomienia, B = usprawnienia, C = rozwój po wdrożeniu.</p></div></div>
-      <div className="backlog-list">
-        {BACKLOG.map((b, idx) => <div key={idx} className={`backlog-item prio-${b.prio}`}>
-          <span>Priorytet {b.prio}</span><b>{b.title}</b><small>{b.desc}</small>
-        </div>)}
+      <div className="compliance-summary-row">
+        <span className={complianceStatusClass('ok')}>{dashboardCompliance.summary.ok} uzupełnione</span>
+        <span className={complianceStatusClass('warn')}>{dashboardCompliance.summary.warn} do uzupełnienia</span>
+        <span className={complianceStatusClass('missing')}>{dashboardCompliance.summary.missing} brakuje</span>
+        <span className={complianceStatusClass('na')}>{dashboardCompliance.summary.na} nie dotyczy</span>
       </div>
+      {['Kartoteki', 'Raporty', 'Wykazy'].map(groupName => {
+        const groupItems = dashboardCompliance.items.filter(i => i.group === groupName)
+        if (!groupItems.length) return null
+        return <div key={groupName} className="compliance-group">
+          <h3>{groupName}</h3>
+          <div className="module-status-grid">
+            {groupItems.map(row => <button type="button" key={row.code} className={`module-status-card compliance-card compliance-${row.status}`} onClick={() => goToComplianceForm(row.code)}>
+              <div className="module-status-head"><b>{row.code}</b><span className={complianceStatusClass(row.status)}>{complianceStatusLabel(row.status)}</span></div>
+              <strong>{row.name}</strong>
+              <small className="compliance-rule">{row.rule}</small>
+              <small className="compliance-summary">{row.summary}</small>
+              {row.gaps?.length > 0 && <ul className="compliance-gaps">{row.gaps.map((g, i) => <li key={i}>{g}</li>)}</ul>}
+            </button>)}
+          </div>
+        </div>
+      })}
     </section>
 
     <section className="card">
