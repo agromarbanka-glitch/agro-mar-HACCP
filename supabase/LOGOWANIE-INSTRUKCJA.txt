@@ -1,0 +1,89 @@
+================================================================================
+AGRO-MAR HACCP – JAK WŁĄCZYĆ LOGOWANIE (krok po kroku)
+================================================================================
+
+Potrzebujesz: konto na supabase.com, projekt AGRO-MAR-HACCP, ok. 10 minut.
+
+--------------------------------------------------------------------------------
+KROK 0 – Upewnij się, że aplikacja łączy się z Supabase
+--------------------------------------------------------------------------------
+W Vercel (Settings → Environment Variables) MUSZĄ być:
+  VITE_SUPABASE_URL        = https://xxxxx.supabase.co
+  VITE_SUPABASE_ANON_KEY   = eyJhbG...
+
+Te wartości bierzesz z Supabase → Project Settings → API.
+
+Usuń zmienną VITE_SKIP_AUTH (jeśli była) albo ustaw na false.
+Po zmianie zrób Redeploy na Vercel.
+
+--------------------------------------------------------------------------------
+KROK 1 – Tabele w bazie (SQL)
+--------------------------------------------------------------------------------
+1. Wejdź na https://supabase.com → zaloguj się
+2. Otwórz projekt AGRO-MAR-HACCP
+3. W menu po lewej: SQL Editor
+4. Kliknij: New query
+5. Otwórz plik z komputera:
+     supabase/LOGOWANIE-KROK-1-tablery.sql
+6. Skopiuj CAŁĄ zawartość → wklej do edytora SQL
+7. Kliknij RUN (lub Ctrl+Enter)
+8. Na dole powinno być: Success. No rows returned
+
+--------------------------------------------------------------------------------
+KROK 2 – Konto administratora (hasło do logowania)
+--------------------------------------------------------------------------------
+1. W Supabase menu po lewej: Authentication
+2. Zakładka: Users
+3. Kliknij: Add user → Create new user
+4. Wpisz:
+     Email:    admin@agro-mar.pl     (może być Twój firmowy email)
+     Password: ..............        (min. 6 znaków – zapamiętaj!)
+5. WAŻNE: zaznacz „Auto Confirm User” (potwierdzenie bez maila)
+6. Kliknij: Create user
+
+--------------------------------------------------------------------------------
+KROK 3 – Powiązanie konta z aplikacją (SQL)
+--------------------------------------------------------------------------------
+1. Znowu: SQL Editor → New query
+2. Otwórz plik:
+     supabase/LOGOWANIE-KROK-3-admin.sql
+3. W linii z WHERE email = 'admin@agro-mar.pl'
+   wpisz DOKŁADNIE ten sam email co w kroku 2
+4. Wklej całość → RUN
+5. Na dole w wynikach SELECT powinieneś zobaczyć 1 wiersz:
+     role = admin, is_active = true
+
+--------------------------------------------------------------------------------
+KROK 4 – Wyłącz samodzielną rejestrację (opcjonalnie, zalecane)
+--------------------------------------------------------------------------------
+1. Authentication → Providers → Email
+2. Wyłącz „Enable sign up” / publiczne rejestrowanie
+   (nowe konta tworzy tylko admin w aplikacji: Ustawienia → Konta)
+
+--------------------------------------------------------------------------------
+KROK 5 – Logowanie w programie
+--------------------------------------------------------------------------------
+1. Otwórz adres aplikacji (Vercel)
+2. Ekran logowania → wpisz email i hasło z kroku 2
+3. Zaloguj się
+
+Po zalogowaniu jako admin masz:
+  - wszystkie zakładki (Importy, Magazyn, Dokumentacja, Historia, Ustawienia)
+  - Ustawienia → Konta użytkowników → dodajesz magazynierów
+
+Magazynier widzi tylko: Dokumentacja HACCP (Kartoteki, Raporty, Wykazy).
+Nie może usuwać wpisów ani otwierać Historii.
+
+--------------------------------------------------------------------------------
+PROBLEMY?
+--------------------------------------------------------------------------------
+„Konto nie ma dostępu do systemu”
+  → Nie wykonano kroku 3 albo zły email w SQL.
+
+„Invalid login credentials”
+  → Złe hasło lub użytkownik nie istnieje w Authentication → Users.
+
+Biały ekran / brak połączenia
+  → Sprawdź VITE_SUPABASE_URL i VITE_SUPABASE_ANON_KEY na Vercel.
+
+================================================================================
