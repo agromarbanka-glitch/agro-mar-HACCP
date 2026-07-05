@@ -64,14 +64,28 @@ KROK 4 – Naprawa RLS (jeśli błąd: infinite recursion… app_users)
 2. Odśwież stronę aplikacji i zaloguj się ponownie
 
 --------------------------------------------------------------------------------
-KROK 4 – Wyłącz samodzielną rejestrację (opcjonalnie, zalecane)
+KROK 5 – Dostęp do kartotek po zalogowaniu (OBOWIĄZKOWE!)
+--------------------------------------------------------------------------------
+Objawy bez tego kroku:
+  - puste kartoteki / raporty (admin i magazynier)
+  - przycisk „Utwórz kartotekę” (R01, R02…) nic nie robi
+  - importy / magazyn też mogą być puste
+
+1. SQL Editor → New query
+2. Otwórz plik: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql
+3. Skopiuj CAŁOŚĆ → wklej → RUN
+4. Na dole w wynikach powinny być liczby kartotek (np. K01, R01…)
+5. Odśwież stronę aplikacji (Ctrl+F5) i zaloguj się ponownie
+
+--------------------------------------------------------------------------------
+KROK 6 – Wyłącz samodzielną rejestrację (opcjonalnie, zalecane)
 --------------------------------------------------------------------------------
 1. Authentication → Providers → Email
 2. Wyłącz „Enable sign up” / publiczne rejestrowanie
    (nowe konta tworzy tylko admin w aplikacji: Ustawienia → Konta)
 
 --------------------------------------------------------------------------------
-KROK 5 – Logowanie w programie
+KROK 7 – Logowanie w programie
 --------------------------------------------------------------------------------
 1. Otwórz adres aplikacji (Vercel)
 2. Ekran logowania → wpisz email i hasło z kroku 2
@@ -101,5 +115,9 @@ column "auth_user_id" does not exist (SQL krok 1)
 
 infinite recursion detected in policy for relation "app_users"
   → Uruchom LOGOWANIE-KROK-4-fix-rls.sql w SQL Editor.
+
+Puste kartoteki / brak reakcji „Utwórz kartotekę” po zalogowaniu
+  → Uruchom LOGOWANIE-KROK-5-haccp-rls-authenticated.sql w SQL Editor.
+  → Odśwież stronę (Ctrl+F5).
 
 ================================================================================

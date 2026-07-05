@@ -4922,6 +4922,8 @@ function App() {
 
   useEffect(() => {
     if (!isSupabaseConfigured) return
+    if (!authReady) return
+    if (!authProfile && !skipAuth) return
     ;(async () => {
       await loadFifoData()
       loadImports()
@@ -4933,7 +4935,7 @@ function App() {
       await loadK03TraceData()
       await loadFifoChangeLog()
     })()
-  }, [])
+  }, [authReady, authProfile, skipAuth])
 
   async function runFifoIncremental(showConfirm = true) {
     if (!supabase) {
@@ -6265,8 +6267,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       if (error) throw error
       setHaccpDocs(data || [])
     } catch (err) {
-      // haccp_documents pojawia się dopiero po SQL v18/v19/v20.
       setHaccpDocs([])
+      const msg = String(err?.message || err)
+      if (/permission denied|row-level security|42501/i.test(msg)) {
+        setMessage('Brak dostępu do kartotek po zalogowaniu. Uruchom w Supabase SQL: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql')
+      } else {
+        setMessage(`Błąd wczytywania kartotek: ${msg}`)
+      }
     }
   }
 
