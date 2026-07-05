@@ -6,7 +6,7 @@ import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import { computeDashboardCompliance, complianceStatusLabel, complianceStatusClass } from './dashboardComplianceEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
@@ -77,6 +77,7 @@ const DOCS_HUB_SECTIONS = [
 
 const DOCS_FILTERS_STORAGE_KEY = 'agro-mar-docs-filters-v1'
 const K01_DEFAULT_EMPLOYEE_KEY = 'agro-mar-k01-default-employee'
+const K02_DEFAULT_EMPLOYEE_KEY = 'agro-mar-k02-default-employee'
 
 const WORKFLOW_PILL_LABELS = {
   do_zatwierdzenia: 'Do zatwierdzenia',
@@ -323,6 +324,10 @@ function App() {
   })
   const [k02Overrides, setK02Overrides] = useState({})
   const [k04Overrides, setK04Overrides] = useState({})
+  const [k06Overrides, setK06Overrides] = useState({})
+  const [defaultK02Employee, setDefaultK02Employee] = useState(() => {
+    try { return localStorage.getItem(K02_DEFAULT_EMPLOYEE_KEY) || '' } catch { return '' }
+  })
   const [k07Overrides, setK07Overrides] = useState({})
   const [defaultK04Employee, setDefaultK04Employee] = useState('')
   const [defaultR13Employee, setDefaultR13Employee] = useState('')
@@ -560,24 +565,35 @@ function App() {
   }
 
 
+  const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
+
   const formsTraceContext = useMemo(() => ({
     lots: stockRows,
     allocations: formsTrace.allocations || [],
     operations: formsTrace.operations || []
   }), [stockRows, formsTrace])
 
-  const syntheticK04Docs = useMemo(() => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides), [formsTraceContext, k04Overrides])
+  const syntheticK04Docs = useMemo(
+    () => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides, syntheticK03Docs),
+    [formsTraceContext, k04Overrides, syntheticK03Docs]
+  )
   const syntheticK07Docs = useMemo(() => buildSyntheticK07DocsFromTrace(formsTraceContext, k07Overrides, haccpDocs), [formsTraceContext, k07Overrides, haccpDocs])
   const syntheticK06Docs = useMemo(() => buildSyntheticK06DocsFromTrace(formsTraceContext, haccpDocs), [formsTraceContext, haccpDocs])
+  const syntheticK06FromK03 = useMemo(
+    () => buildSyntheticK06DocsFromK03(syntheticK03Docs, haccpDocs, k06Overrides),
+    [syntheticK03Docs, haccpDocs, k06Overrides]
+  )
   const mergedK06Docs = useMemo(() => {
     const fromDb = (haccpDocs || []).filter(d => d.document_type === 'K06')
+    const dbK03Keys = new Set(fromDb.map(d => d.data?.k03_key).filter(Boolean))
     const dbLotIds = new Set(fromDb.map(d => d.lot_id).filter(Boolean))
-    const extraSynthetic = syntheticK06Docs.filter(d => d.lot_id && !dbLotIds.has(d.lot_id))
-    return [...fromDb, ...extraSynthetic].sort((a, b) =>
+    const extraFromLots = syntheticK06Docs.filter(d => d.lot_id && !dbLotIds.has(d.lot_id))
+    const extraFromK03 = syntheticK06FromK03.filter(d => !dbK03Keys.has(d.data?.k03_key))
+    return [...fromDb, ...extraFromLots, ...extraFromK03].sort((a, b) =>
       String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
       String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
     )
-  }, [haccpDocs, syntheticK06Docs])
+  }, [haccpDocs, syntheticK06Docs, syntheticK06FromK03])
   const mergedK07Docs = useMemo(() => {
     const fromDb = (haccpDocs || []).filter(d => d.document_type === 'K07')
     const dbOpIds = new Set(fromDb.map(d => d.data?.operation_id || d.operation_id).filter(Boolean))
@@ -795,6 +811,7 @@ function App() {
 
   function renderDocsSidebar(filterStats = {}) {
     const isK03 = docsFilter === 'K03'
+    const isK02 = docsFilter === 'K02'
     const workflowOptions = isK03
       ? [
         ['all', 'Wszystkie stany'],
@@ -847,6 +864,25 @@ function App() {
         <button type="button" className="mini secondary" onClick={() => setEmployeeForVisibleK03Forms(defaultK03Employee, true)}>Uzupełnij puste podpisy</button>
       </div>}
 
+      {isK02 && <div className="docs-sidebar-block">
+        <h4>Podpis kontrolującego</h4>
+        <label>Pracownik
+          <select value={defaultK02Employee} onChange={e => {
+            const v = e.target.value
+            setDefaultK02Employee(v)
+            try { localStorage.setItem(K02_DEFAULT_EMPLOYEE_KEY, v) } catch (_) {}
+          }}>
+            <option value="">—</option>
+            {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+          </select>
+        </label>
+        <button type="button" className="mini secondary" onClick={() => {
+          const groups = haccpMonthlyGroups.filter(g => g.type === 'K02')
+          if (!groups.length) { setMessage('Brak kartotek K02 w bieżącym filtrze.'); return }
+          groups.forEach(g => setEmployeeForVisibleK02Group(g, defaultK02Employee, true))
+        }}>Uzupełnij puste podpisy (wszystkie kartoteki)</button>
+      </div>}
+
       <div className="docs-sidebar-block">
         <h4>Szukaj i status</h4>
         <label>Szukaj<input value={haccpSearch} onChange={e => setHaccpSearch(e.target.value)} placeholder="partia, PZ, WZ…" /></label>
@@ -880,7 +916,6 @@ function App() {
     </aside>
   }
 
-  const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
   const k03WorkflowHistory = useMemo(() => fifoChangeLog.filter(h => String(h.change_type || '').startsWith('k03_')), [fifoChangeLog])
   const filteredWzQueueLines = useMemo(() => {
     return (wzQueueLines || []).filter(line => {
@@ -2029,6 +2064,60 @@ function App() {
     }
   }
 
+  function setEmployeeForVisibleK02Group(group, employeeName, onlyEmpty = false) {
+    if (!employeeName?.trim()) { setMessage('Wybierz pracownika z listy.'); return }
+    const docs = (group?.docs || [])
+    const targets = onlyEmpty
+      ? docs.filter(d => !k02FieldValue(getLiveK02Doc(d), 'podpis_kontrolujacego', ''))
+      : docs
+    if (!targets.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K02.' : 'Brak wpisów K02.'); return }
+    for (const doc of targets) setK02Override(doc, 'podpis_kontrolujacego', employeeName.trim())
+    setMessage(`Ustawiono podpis K02 dla ${targets.length} pozycji.`)
+  }
+
+  function setK06Override(doc, field, value) {
+    if (!doc?.id) return
+    setK06Overrides(prev => ({
+      ...prev,
+      [doc.id]: { ...(prev[doc.id] || {}), [field]: value }
+    }))
+  }
+
+  async function commitK06Override(doc, field, value) {
+    if (!doc?.id || !supabase) return
+    setK06Override(doc, field, value)
+    const ov = { ...(k06Overrides[doc.id] || {}), [field]: value }
+    const live = getLiveK06Doc(doc, { [doc.id]: ov })
+    try {
+      if (doc.synthetic || String(doc.id).startsWith('K06-K03-') || String(doc.id).startsWith('K06-syn-')) {
+        const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(live)).select('id').single()
+        if (error) throw error
+        setK06Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        await loadHaccpDocs()
+        setMessage('K06: zapisano wpis.')
+        return
+      }
+      const patch = {}
+      if (field === 'document_date' || field === 'przerob_date') patch.document_date = value
+      if (field === 'lot_no') patch.lot_no = value
+      if (field === 'product_name') patch.product_name = value
+      const k06Data = normalizeK06Data({ ...(live.data || {}), ...(field.startsWith('barwa') || field === 'zapach' || field === 'twardosc_jablko' || field === 'brak_plesni' ? { [field]: value } : {}), przerob_date: field === 'przerob_date' ? value : live.data?.przerob_date })
+      const { error } = await supabase.from('haccp_documents').update({
+        ...patch,
+        data: k06Data,
+        updated_at: new Date().toISOString()
+      }).eq('id', doc.id)
+      if (error) throw error
+      await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`K06: błąd zapisu – ${err.message}`)
+    }
+  }
+
   function setK02Override(doc, field, value) {
     if (!doc?.id) return
     setK02Overrides(prev => {
@@ -2064,7 +2153,7 @@ function App() {
       ...doc,
       data,
       status: Object.prototype.hasOwnProperty.call(ov, 'uwagi') ? normalizePN(ov.uwagi) : (ov.status ?? doc.status ?? 'P'),
-      signed_by_operator: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : (doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '')
+      signed_by_operator: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : ''
     }
   }
 
@@ -2445,10 +2534,11 @@ function App() {
   async function editHaccpDataField(doc, field, label, currentValue, options = {}) {
     if (!supabase || !doc) return
     let workingDoc = doc
-    if (doc.synthetic && doc.lot_id && doc.document_type === 'K06') {
-      const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(doc)).select('id').single()
+    if (doc.synthetic && doc.document_type === 'K06') {
+      const live = getLiveK06Doc(doc, k06Overrides[doc.id] ? { [doc.id]: k06Overrides[doc.id] } : {})
+      const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(live)).select('id').single()
       if (error) { setMessage(`K06: nie udało się zapisać wpisu auto: ${error.message}`); return }
-      workingDoc = { ...doc, id: inserted.id, synthetic: false }
+      workingDoc = { ...live, id: inserted.id, synthetic: false }
       await loadHaccpDocs()
     }
     if ((doc.synthetic || String(doc.id).startsWith('K07-')) && doc.document_type === 'K07') {
@@ -2837,6 +2927,20 @@ function App() {
     if (group.type === 'K02') {
       const maxRows = Math.max(16, docs.length)
       return <div className="monthly-paper k02-original">
+        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <label>Podpis kontrolujący (zbiorczo)
+            <select value={defaultK02Employee} onChange={e => {
+              const v = e.target.value
+              setDefaultK02Employee(v)
+              try { localStorage.setItem(K02_DEFAULT_EMPLOYEE_KEY, v) } catch (_) {}
+            }}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK02Group(group, defaultK02Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => setEmployeeForVisibleK02Group(group, defaultK02Employee, true)}>Uzupełnij puste</button>
+        </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -2868,7 +2972,7 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C. Pola można zmienić ręcznie przed drukiem/Excel.</p>
+        <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Podpis wybierasz ręcznie – nie uzupełnia się sam. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C.</p>
       </div>
     }
 
@@ -2920,7 +3024,7 @@ function App() {
           })}
         </tbody></table>
         {docs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: wykryto różne asortymenty w tej komorze tego dnia – sprawdź przypisanie partii w Magazynie.</div>}
-        <p className="hint no-print">K04: tylko partie w komorze CP3. <b>Jabłko przemysłowe</b> nie idzie do CP3 – użyj <b>K04.1</b>. <b>Jabłko na obierkę</b> jest magazynowane.</p>
+        <p className="hint no-print">K04: wpisy od daty przerobu (K03) do daty WZ. Tylko partie w CP3 (jabłko przemysłowe → K04.1).</p>
       </div>
     }
 
@@ -2949,8 +3053,9 @@ function App() {
           <th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br/>(P/N)*</th><th>Zapach<br/>(P/N)*</th><th>Twardość (jabłko)<br/>(P/N)*</th><th>Brak oznak pleśni<br/>(P/N)*</th><th>Podpis kontrolującego</th>
         </tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
-            const doc = docs[i]
-            if (!doc) return <tr className="blank-row" key={`k06-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const baseDoc = docs[i]
+            if (!baseDoc) return <tr className="blank-row" key={`k06-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            const doc = getLiveK06Doc(baseDoc, k06Overrides)
             const d = normalizeK06Data(doc.data || {})
             const pnCell = (field, label) => {
               const val = formNormalizePn(d[field] || 'P')
@@ -2960,10 +3065,17 @@ function App() {
               </td>
             }
             const signed = doc.signed_by_operator || d.podpis || ''
+            const wzHint = d.wz_no ? ` · WZ ${d.wz_no}` : ''
             return <tr key={doc.id}>
-              <td>{doc.document_date}</td>
-              <td className="left">{doc.product_name}</td>
-              <td>{doc.lot_no}</td>
+              <td>
+                <input className="cell-input no-print" type="date" defaultValue={doc.document_date} key={`k06-date-${doc.id}-${doc.document_date}`} title="Data przerobu / oceny" onBlur={e => { if (e.target.value && e.target.value !== doc.document_date) void commitK06Override(doc, 'przerob_date', e.target.value) }} />
+                <span className="print-only">{doc.document_date}</span>
+              </td>
+              <td className="left">{doc.product_name}{wzHint ? <small className="hint no-print">{wzHint}</small> : null}</td>
+              <td>
+                <input className="cell-input no-print" type="text" defaultValue={doc.lot_no || ''} key={`k06-lot-${doc.id}-${doc.lot_no}`} onBlur={e => { if (e.target.value !== (doc.lot_no || '')) void commitK06Override(doc, 'lot_no', e.target.value.trim()) }} />
+                <span className="print-only">{doc.lot_no}</span>
+              </td>
               {pnCell('barwa', 'Barwa')}
               {pnCell('zapach', 'Zapach')}
               {pnCell('twardosc_jablko', 'Twardość (jabłko)')}
@@ -2975,7 +3087,7 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K06: auto po produkcji / CP3 – domyślnie P we wszystkich polach oceny. Możesz edytować każde pole przed drukiem.</p>
+        <p className="hint no-print">K06: auto z K03/WZ – produkt gotowy i partia z faktury WZ, data przerobu z K03 (możesz poprawić ręcznie). Domyślnie P we wszystkich polach oceny.</p>
       </div>
     }
 
@@ -6019,15 +6131,24 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setFifoRows(allocationsData)
 
       try {
-        const [{ data: traceAllocations }, { data: traceOperations }] = await Promise.all([
+        const [{ data: traceAllocations }, { data: prodOps }] = await Promise.all([
           supabase.from('fifo_allocations').select('id, qty, source_lot_id, output_lot_id, operation_id').limit(20000),
-          supabase.from('operations').select('id, operation_type, operation_date, document_no').in('operation_type', ['sprzedaz', 'sprzedaz_bez_produkcji', 'produkcja']).limit(20000)
+          supabase.from('operations').select('id, operation_type, operation_date, document_no').eq('operation_type', 'produkcja').limit(20000)
         ])
-        setFormsTrace({ allocations: traceAllocations || [], operations: traceOperations || [] })
+        const saleOpIds = Array.from(new Set((traceAllocations || []).map(a => a.operation_id).filter(Boolean)))
+        const saleOps = saleOpIds.length
+          ? await fetchSupabaseInChunks('operations', 'id, operation_type, operation_date, document_no', 'id', saleOpIds)
+          : []
+        const opById = new Map()
+        for (const op of [...(prodOps || []), ...saleOps]) {
+          if (op?.id) opById.set(op.id, op)
+        }
+        setFormsTrace({ allocations: traceAllocations || [], operations: Array.from(opById.values()) })
         const { data: k06Existing } = await supabase.from('haccp_documents').select('id, document_type, lot_id, lot_no').eq('document_type', 'K06')
-        const k06Added = await syncAutoK06Documents(lotsData, traceOperations || [], k06Existing || [])
+        const traceOps = Array.from(opById.values())
+        const k06Added = await syncAutoK06Documents(lotsData, traceOps, k06Existing || [])
         const { data: k07Existing } = await supabase.from('haccp_documents').select('id, document_type, operation_id, data').eq('document_type', 'K07')
-        const k07Added = await syncAutoK07Documents(lotsData, traceOperations || [], traceAllocations || [], k07Existing || [])
+        const k07Added = await syncAutoK07Documents(lotsData, traceOps, traceAllocations || [], k07Existing || [])
         const k01Added = await syncAutoK01Documents(lotsData)
         if (k06Added > 0 || k07Added > 0 || k01Added > 0) await loadHaccpDocs()
       } catch {
@@ -7445,7 +7566,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
         {!['K01.1', 'K04.1', 'K05'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
-          {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – przypisz partie w Magazyn → CP3.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – uzupełnij K03 (WZ) i odśwież magazyn, lub przypisz partie w CP3.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – utwórz K03 dla WZ (przerób / bez przerobu), potem odśwież kartoteki.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak K07 – wpisy po przerobie (Magazyn → Przerób partii) lub ręczny wpis poniżej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – auto po produkcji lub ręczny wpis poniżej.</p>}
           {haccpMonthlyGroups.length === 0 && !['K03','K04','K06','K07'].includes(docsFilter) && <p className="hint">Brak kartotek dla filtrów.</p>}

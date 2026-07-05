@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.3'
+export const HACCP_FORMS_VERSION = '1.4'
 
 function normalizeText(value) {
   return String(value || '')
@@ -167,11 +167,77 @@ export function normalizeK07Data(data = {}, doc = {}) {
   }
 }
 
+function applyK06Override(doc, ov = {}) {
+  const data = normalizeK06Data({ ...(doc.data || {}), ...ov })
+  return {
+    ...doc,
+    document_date: ov.document_date ?? ov.przerob_date ?? doc.document_date,
+    lot_no: ov.lot_no ?? doc.lot_no ?? '',
+    product_name: ov.product_name ?? doc.product_name ?? '',
+    data: {
+      ...data,
+      przerob_date: ov.przerob_date ?? data.przerob_date ?? doc.document_date,
+      wz_no: data.wz_no,
+      wz_date: data.wz_date
+    },
+    signed_by_operator: ov.podpis ?? ov.podpis_kontrolujacego ?? doc.signed_by_operator ?? data.podpis ?? ''
+  }
+}
+
+export function getLiveK06Doc(doc, overrides = {}) {
+  const ov = overrides?.[doc?.id] || {}
+  return applyK06Override(doc, ov)
+}
+
+function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGroup, productName, lot, start, end, lotId = null }) {
+  const temp = k04TempForProductName(productName)
+  for (const date of dateRangeInclusive(start, end)) {
+    const mixedKey = `${chamberCode}|${date}`
+    const id = `K04-${chamberCode}-${productGroup}-${date}`
+    if (!dailyEntries.has(id)) {
+      dailyEntries.set(id, {
+        id,
+        synthetic: true,
+        document_type: 'K04',
+        document_date: date,
+        product_name: productName,
+        lot_no: lot?.lot_no || '',
+        supplier_name: '',
+        document_no: `K04/${chamberCode}/${productGroup}/${date}`,
+        chamber_code: chamberCode,
+        qty: Number(lot?.remaining_qty || lot?.initial_qty || 0),
+        status: 'P',
+        data: {
+          godzina: '09:15',
+          temperatura_chlodnia_1: String(temp),
+          temperatura_chlodnia_2: String(temp),
+          podpis_kontrolujacego: '',
+          uwagi: 'P',
+          product_group: productGroup,
+          produkty: productName,
+          lot_ids: lotId ? [lotId] : [],
+          k03_source: lotId ? null : 'k03'
+        },
+        signed_by_operator: '',
+        document_version: 'I/2024',
+        created_at: date
+      })
+    } else {
+      const entry = dailyEntries.get(id)
+      if (lotId && !entry.data.lot_ids.includes(lotId)) entry.data.lot_ids.push(lotId)
+      if (!normalizeText(entry.product_name).includes(normalizeText(productName))) {
+        entry.data.produkty = `${entry.data.produkty}, ${productName}`
+      }
+    }
+    const groupsOnDay = dailyEntries.get(id)?.data?.product_group
+    if (groupsOnDay && groupsOnDay !== productGroup) mixedDays.add(mixedKey)
+  }
+}
+
 /**
- * K04 – dzienna kontrola CP3: od dnia produkcji / wpisu do komory do dnia WZ (wyjazd).
- * Jedna kartoteka = komora + asortyment + miesiąc (bez mieszania produktów).
+ * K04 – dzienna kontrola CP3: od dnia produkcji / przerobu (K03) do dnia WZ (wyjazd).
  */
-export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}) {
+export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}, k03Forms = []) {
   const { lots = [], allocations = [], operations = [] } = trace
   const opMap = new Map(operations.map(o => [o.id, o]))
   const today = new Date().toISOString().slice(0, 10)
@@ -204,49 +270,35 @@ export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}) {
     if (!end && Number(lot.remaining_qty || 0) > 0) end = today
     if (!end) end = start
 
-    const temp = k04TempForProductName(productName)
+    upsertK04DailyEntry(dailyEntries, mixedDays, {
+      chamberCode, productGroup, productName, lot, start, end, lotId: lot.id
+    })
+  }
 
-    for (const date of dateRangeInclusive(start, end)) {
-      const mixedKey = `${chamberCode}|${date}`
-      const id = `K04-${chamberCode}-${productGroup}-${date}`
-      if (!dailyEntries.has(id)) {
-        dailyEntries.set(id, {
-          id,
-          synthetic: true,
-          document_type: 'K04',
-          document_date: date,
-          product_name: productName,
-          lot_no: lot.lot_no || '',
-          supplier_name: '',
-          document_no: `K04/${chamberCode}/${productGroup}/${date}`,
-          chamber_code: chamberCode,
-          qty: Number(lot.remaining_qty || lot.initial_qty || 0),
-          status: 'P',
-          data: {
-            godzina: '09:15',
-            temperatura_chlodnia_1: String(temp),
-            temperatura_chlodnia_2: String(temp),
-            podpis_kontrolujacego: '',
-            uwagi: 'P',
-            product_group: productGroup,
-            produkty: productName,
-            lot_ids: [lot.id]
-          },
-          signed_by_operator: '',
-          document_version: 'I/2024',
-          created_at: date
-        })
-      } else {
-        const entry = dailyEntries.get(id)
-        if (!entry.data.lot_ids.includes(lot.id)) entry.data.lot_ids.push(lot.id)
-        if (!normalizeText(entry.product_name).includes(normalizeText(productName))) {
-          entry.data.produkty = `${entry.data.produkty}, ${productName}`
-        }
-      }
-
-      const groupsOnDay = dailyEntries.get(id)?.data?.product_group
-      if (groupsOnDay && groupsOnDay !== productGroup) mixedDays.add(mixedKey)
-    }
+  for (const k03 of k03Forms || []) {
+    if (!k03?.product_name) continue
+    if (k03.data?.k03_source === 'excel') continue
+    const productName = k03.product_name
+    const productGroup = k03.product_group || k03.data?.product_group || productGroupForName(productName)
+    if (isDirectToSaleProduct(productName, productGroup)) continue
+    const wzDate = String(k03.data?.wz_date || k03.document_date || '').slice(0, 10)
+    const start = String(
+      k03.data?.k03_workflow?.przerob_date ||
+      k03.data?.k03_workflow?.fifo_cutoff_date ||
+      wzDate
+    ).slice(0, 10)
+    if (!start || !wzDate) continue
+    const matchedLot = (lots || []).find(l => l.lot_no && k03.lot_no && l.lot_no === k03.lot_no)
+    const chamberCode = matchedLot?.chamber?.code || 'CP3'
+    upsertK04DailyEntry(dailyEntries, mixedDays, {
+      chamberCode,
+      productGroup,
+      productName,
+      lot: matchedLot || { lot_no: k03.lot_no, remaining_qty: k03.qty, initial_qty: k03.qty },
+      start,
+      end: wzDate,
+      lotId: matchedLot?.id || null
+    })
   }
 
   return Array.from(dailyEntries.values()).map(doc => {
@@ -375,6 +427,71 @@ export function buildSyntheticK06DocsFromTrace(trace = {}, haccpDocs = []) {
     })
   }
   return result.sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)))
+}
+
+/**
+ * K06 – ocena jakości produktu gotowego na podstawie K03 (produkt i partia z WZ).
+ */
+export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], overrides = {}) {
+  const dbK06 = (haccpDocs || []).filter(d => d.document_type === 'K06')
+  const existingK03Keys = new Set(dbK06.map(d => d.data?.k03_key).filter(Boolean))
+  const existingIds = new Set(dbK06.map(d => d.id))
+
+  const result = []
+  for (const k03 of k03Forms || []) {
+    if (!k03?.product_name) continue
+    if (k03.data?.k03_source === 'excel' || k03.data?.k03_source === 'import') continue
+    const k03Key = k03.id
+    const id = `K06-K03-${k03Key}`
+    if (existingK03Keys.has(k03Key) || existingIds.has(id)) continue
+
+    const productName = k03.product_name
+    const productGroup = k03.product_group || k03.data?.product_group || productGroupForName(productName)
+    if (isDirectToSaleProduct(productName, productGroup)) continue
+
+    const ov = overrides[id] || {}
+    const przerobDate = String(
+      ov.przerob_date ||
+      ov.document_date ||
+      k03.data?.k03_workflow?.przerob_date ||
+      k03.data?.k03_workflow?.fifo_cutoff_date ||
+      k03.document_date ||
+      ''
+    ).slice(0, 10)
+    if (!przerobDate) continue
+
+    const base = {
+      id,
+      synthetic: true,
+      document_type: 'K06',
+      document_date: przerobDate,
+      product_name: productName,
+      lot_no: ov.lot_no ?? k03.lot_no ?? '',
+      lot_id: null,
+      document_no: `K06/WZ-${k03.document_no || k03Key.replace(/^K03-/, '')}`,
+      chamber_code: 'CP3',
+      qty: Number(k03.qty || k03.data?.saleQty || 0),
+      status: 'P',
+      data: normalizeK06Data({
+        barwa: 'P',
+        zapach: 'P',
+        twardosc_jablko: 'P',
+        brak_plesni: 'P',
+        uwagi: '',
+        podpis: '',
+        auto_source: 'k03',
+        k03_key: k03Key,
+        wz_no: k03.document_no || k03.data?.wz_no || '',
+        wz_date: String(k03.data?.wz_date || k03.document_date || '').slice(0, 10),
+        przerob_date: String(k03.data?.k03_workflow?.przerob_date || przerobDate).slice(0, 10)
+      }),
+      signed_by_operator: '',
+      document_version: 'I/2024',
+      created_at: przerobDate
+    }
+    result.push(applyK06Override(base, ov))
+  }
+  return result
 }
 
 export function buildK06InsertPayload(doc) {
