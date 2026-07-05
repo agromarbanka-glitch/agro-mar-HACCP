@@ -44,7 +44,7 @@ import { LoginScreen } from './LoginScreen'
 import { HistorySection } from './HistorySection'
 import { UsersAdminSection } from './UsersAdminSection'
 import {
-  getCurrentSession, loadAppProfile, signOut, isAdmin, isMagazynier, canDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
+  getCurrentSession, loadAppProfile, signOut, isAdmin, isMagazynier, canDelete, confirmDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
 } from './authEngine'
 import { auditActor, auditDeleteHaccpDocument, auditDeleteHaccpDocuments, auditDeleteGeneric, auditUpdateHaccpDocument, logAudit } from './auditEngine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
@@ -988,11 +988,12 @@ function App() {
 
   async function revertK03Line(line) {
     if (!line || !supabase) return
+    if (!ensureCanDelete()) return
     if (line.frozen || line.status === 'frozen') {
       setMessage('Nie można cofnąć zamrożonego K03 – najpierw odmroź kartotekę.')
       return
     }
-    if (!window.confirm(`Cofnąć decyzję K03 dla WZ ${line.document_no} / ${line.product_name}?`)) return
+    if (!confirmDelete(`Decyzję K03 dla WZ ${line.document_no} / ${line.product_name}.\n\nPozycja wróci do kolejki WZ.`)) return
     const reason = window.prompt('Powód cofnięcia (opcjonalnie):') || 'Cofnięcie decyzji K03/WZ'
     try {
       await revertK03Workflow(supabase, line, { reason, changedBy: userRole })
@@ -1282,7 +1283,7 @@ function App() {
     const removed = allCols.find(c => c.id === columnId)
     const cols = allCols.filter(c => c.id !== columnId)
     if (cols.length < 1) { setMessage('R13: musi zostać co najmniej jedna szyba.'); return }
-    if (!window.confirm(`Czy na pewno usunąć kolumnę „${removed?.label || columnId}"?\n\nTej operacji nie można cofnąć jednym kliknięciem.`)) return
+    if (!confirmDelete(`Kolumnę „${removed?.label || columnId}" z tej kartoteki R13.\n\nTej operacji nie można cofnąć jednym kliknięciem.`)) return
     await updateR13DocsColumns(group, cols, false)
     setMessage('R13: usunięto kolumnę.')
   }
@@ -1353,7 +1354,7 @@ function App() {
   async function deleteR13Month(group) {
     if (!supabase || !group?.docs?.length) return
     if (!ensureCanDelete()) return
-    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R13 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów. Wpis trafi do historii – administrator może przywrócić.`)) return
+    if (!confirmDelete(`Całą kartotekę R13 za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii – administrator może przywrócić.`)) return
     try {
       await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R13 ${group.period}`)
       await loadHaccpDocs()
@@ -1478,7 +1479,7 @@ function App() {
     const removed = allCols.find(c => c.id === columnId)
     const cols = allCols.filter(c => c.id !== columnId)
     if (cols.length < 1) { setMessage('R01: musi zostać co najmniej jeden obiekt.'); return }
-    if (!window.confirm(`Czy na pewno usunąć obiekt „${removed?.label || columnId}" z kartoteki R01?\n\nUsunięcie kolumny zmienia układ całej kartoteki. Tej operacji nie można łatwo cofnąć.`)) return
+    if (!confirmDelete(`Obiekt „${removed?.label || columnId}" z kartoteki R01.\n\nUsunięcie kolumny zmienia układ całej kartoteki.`)) return
     await updateR01DocsColumns(group, cols)
     setMessage('R01: usunięto kolumnę.')
   }
@@ -1548,7 +1549,7 @@ function App() {
   async function deleteR01Month(group) {
     if (!supabase || !group?.docs?.length) return
     if (!ensureCanDelete()) return
-    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R01 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów. Wpis trafi do historii.`)) return
+    if (!confirmDelete(`Całą kartotekę R01 za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii.`)) return
     try {
       await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R01 ${group.period}`)
       await loadHaccpDocs()
@@ -1618,7 +1619,7 @@ function App() {
     const removed = r01ColumnDefs.find(c => c.id === columnId)
     const next = r01ColumnDefs.filter(c => c.id !== columnId)
     if (next.length < 1) { setMessage('R01: musi zostać co najmniej jeden obiekt.'); return }
-    if (!window.confirm(`Czy na pewno usunąć „${removed?.label || columnId}" z domyślnych obiektów R01?\n\nNowe kartoteki nie będą miały tej kolumny.`)) return
+    if (!confirmDelete(`„${removed?.label || columnId}" z domyślnych obiektów R01.\n\nNowe kartoteki nie będą miały tej kolumny.`)) return
     saveR01Columns(next)
     setR01ColumnDefs(next)
     setMessage('R01: usunięto kolumnę z ustawień domyślnych.')
@@ -1632,7 +1633,7 @@ function App() {
       setMessage('R01: wszystkie obiekty ze wzoru są już w tej kartotece.')
       return
     }
-    if (!window.confirm(`Przywrócić brakujące obiekty ze wzoru?\n\n${missing.join('\n')}`)) return
+    if (!confirmDelete(`Brakujące obiekty ze wzoru w tej kartotece:\n${missing.join('\n')}`)) return
     const merged = mergeR01ColumnsWithDefaults(current)
     await updateR01DocsColumns(group, merged)
     setMessage(`R01: przywrócono obiekty: ${missing.join(', ')}.`)
@@ -1646,7 +1647,7 @@ function App() {
       setMessage('R01: we wszystkich kartotekach są już pełne obiekty ze wzoru.')
       return
     }
-    if (!window.confirm(`Przywrócić brakujące obiekty ze wzoru w ${affected.length} kartotekach R01?`)) return
+    if (!confirmDelete(`Brakujące obiekty ze wzoru w ${affected.length} kartotekach R01.`)) return
     for (const group of affected) {
       const merged = mergeR01ColumnsWithDefaults(group.columns || r01ColumnsFromDocs(group.docs))
       await updateR01DocsColumns(group, merged)
@@ -1721,7 +1722,7 @@ function App() {
     const removed = allCols.find(c => c.id === columnId)
     const cols = allCols.filter(c => c.id !== columnId)
     if (cols.length < 1) { setMessage('R02: musi zostać co najmniej jedna maszyna.'); return }
-    if (!window.confirm(`Czy na pewno usunąć kolumnę „${removed?.label || columnId}"?\n\nTej operacji nie można cofnąć jednym kliknięciem.`)) return
+    if (!confirmDelete(`Kolumnę „${removed?.label || columnId}" z tej kartoteki R02.`)) return
     await updateR02DocsColumns(group, cols)
     setMessage('R02: usunięto kolumnę.')
   }
@@ -1791,7 +1792,7 @@ function App() {
   async function deleteR02Month(group) {
     if (!supabase || !group?.docs?.length) return
     if (!ensureCanDelete()) return
-    if (!window.confirm(`Czy na pewno usunąć całą kartotekę R02 za ${group.period}?\n\nZostanie usuniętych ${group.docs.length} wpisów. Wpis trafi do historii.`)) return
+    if (!confirmDelete(`Całą kartotekę R02 za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii.`)) return
     try {
       await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R02 ${group.period}`)
       await loadHaccpDocs()
@@ -1861,7 +1862,7 @@ function App() {
     const removed = r02ColumnDefs.find(c => c.id === columnId)
     const next = r02ColumnDefs.filter(c => c.id !== columnId)
     if (next.length < 1) { setMessage('R02: musi zostać co najmniej jedna maszyna.'); return }
-    if (!window.confirm(`Czy na pewno usunąć „${removed?.label || columnId}" z domyślnych maszyn R02?`)) return
+    if (!confirmDelete(`„${removed?.label || columnId}" z domyślnych maszyn R02.`)) return
     saveR02Columns(next)
     setR02ColumnDefs(next)
     setMessage('R02: usunięto kolumnę z ustawień domyślnych.')
@@ -3439,7 +3440,7 @@ function App() {
   async function deleteManualHaccpEntry(doc) {
     if (!supabase || !doc?.id) return
     if (!ensureCanDelete()) return
-    if (!window.confirm(`Usunąć wpis ${doc.document_type}: ${doc.product_name || doc.lot_no || ''}?`)) return
+    if (!confirmDelete(`Wpis ${doc.document_type}: ${doc.product_name || doc.lot_no || doc.document_no || ''}.\n\nWpis trafi do historii.`)) return
     try {
       await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
       if (manualHaccpForm.id === doc.id) resetManualHaccpForm(doc.document_type)
@@ -3648,7 +3649,10 @@ function App() {
     if (!supabase) return
     const existing = (haccpDocs || []).filter(d => d.document_type === 'W03')
     if (existing.length && !force) return
-    if (existing.length && force && !window.confirm('Przywrócić 7 obiektów ze wzoru W03? Istniejące wpisy zostaną usunięte.')) return
+    if (existing.length && force) {
+      if (!ensureCanDelete()) return
+      if (!confirmDelete(`Przywrócić 7 obiektów ze wzoru W03.\n\nIstniejące wpisy zostaną usunięte.`)) return
+    }
     try {
       if (existing.length) {
         for (const doc of existing) {
@@ -3705,7 +3709,7 @@ function App() {
   async function deleteW03Row(doc) {
     if (!supabase || !doc?.id) return
     if (!ensureCanDelete()) return
-    if (!window.confirm(`Usunąć obiekt W03: ${doc.data?.object_name || doc.product_name || ''}?`)) return
+    if (!confirmDelete(`Obiekt W03: ${doc.data?.object_name || doc.product_name || ''}.\n\nWpis trafi do historii.`)) return
     try {
       await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
       await loadHaccpDocs()
@@ -3741,12 +3745,13 @@ function App() {
 
   async function deleteW06ImportBatch(fileName) {
     if (!supabase || !fileName) return
+    if (!ensureCanDelete()) return
     const toDelete = (haccpDocs || []).filter(d => d.document_type === 'W06' && d.data?.source_filename === fileName)
     if (!toDelete.length) {
       setMessage(`W06: brak wpisów z pliku „${fileName}".`)
       return
     }
-    if (!window.confirm(`Czy na pewno usunąć ${toDelete.length} wpis(ów) dodanych z pliku:\n„${fileName}"?\n\nTej operacji nie można cofnąć.`)) return
+    if (!confirmDelete(`${toDelete.length} wpis(ów) z importu pliku:\n„${fileName}"`)) return
     try {
       for (const doc of toDelete) {
         const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
@@ -3929,7 +3934,7 @@ function App() {
     if (!supabase || !doc?.id) return
     if (!ensureCanDelete()) return
     const label = doc.data?.company_name || doc.data?.supplier_name || ''
-    if (!window.confirm(`Usunąć z W06: ${label}?`)) return
+    if (!confirmDelete(`Wpis W06: ${label}.\n\nWpis trafi do historii.`)) return
     try {
       await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
       await loadHaccpDocs()
@@ -3975,7 +3980,7 @@ function App() {
           <ul className="w06-staged-list">
             {w06ImportBatches.map(b => <li key={b.name}>
               <span>{b.name} – <b>{b.count}</b> wpis(ów) na liście</span>
-              <button type="button" className="mini danger" onClick={() => deleteW06ImportBatch(b.name)}>Usuń ten import</button>
+              {isAdmin(authProfile) && <button type="button" className="mini danger" onClick={() => deleteW06ImportBatch(b.name)}>Usuń ten import</button>}
             </li>)}
           </ul>
           <p className="hint">Usunięcie importu kasuje z wykazu W06 wszystkie firmy dodane z danego pliku (po potwierdzeniu).</p>
@@ -4071,7 +4076,7 @@ function App() {
         <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W03', w03Docs)}><Printer size={16}/> Druk / PDF</button>
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W03', w03Docs)}>Pobierz Excel</button>
-        <button className="secondary" onClick={() => ensureW03Seed(true)}>Przywróć wzór (7 obiektów)</button>
+        {isAdmin(authProfile) && <button className="secondary" onClick={() => ensureW03Seed(true)}>Przywróć wzór (7 obiektów)</button>}
       </div>
       {w03Docs.length === 0 && <p className="hint no-print">Brak wpisów – wczytuję wzór harmonogramu…</p>}
       <div className="w03-paper haccp-paper">
@@ -4145,7 +4150,7 @@ function App() {
     const removed = r13ColumnDefs.find(c => c.id === columnId)
     const next = r13ColumnDefs.filter(c => c.id !== columnId)
     if (next.length < 1) { setMessage('R13: musi zostać co najmniej jedna szyba.'); return }
-    if (!window.confirm(`Czy na pewno usunąć „${removed?.label || columnId}" z domyślnych kolumn R13?`)) return
+    if (!confirmDelete(`„${removed?.label || columnId}" z domyślnych kolumn R13.`)) return
     saveR13Columns(next)
     setR13ColumnDefs(next)
     setMessage('R13: usunięto kolumnę z ustawień domyślnych.')
@@ -4536,8 +4541,8 @@ function App() {
 
   async function deleteAuxMaterial(row) {
     if (!supabase || !row) return
-    if (!window.confirm(`Usunąć pozycję K01.1: ${row.item_name || ''}?`)) return
-    if (!window.confirm('Potwierdź drugi raz usunięcie pozycji z kartoteki K01.1.')) return
+    if (!ensureCanDelete()) return
+    if (!confirmDelete(`Pozycję K01.1: ${row.item_name || ''}.`)) return
     try {
       const { error } = await supabase.from('haccp_aux_materials').delete().eq('id', row.id)
       if (error) throw error
@@ -4772,7 +4777,7 @@ function App() {
         <table className="k011-table"><thead><tr>
           <th className="lp">Lp.</th><th className="date">Data<br/>dostawy</th><th className="name">Nazwa<br/>towaru/przeznaczenie</th><th className="supplier">Dostawca/nr faktury</th><th className="hygiene">Stan<br/>higieniczny<br/>pojazdu<br/>(P/N)*</th><th className="qty">Ilość</th><th className="lot">Nadany numer<br/>partii<br/>(w przypadku<br/>opakowań)</th><th className="notes">Uwagi</th><th className="sign">Podpis przyjmującego</th><th className="no-print actions-col">Akcje</th>
         </tr></thead><tbody>
-          {rowsForPaper.map((r,i)=><tr key={r.id}><td>{i+1}</td><td>{r.delivery_date}</td><td className="left">{r.item_name}</td><td className="left">{r.supplier_invoice}</td><td>{normalizePN(r.vehicle_hygiene || 'P')}</td><td>{r.qty}</td><td>{r.lot_no}</td><td className="left">{r.notes}</td><td>{r.signed_by}</td><td className="no-print"><button className="mini secondary" onClick={()=>editAuxMaterial(r)}>Edytuj</button><button className="mini danger" onClick={()=>deleteAuxMaterial(r)}>Usuń</button></td></tr>)}
+          {rowsForPaper.map((r,i)=><tr key={r.id}><td>{i+1}</td><td>{r.delivery_date}</td><td className="left">{r.item_name}</td><td className="left">{r.supplier_invoice}</td><td>{normalizePN(r.vehicle_hygiene || 'P')}</td><td>{r.qty}</td><td>{r.lot_no}</td><td className="left">{r.notes}</td><td>{r.signed_by}</td><td className="no-print"><button className="mini secondary" onClick={()=>editAuxMaterial(r)}>Edytuj</button>{isAdmin(authProfile) && <button className="mini danger" onClick={()=>deleteAuxMaterial(r)}>Usuń</button>}</td></tr>)}
           {blanks.map((_,i)=><tr key={`blank-${i}`} className="blank-row"><td>{rowsForPaper.length+i+1}</td><td></td><td></td><td></td><td>P</td><td></td><td></td><td></td><td></td><td className="no-print"></td></tr>)}
         </tbody></table>
       </div>
@@ -4797,7 +4802,7 @@ function App() {
         {isAdmin(authProfile) && liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
-          if (!supabase || !ensureCanDelete() || !window.confirm(`Usunąć kartotekę ${liveGroup.type} za ${liveGroup.period}?`)) return
+          if (!supabase || !ensureCanDelete() || !confirmDelete(`Kartotekę ${liveGroup.type} za ${liveGroup.period}.`)) return
           await auditDeleteHaccpDocuments(supabase, liveGroup.docs || [], getAuditActor(), `${liveGroup.type} ${liveGroup.period}`)
           await loadHaccpDocs()
           setSelectedHaccpDoc(null)
@@ -5972,12 +5977,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function deleteImportedFile(fileId, fileNameForConfirm) {
     if (!supabase) return
-    if (userRole !== 'admin') {
-      setMessage('Tylko administrator może usuwać importy Excel.')
-      return
-    }
-    const first = window.confirm(`UWAGA: usuwasz import Excel: ${fileNameForConfirm || fileId}. Operacja usunie powiązane operacje, pozycje, partie i rozliczenia FIFO. Kontynuować?`)
-    if (!first) return
+    if (!ensureCanDelete()) return
+    if (!confirmDelete(`Import Excel: ${fileNameForConfirm || fileId}.\n\nOperacja usunie powiązane operacje, partie i rozliczenia FIFO.`)) return
     const typed = window.prompt('Drugie potwierdzenie. Wpisz dokładnie: USUŃ IMPORT')
     if (normalizeText(typed) !== normalizeText('USUŃ IMPORT')) {
       setMessage('Usuwanie anulowane — wpisano nieprawidłowe potwierdzenie.')
@@ -6044,8 +6045,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   async function deleteEmployee(employee) {
     if (!supabase || !employee) return
     if (!ensureCanDelete()) return
-    const ok = window.confirm(`Czy usunąć pracownika z listy podpisów: ${employee.full_name}?`)
-    if (!ok) return
+    if (!confirmDelete(`Pracownika z listy podpisów: ${employee.full_name}.`)) return
     try {
       const before = { ...employee }
       const { error } = await supabase
@@ -6552,7 +6552,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
           <td>{f.rows_count || f.row_count || '-'}</td>
           <td><span className="pill">{f.status || 'wczytany'}</span></td>
-          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id)}><Eye size={14}/> Podgląd</button><button className="danger mini" onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> Usuń</button></td>
+          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> Usuń</button>}</td>
         </tr>)}</tbody>
       </table></div>}
       {importPreview.length > 0 && <><h3>Podgląd pozycji z importu</h3><div className="table-wrap small"><table>
@@ -6958,7 +6958,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                       <button className="mini secondary" onClick={() => openK03WzModal(line, 'bez_przerobu')}>Bez przerobu</button>
                     </>}
                     {line.k03Form && <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [line.k03Form] } })}><Eye size={14}/></button>}
-                    {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
+                    {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && isAdmin(authProfile) && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                   </td>
                 </tr>
               })}</tbody>

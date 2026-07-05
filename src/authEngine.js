@@ -29,6 +29,12 @@ export function canDelete(profile) {
   return isAdmin(profile)
 }
 
+/** Jednolite pytanie przed każdym usunięciem (admin i magazynier – magazynier i tak nie dojdzie do tego miejsca). */
+export function confirmDelete(detail) {
+  const text = String(detail || '').trim()
+  return window.confirm(text ? `Czy na pewno usunąć?\n\n${text}` : 'Czy na pewno usunąć?')
+}
+
 export function canSeeHistory(profile) {
   return isAdmin(profile)
 }

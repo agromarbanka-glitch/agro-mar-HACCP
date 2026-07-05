@@ -26,6 +26,7 @@ import {
   buildR11CalendarRows, r11ColumnsFromDocs, r11MagnetsForDoc, r11UwagiForDoc,
   r11MakeColumn, R11_HEADER
 } from './r11Engine'
+import { confirmDelete } from './authEngine'
 
 export { isRMonthlyReport, getRMonthlyConfig }
 
@@ -71,7 +72,10 @@ export function RMonthlyReportSection({
     const existing = (haccpDocs || []).filter(d => d.document_type === code && (
       d.data?.month_key === newMonth || d.data?.quarter_key === period || d.data?.month_key === period
     ))
-    if (existing.length && !window.confirm(`Kartoteka ${code} za ${period} już istnieje. Utworzyć ponownie?`)) return
+    if (existing.length) {
+      if (!allowDelete) { setMessage('Tylko administrator może nadpisać istniejącą kartotekę.'); return }
+      if (!confirmDelete(`Kartotekę ${code} za ${period} (${existing.length} wpisów) przed utworzeniem nowej.`)) return
+    }
     try {
       if (existing.length) {
         for (const doc of existing) {
@@ -100,7 +104,7 @@ export function RMonthlyReportSection({
   async function deleteMonth(group) {
     if (!supabase || !group?.docs?.length) return
     if (!allowDelete) { setMessage('Tylko administrator może usuwać kartoteki.'); return }
-    if (!window.confirm(`Usunąć całą kartotekę ${code} za ${group.period}? (${group.docs.length} wpisów trafi do historii)`)) return
+    if (!confirmDelete(`Całą kartotekę ${code} za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii.`)) return
     try {
       if (onAuditDelete) await onAuditDelete(group.docs, `${code} ${group.period}`)
       else {
@@ -136,6 +140,7 @@ export function RMonthlyReportSection({
   }
 
   function addDefaultColumn() {
+    if (!allowDelete) { setMessage('Tylko administrator może zmieniać strukturę kartoteki.'); return }
     if (code === 'R08') {
       addR08Chamber(newChamberKind)
       return
@@ -186,7 +191,7 @@ export function RMonthlyReportSection({
         {columnDefs.map(col => (
           <span key={col.id} className="r13-column-chip">{col.label}
             {allowDelete && columnDefs.length > 1 && <button type="button" className="mini danger" onClick={() => {
-              if (!window.confirm(`Czy na pewno usunąć „${col.label}" z domyślnych kolumn ${code}?`)) return
+              if (!confirmDelete(`„${col.label}" z domyślnych kolumn ${code}.`)) return
               const next = columnDefs.filter(c => c.id !== col.id)
               saveRMonthlyColumns(code, next)
               setColumnDefs(next)
@@ -379,7 +384,7 @@ export function RMonthlyReportPreview({
   async function deleteMonth() {
     if (!supabase || !group?.docs?.length) return
     if (!allowDelete) { setMessage('Tylko administrator może usuwać kartoteki.'); return }
-    if (!window.confirm(`Usunąć kartotekę ${code} za ${group.period}?`)) return
+    if (!confirmDelete(`Kartotekę ${code} za ${group.period} (${group.docs.length} wpisów).`)) return
     try {
       if (onAuditDelete) await onAuditDelete(group.docs, `${code} ${group.period}`)
       else {
@@ -430,7 +435,7 @@ export function RMonthlyReportPreview({
   async function deleteControl(doc) {
     if (!supabase || !doc?.id) return
     if (!allowDelete) { setMessage('Tylko administrator może usuwać.'); return }
-    if (!window.confirm(`Usunąć kontrolę z dnia ${formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}?`)) return
+    if (!confirmDelete(`Kontrolę z dnia ${formatRMonthlyPlDate(doc.data?.control_date || doc.document_date)}.`)) return
     if (onAuditDelete) await onAuditDelete([doc], `${code} kontrola`)
     else await supabase.from('haccp_documents').delete().eq('id', doc.id)
     await loadHaccpDocs()
@@ -461,7 +466,7 @@ export function RMonthlyReportPreview({
 
   async function removeR04Station(doc, stId) {
     if (!allowDelete) { setMessage('Tylko administrator może usuwać.'); return }
-    if (!supabase || !doc || !window.confirm('Czy na pewno usunąć tę stację z kontroli?')) return
+    if (!supabase || !doc || !confirmDelete('Tę stację z kontroli deratyzacji.')) return
     const stations = (doc.data?.stations || []).filter(s => s.id !== stId)
     const readings = { ...(doc.data?.readings || {}) }
     delete readings[stId]
@@ -866,7 +871,7 @@ export function RMonthlyReportPreview({
     const pwOpts = (cfg.pwOptions || ['', 'P', 'W']).filter(o => o !== undefined)
 
     return <div className="monthly-paper r08-paper r13-paper">{toolbar}{head}
-      <div className="no-print r08-chamber-add card inner-card" style={{ marginBottom: 10 }}>
+      {allowDelete && <div className="no-print r08-chamber-add card inner-card" style={{ marginBottom: 10 }}>
         <b>Dodaj chłodnię do tej kartoteki:</b>
         <div className="k03-bulk-row" style={{ marginTop: 8 }}>
           <label>Typ
@@ -880,7 +885,7 @@ export function RMonthlyReportPreview({
           </label>
           <button type="button" className="secondary" onClick={() => addR08ChamberToGroup(previewChamberKind)}>Dodaj chłodnię</button>
         </div>
-      </div>
+      </div>}
       <div className="table-wrap r08-table-wrap">
         <table className="r08-table">
           <thead>
@@ -988,6 +993,7 @@ export function RMonthlyReportPreview({
     const colSpan = Math.max(magnetCols.length, 1)
 
     async function addR11ColumnToGroup(label) {
+      if (!allowDelete) { setMessage('Tylko administrator może zmieniać strukturę kartoteki.'); return }
       if (!supabase) return
       const col = r11MakeColumn(label)
       const nextCols = [...magnetCols, col]
@@ -1028,13 +1034,13 @@ export function RMonthlyReportPreview({
     )
 
     return <div className="monthly-paper r13-paper r11-paper">{toolbar}{headR11}
-      <div className="no-print card inner-card" style={{ marginBottom: 12 }}>
+      {allowDelete && <div className="no-print card inner-card" style={{ marginBottom: 12 }}>
         <b>Dodaj miejsce kontroli magnesu do tej kartoteki:</b>
         <div className="r13-add-column-row" style={{ marginTop: 8 }}>
           <input value={newColumnLabel} onChange={e => setNewColumnLabel(e.target.value)} placeholder="np. Przy separatorze metalu" />
           <button type="button" className="secondary" disabled={!newColumnLabel.trim()} onClick={() => { addR11ColumnToGroup(newColumnLabel); setNewColumnLabel('') }}>{cfg.addColumnLabel || 'Dodaj miejsce magnesu'}</button>
         </div>
-      </div>
+      </div>}
       <table className="r13-table r11-table"><thead>
         <tr>
           <th rowSpan={2}>Lp.</th>
