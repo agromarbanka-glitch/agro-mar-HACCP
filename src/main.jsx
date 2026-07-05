@@ -457,6 +457,7 @@ function App() {
 
   /** Klik w zakładkę – otwiera listę pod-zakładek i trzyma ją otwartą do wyboru lub kliknięcia poza menu. */
   function openHubTab(section) {
+    if (!canSeeDocsHubSection(authProfile, section)) return
     setDocsHubSection(section)
     closeHubFlyouts(null)
     if (section === 'kartoteki') setDocsFlyoutOpen(true)
@@ -4815,6 +4816,21 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!authProfile) return
+    if (!canSeeTab(authProfile, activeTab)) {
+      setActiveTab(isMagazynier(authProfile) ? 'kartoteki' : 'dashboard')
+    }
+  }, [authProfile, activeTab])
+
+  useEffect(() => {
+    if (!authProfile) return
+    if (!canSeeDocsHubSection(authProfile, docsHubSection)) {
+      setDocsHubSection('kartoteki')
+      closeHubFlyouts(null)
+    }
+  }, [authProfile, docsHubSection])
+
   function getAuditActor() {
     return auditActor(authProfile, authSession)
   }
@@ -6391,7 +6407,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {tabs.map(([key, label, Icon]) => <button key={key} className={activeTab === key ? 'tab active' : 'tab'} onClick={() => setActiveTab(key)}><Icon size={16}/>{label}</button>)}
     </nav>
 
-    {activeTab === 'dashboard' && <>
+    {activeTab === 'dashboard' && canSeeTab(authProfile, 'dashboard') && <>
     <div className="grid stats">
       <StatCard icon={Package} value={PRODUCTS.length} label="produktów startowych" />
       <StatCard icon={FileText} value="40+" label="szablonów dokumentów" />
@@ -6443,7 +6459,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </>}
 
 
-    {activeTab === 'importy' && <>
+    {activeTab === 'importy' && canSeeTab(authProfile, 'importy') && <>
     {renderK03UnfreezeBanner()}
     <section className="card">
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
@@ -6490,7 +6506,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </>}
 
 
-    {activeTab === 'pz' && <>
+    {activeTab === 'pz' && canSeeTab(authProfile, 'pz') && <>
     <section className="card">
       <div className="section-title"><Database/><div><h2>PZ – Zarządzanie FIFO</h2><p>Ręczna korekta dat PZ bez ponownego importu. Po zmianie FIFO przelicza się od początku, ale kartoteki odświeżasz osobnym przyciskiem.</p></div></div>
       {fifoKartotekiDirty && <div className="warning inline-warning"><AlertTriangle size={18}/><div><b>Zmieniono dane FIFO.</b> Kartoteki mogą pokazywać stary układ. Kliknij „Odśwież kartoteki”.</div></div>}
@@ -6505,7 +6521,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </>}
 
 
-    {activeTab === 'magazyn' && <>
+    {activeTab === 'magazyn' && canSeeTab(authProfile, 'magazyn') && <>
     <section className="card">
       <div className="section-title"><Warehouse/><div><h2>Komory CP/CCP</h2><p>CP2: 2 komory surowca, CP3: 2 komory produktu gotowego, CCP1: 4 beczki pulpy. System blokuje mieszanie różnych grup w jednej komorze.</p></div></div>
       <div className="chamber-grid">
@@ -6645,7 +6661,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </section>
     </>}
 
-    {activeTab === 'kartoteki' && <>
+    {activeTab === 'kartoteki' && canSeeTab(authProfile, 'kartoteki') && <>
     <div className="docs-hub">
       <header className="docs-hub-head">
         <div className="section-title"><ClipboardList/><div><h2>Dokumentacja HACCP</h2><p>Kartoteki, raporty, wykazy, formularze i protokoły w jednym miejscu.</p></div></div>
@@ -6823,7 +6839,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         })}
       </nav>
 
-      {['raporty', 'wykazy', 'formularze', 'protokoly', 'specyfikacje'].includes(docsHubSection) && renderHubManualSection()}
+      {canSeeDocsHubSection(authProfile, docsHubSection) && ['raporty', 'wykazy', 'formularze', 'protokoly', 'specyfikacje'].includes(docsHubSection) && renderHubManualSection()}
 
       {docsHubSection === 'kartoteki' && <>
       {renderK03UnfreezeBanner()}
@@ -7003,7 +7019,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       />
     )}
 
-    {activeTab === 'ustawienia' && <>
+    {activeTab === 'ustawienia' && isAdmin(authProfile) && <>
     {isAdmin(authProfile) && (
       <UsersAdminSection
         supabase={supabase}
