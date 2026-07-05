@@ -39,6 +39,9 @@ import {
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows } from './rMonthlyEngine'
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
+import {
+  HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
+} from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
 import { LoginScreen } from './LoginScreen'
 import { HistorySection } from './HistorySection'
@@ -265,6 +268,9 @@ function App() {
   const [authProfile, setAuthProfile] = useState(skipAuth ? { role: 'admin', display_name: 'Tryb dev', email: 'dev@local', is_active: true } : null)
   const [authSession, setAuthSession] = useState(null)
   const [authReady, setAuthReady] = useState(skipAuth)
+  const [haccpBusy, setHaccpBusy] = useState(false)
+  const loadedForUserRef = useRef(null)
+  const haccpLoadInFlightRef = useRef(null)
   const userRole = authProfile?.role || 'magazynier'
   const [productionInputLotId, setProductionInputLotId] = useState('')
   const [productionInputQty, setProductionInputQty] = useState('')
@@ -1317,6 +1323,7 @@ function App() {
   }
 
   async function createR13MonthKartoteka() {
+    if (haccpBusy) return
     if (!supabase) {
       setMessage('R13: brak połączenia z bazą (Supabase).')
       return
@@ -1333,21 +1340,25 @@ function App() {
       setMessage('R13: brak dni w wybranym miesiącu.')
       return
     }
+    const existingDates = new Set(
+      (haccpDocs || []).filter(d => d.document_type === 'R13').map(d => d.document_date)
+    )
+    const toInsert = payloads.filter(p => !existingDates.has(p.document_date))
+    if (!toInsert.length) {
+      setMessage(`R13: wszystkie dni za ${yearMonth} są już w systemie.`)
+      return
+    }
+    setHaccpBusy(true)
     try {
-      let added = 0
-      for (const payload of payloads) {
-        const dup = (haccpDocs || []).some(d => d.document_type === 'R13' && d.document_date === payload.document_date)
-        if (dup) continue
-        const { error } = await supabase.from('haccp_documents').insert(payload)
-        if (error) throw error
-        added++
-      }
-      await loadHaccpDocs()
+      const { rows } = await batchInsertHaccpDocuments(supabase, toInsert)
+      setHaccpDocs(prev => mergeHaccpDocs(prev, rows))
       const totalDays = payloads.length
       const sundays = payloads.filter(p => p.data?.is_day_off).length
-      setMessage(`R13: utworzono kartotekę za ${yearMonth} – ${added} dni (${totalDays - sundays} roboczych z P, ${sundays} niedziel pustych)${defaultR13Employee ? `, podpis: ${defaultR13Employee}` : ''}.`)
+      setMessage(`R13: utworzono kartotekę za ${yearMonth} – ${rows.length} dni (${totalDays - sundays} roboczych z P, ${sundays} niedziel pustych)${defaultR13Employee ? `, podpis: ${defaultR13Employee}` : ''}.`)
     } catch (err) {
       setMessage(`R13: błąd tworzenia – ${err.message}`)
+    } finally {
+      setHaccpBusy(false)
     }
   }
 
@@ -1512,6 +1523,7 @@ function App() {
   }
 
   async function createR01MonthKartoteka() {
+    if (haccpBusy) return
     if (!supabase) {
       setMessage('R01: brak połączenia z bazą (Supabase).')
       return
@@ -1528,21 +1540,25 @@ function App() {
       setMessage('R01: brak dni w wybranym miesiącu.')
       return
     }
+    const existingDates = new Set(
+      (haccpDocs || []).filter(d => d.document_type === 'R01').map(d => d.document_date)
+    )
+    const toInsert = payloads.filter(p => !existingDates.has(p.document_date))
+    if (!toInsert.length) {
+      setMessage(`R01: wszystkie dni za ${yearMonth} są już w systemie.`)
+      return
+    }
+    setHaccpBusy(true)
     try {
-      let added = 0
-      for (const payload of payloads) {
-        const dup = (haccpDocs || []).some(d => d.document_type === 'R01' && d.document_date === payload.document_date)
-        if (dup) continue
-        const { error } = await supabase.from('haccp_documents').insert(payload)
-        if (error) throw error
-        added++
-      }
-      await loadHaccpDocs()
+      const { rows } = await batchInsertHaccpDocuments(supabase, toInsert)
+      setHaccpDocs(prev => mergeHaccpDocs(prev, rows))
       const totalDays = payloads.length
       const sundays = payloads.filter(p => p.data?.is_day_off).length
-      setMessage(`R01: utworzono kartotekę za ${yearMonth} – ${added} dni (${totalDays - sundays} roboczych z M w przyjęciu surowców, ${sundays} niedziel pustych)${defaultR01Employee ? `, podpis: ${defaultR01Employee}` : ''}.`)
+      setMessage(`R01: utworzono kartotekę za ${yearMonth} – ${rows.length} dni (${totalDays - sundays} roboczych z M w przyjęciu surowców, ${sundays} niedziel pustych)${defaultR01Employee ? `, podpis: ${defaultR01Employee}` : ''}.`)
     } catch (err) {
       setMessage(`R01: błąd tworzenia – ${err.message}`)
+    } finally {
+      setHaccpBusy(false)
     }
   }
 
@@ -1755,6 +1771,7 @@ function App() {
   }
 
   async function createR02MonthKartoteka() {
+    if (haccpBusy) return
     if (!supabase) {
       setMessage('R02: brak połączenia z bazą (Supabase).')
       return
@@ -1771,21 +1788,25 @@ function App() {
       setMessage('R02: brak dni w wybranym miesiącu.')
       return
     }
+    const existingDates = new Set(
+      (haccpDocs || []).filter(d => d.document_type === 'R02').map(d => d.document_date)
+    )
+    const toInsert = payloads.filter(p => !existingDates.has(p.document_date))
+    if (!toInsert.length) {
+      setMessage(`R02: wszystkie dni za ${yearMonth} są już w systemie.`)
+      return
+    }
+    setHaccpBusy(true)
     try {
-      let added = 0
-      for (const payload of payloads) {
-        const dup = (haccpDocs || []).some(d => d.document_type === 'R02' && d.document_date === payload.document_date)
-        if (dup) continue
-        const { error } = await supabase.from('haccp_documents').insert(payload)
-        if (error) throw error
-        added++
-      }
-      await loadHaccpDocs()
+      const { rows } = await batchInsertHaccpDocuments(supabase, toInsert)
+      setHaccpDocs(prev => mergeHaccpDocs(prev, rows))
       const totalDays = payloads.length
       const sundays = payloads.filter(p => p.data?.is_day_off).length
-      setMessage(`R02: utworzono kartotekę za ${yearMonth} – ${added} dni (${totalDays - sundays} roboczych do uzupełnienia, ${sundays} niedziel pustych)${defaultR02Employee ? `, podpis: ${defaultR02Employee}` : ''}.`)
+      setMessage(`R02: utworzono kartotekę za ${yearMonth} – ${rows.length} dni (${totalDays - sundays} roboczych do uzupełnienia, ${sundays} niedziel pustych)${defaultR02Employee ? `, podpis: ${defaultR02Employee}` : ''}.`)
     } catch (err) {
       setMessage(`R02: błąd tworzenia – ${err.message}`)
+    } finally {
+      setHaccpBusy(false)
     }
   }
 
@@ -2867,6 +2888,7 @@ function App() {
         employees={employees}
         haccpDocs={haccpDocs}
         loadHaccpDocs={loadHaccpDocs}
+        mergeHaccpDoc={mergeHaccpDoc}
         setMessage={setMessage}
         defaultEmployee=""
         allowDelete={isAdmin(authProfile)}
@@ -4190,7 +4212,7 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button onClick={createR02MonthKartoteka}>Utwórz kartotekę</button>
+          <button onClick={createR02MonthKartoteka} disabled={haccpBusy}>{haccpBusy ? 'Tworzenie…' : 'Utwórz kartotekę'}</button>
         </div>
         <p className="hint">Wersja silnika R02: {R02_ENGINE_VERSION}. Maszyny: {r02ColumnDefs.length} (ze wzoru Word I/2024).</p>
       </div>
@@ -4253,7 +4275,7 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button onClick={createR01MonthKartoteka}>Utwórz kartotekę</button>
+          <button onClick={createR01MonthKartoteka} disabled={haccpBusy}>{haccpBusy ? 'Tworzenie…' : 'Utwórz kartotekę'}</button>
         </div>
         <p className="hint">Wersja silnika R01: {R01_ENGINE_VERSION}. Obiekty: {r01ColumnDefs.length} (ze wzoru Word I/2024).</p>
       </div>
@@ -4313,7 +4335,7 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button onClick={createR13MonthKartoteka}>Utwórz kartotekę</button>
+          <button onClick={createR13MonthKartoteka} disabled={haccpBusy}>{haccpBusy ? 'Tworzenie…' : 'Utwórz kartotekę'}</button>
         </div>
         <p className="hint">Wersja silnika R13: {R13_ENGINE_VERSION}. Kolumny: {r13ColumnDefs.map(c => c.label).join(', ')}.</p>
       </div>
@@ -4368,6 +4390,8 @@ function App() {
               haccpDocs={haccpDocs}
               hubManualGroups={hubManualGroups}
               loadHaccpDocs={loadHaccpDocs}
+              mergeHaccpDoc={mergeHaccpDoc}
+              mergeHaccpDocsBatch={mergeHaccpDocsBatch}
               setMessage={setMessage}
               setSelectedHaccpDoc={setSelectedHaccpDoc}
               printHaccpGroup={printHaccpGroup}
@@ -4860,18 +4884,20 @@ function App() {
       setAuthReady(true)
       if (profile && isMagazynier(profile)) setActiveTab('kartoteki')
     })()
-    const { data: sub } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'TOKEN_REFRESHED') return
       setAuthSession(session)
       if (session?.user?.id) {
         try {
           const profile = await loadAppProfile(supabase, session.user.id)
-          setAuthProfile(profile)
+          setAuthProfile(prev => (prev?.auth_user_id === profile?.auth_user_id && prev?.role === profile?.role ? prev : profile))
           if (profile && isMagazynier(profile)) setActiveTab(t => t === 'dashboard' ? 'kartoteki' : t)
         } catch {
           setAuthProfile(null)
         }
       } else {
         setAuthProfile(null)
+        loadedForUserRef.current = null
       }
     })
     return () => {
@@ -4908,10 +4934,15 @@ function App() {
   }
 
   async function handleLogout() {
-    await signOut()
+    loadedForUserRef.current = null
     setAuthProfile(null)
     setAuthSession(null)
     setMessage('Wylogowano.')
+    try {
+      await signOut()
+    } catch {
+      /* sesja lokalna i tak wyczyszczona */
+    }
   }
 
   useEffect(() => {
@@ -4924,18 +4955,27 @@ function App() {
     if (!isSupabaseConfigured) return
     if (!authReady) return
     if (!authProfile && !skipAuth) return
+
+    const userKey = authProfile?.auth_user_id || (skipAuth ? 'dev' : '')
+    if (!userKey) return
+    if (loadedForUserRef.current === userKey) return
+    loadedForUserRef.current = userKey
+
+    const isMag = isMagazynier(authProfile)
     ;(async () => {
-      await loadFifoData()
-      loadImports()
+      if (!isMag) {
+        await loadFifoData()
+        loadImports()
+        loadPzManagementData()
+        await loadK03SnapshotsOnly()
+        await loadK03TraceData()
+        await loadFifoChangeLog()
+      }
       loadHaccpDocs()
       loadEmployees()
       loadAuxMaterials()
-      loadPzManagementData()
-      await loadK03SnapshotsOnly()
-      await loadK03TraceData()
-      await loadFifoChangeLog()
     })()
-  }, [authReady, authProfile, skipAuth])
+  }, [authReady, authProfile?.auth_user_id, skipAuth])
 
   async function runFifoIncremental(showConfirm = true) {
     if (!supabase) {
@@ -6258,23 +6298,40 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function loadHaccpDocs() {
     if (!supabase) return
-    try {
-      const { data, error } = await supabase
-        .from('haccp_documents')
-        .select('id, document_type, lot_id, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at')
-        .order('document_date', { ascending: false })
-        .limit(5000)
-      if (error) throw error
-      setHaccpDocs(data || [])
-    } catch (err) {
-      setHaccpDocs([])
-      const msg = String(err?.message || err)
-      if (/permission denied|row-level security|42501/i.test(msg)) {
-        setMessage('Brak dostępu do kartotek po zalogowaniu. Uruchom w Supabase SQL: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql')
-      } else {
-        setMessage(`Błąd wczytywania kartotek: ${msg}`)
+    if (haccpLoadInFlightRef.current) return haccpLoadInFlightRef.current
+    haccpLoadInFlightRef.current = (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('haccp_documents')
+          .select(HACCP_DOC_LIST_SELECT)
+          .order('document_date', { ascending: false })
+          .limit(5000)
+        if (error) throw error
+        setHaccpDocs(data || [])
+      } catch (err) {
+        setHaccpDocs([])
+        const msg = String(err?.message || err)
+        if (/permission denied|row-level security|42501/i.test(msg)) {
+          setMessage('Brak dostępu do kartotek po zalogowaniu. Uruchom w Supabase SQL: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql')
+        } else {
+          setMessage(`Błąd wczytywania kartotek: ${msg}`)
+        }
+      } finally {
+        haccpLoadInFlightRef.current = null
       }
-    }
+    })()
+    return haccpLoadInFlightRef.current
+  }
+
+  function mergeHaccpDoc(id, patch) {
+    setHaccpDocs(prev => patchHaccpDocInList(prev, id, patch))
+  }
+
+  function mergeHaccpDocsBatch(rows, removedIds = []) {
+    setHaccpDocs(prev => {
+      const filtered = removedIds.length ? prev.filter(d => !removedIds.includes(d.id)) : prev
+      return mergeHaccpDocs(filtered, rows)
+    })
   }
 
   const allTabs = [

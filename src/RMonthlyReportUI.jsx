@@ -27,6 +27,7 @@ import {
   r11MakeColumn, R11_HEADER
 } from './r11Engine'
 import { confirmDelete } from './authEngine'
+import { batchInsertHaccpDocuments } from './haccpLoadHelpers'
 
 export { isRMonthlyReport, getRMonthlyConfig }
 
@@ -42,12 +43,13 @@ function defaultNewRow(cfg) {
 }
 
 export function RMonthlyReportSection({
-  code, supabase, employees, haccpDocs, hubManualGroups, loadHaccpDocs, setMessage,
+  code, supabase, employees, haccpDocs, hubManualGroups, loadHaccpDocs, mergeHaccpDoc, mergeHaccpDocsBatch, setMessage,
   setSelectedHaccpDoc, printHaccpGroup, exportHaccpGroupExcel,
   allowDelete = false, onAuditDelete
 }) {
   const cfg = getRMonthlyConfig(code)
   const [newMonth, setNewMonth] = useState(new Date().toISOString().slice(0, 7))
+  const [creating, setCreating] = useState(false)
   const [columnDefs, setColumnDefs] = useState(() => loadRMonthlyColumns(code))
   const [newColumnLabel, setNewColumnLabel] = useState('')
   const [newChamberKind, setNewChamberKind] = useState('raw')
@@ -65,6 +67,7 @@ export function RMonthlyReportSection({
   }
 
   async function createMonth() {
+    if (creating) return
     if (!supabase) { setMessage(`${code}: brak połączenia z bazą.`); return }
     const period = cfg.periodMode === 'quarter'
       ? (() => { const [y, m] = newMonth.split('-').map(Number); return `${y}-Q${Math.ceil(m / 3)}` })()
@@ -76,28 +79,39 @@ export function RMonthlyReportSection({
       if (!allowDelete) { setMessage('Tylko administrator może nadpisać istniejącą kartotekę.'); return }
       if (!confirmDelete(`Kartotekę ${code} za ${period} (${existing.length} wpisów) przed utworzeniem nowej.`)) return
     }
+    setCreating(true)
     try {
+      const removedIds = []
       if (existing.length) {
         for (const doc of existing) {
           const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
           if (error) throw error
+          removedIds.push(doc.id)
         }
       }
-      let added = 0
       const payloads = buildRMonthlyMonthPayloads(code, newMonth, defaultEmployee, columnDefs, haccpDocs)
-      for (const payload of payloads) {
-        if (cfg.layout !== 'single-month' && cfg.layout !== 'register-rows' && cfg.layout !== 'quarter-trend' && cfg.layout !== 'station-matrix' && cfg.layout !== 'r04-control') {
-          const dup = (haccpDocs || []).some(d => d.document_type === code && d.document_date === payload.document_date)
-          if (dup) continue
-        }
-        const { error } = await supabase.from('haccp_documents').insert(payload)
-        if (error) throw error
-        added++
+      const skipDupCheck = ['single-month', 'register-rows', 'quarter-trend', 'station-matrix', 'r04-control'].includes(cfg.layout)
+      const existingDates = new Set(
+        skipDupCheck ? [] : (haccpDocs || []).filter(d => d.document_type === code).map(d => d.document_date)
+      )
+      const toInsert = skipDupCheck
+        ? payloads
+        : payloads.filter(p => !existingDates.has(p.document_date))
+      if (!toInsert.length && !removedIds.length) {
+        setMessage(`${code}: brak nowych wpisów do utworzenia.`)
+        return
       }
-      await loadHaccpDocs()
-      setMessage(`${code}: utworzono kartotekę (${added} wpisów)${defaultEmployee ? `, podpis: ${defaultEmployee}` : ''}.`)
+      const { rows } = toInsert.length ? await batchInsertHaccpDocuments(supabase, toInsert) : { rows: [] }
+      if (mergeHaccpDocsBatch) {
+        mergeHaccpDocsBatch(rows, removedIds)
+      } else {
+        await loadHaccpDocs()
+      }
+      setMessage(`${code}: utworzono kartotekę (${rows.length} wpisów)${defaultEmployee ? `, podpis: ${defaultEmployee}` : ''}.`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
+    } finally {
+      setCreating(false)
     }
   }
 
@@ -272,7 +286,7 @@ export function RMonthlyReportSection({
             {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
           </select>
         </label>
-        <button onClick={createMonth}>Utwórz kartotekę</button>
+        <button onClick={createMonth} disabled={creating}>{creating ? 'Tworzenie…' : 'Utwórz kartotekę'}</button>
       </div>
       <p className="hint">Silnik kartotek: {R_MONTHLY_ENGINE_VERSION}</p>
     </div>
@@ -299,7 +313,7 @@ export function RMonthlyReportSection({
   </>
 }
 
-async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage, code) {
+async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage, code, mergeHaccpDoc) {
   if (!supabase || !doc?.id) return
   const nextData = { ...(doc.data || {}), ...patch }
   if (patch.nested && typeof patch.nested === 'object') {
@@ -312,14 +326,15 @@ async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage
   try {
     const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
     if (error) throw error
-    await loadHaccpDocs()
+    if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
+    else await loadHaccpDocs()
   } catch (err) {
     setMessage(`${code}: ${err.message}`)
   }
 }
 
 export function RMonthlyReportPreview({
-  group, supabase, employees, haccpDocs, loadHaccpDocs, setMessage, defaultEmployee,
+  group, supabase, employees, haccpDocs, loadHaccpDocs, mergeHaccpDoc, setMessage, defaultEmployee,
   allowDelete = false, onAuditDelete
 }) {
   const code = group.type
@@ -378,7 +393,7 @@ export function RMonthlyReportPreview({
     if (!doc) return
     const patch = { [key]: value }
     if (key === 'document_no') patch.nested = { document_no: value }
-    await saveDoc(supabase, doc, patch, undefined, loadHaccpDocs, setMessage, code)
+    await saveDoc(supabase, doc, patch, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
   }
 
   async function deleteMonth() {
@@ -444,7 +459,7 @@ export function RMonthlyReportPreview({
 
   function saveR04Reading(doc, stId, patch) {
     const readings = { ...(doc.data?.readings || {}), [stId]: { ...(doc.data?.readings?.[stId] || defaultR04Reading(cfg)), ...patch } }
-    saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code)
+    saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
   }
 
   async function addR04StationToDoc(doc, kind) {
@@ -533,7 +548,7 @@ export function RMonthlyReportPreview({
           </label>
         ))}
         <label className="r06-field">{cfg.signLabel}
-          <select className="mini-select" value={doc?.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+          <select className="mini-select" value={doc?.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
             <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
           </select>
         </label>
@@ -560,19 +575,19 @@ export function RMonthlyReportPreview({
             {cfg.rowFields.map(f => (
               <td key={f.key}>
                 {f.type === 'pn' ? (
-                  <select className="mini-select no-print" value={formNormalizePn(doc.data?.[f.key] || 'P')} onChange={e => saveDoc(supabase, doc, { [f.key]: e.target.value, status: e.target.value }, undefined, loadHaccpDocs, setMessage, code)}>
+                  <select className="mini-select no-print" value={formNormalizePn(doc.data?.[f.key] || 'P')} onChange={e => saveDoc(supabase, doc, { [f.key]: e.target.value, status: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
                     <option value="P">P</option><option value="N">N</option>
                   </select>
                 ) : f.type === 'date' ? (
-                  <input type="date" className="cell-input no-print" defaultValue={doc.data?.[f.key] || doc.document_date} onBlur={e => saveDoc(supabase, doc, { [f.key]: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} />
+                  <input type="date" className="cell-input no-print" defaultValue={doc.data?.[f.key] || doc.document_date} onBlur={e => saveDoc(supabase, doc, { [f.key]: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} />
                 ) : (
-                  <input className="cell-input no-print" defaultValue={doc.data?.[f.key] || ''} onBlur={e => saveDoc(supabase, doc, { [f.key]: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} />
+                  <input className="cell-input no-print" defaultValue={doc.data?.[f.key] || ''} onBlur={e => saveDoc(supabase, doc, { [f.key]: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} />
                 )}
                 <span className="print-only">{doc.data?.[f.key] || ''}</span>
               </td>
             ))}
             <td>
-              <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+              <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
                 <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
               </select>
               <span className="print-only">{doc.signed_by_operator || ''}</span>
@@ -580,7 +595,7 @@ export function RMonthlyReportPreview({
           </tr>
         ))}</tbody></table>
       {cfg.summaryField && docs.find(d => d.data?.is_shell) && (
-        <label>{cfg.summaryField.label}<textarea className="cell-input" rows={3} defaultValue={docs.find(d => d.data?.is_shell)?.data?.summary || ''} onBlur={e => saveDoc(supabase, docs.find(d => d.data?.is_shell), { summary: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} /></label>
+        <label>{cfg.summaryField.label}<textarea className="cell-input" rows={3} defaultValue={docs.find(d => d.data?.is_shell)?.data?.summary || ''} onBlur={e => saveDoc(supabase, docs.find(d => d.data?.is_shell), { summary: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} /></label>
       )}
     </div>
   }
@@ -595,20 +610,20 @@ export function RMonthlyReportPreview({
             <td>{i + 1}</td>
             <td><input className="cell-input" type="number" min={1} max={12} defaultValue={m.month || ''} onBlur={e => {
               const next = [...months]; next[i] = { ...next[i], month: e.target.value }
-              saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code)
+              saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
             }} /></td>
             <td><input className="cell-input" placeholder="Sztuk / stan / preparat / gryzonie" defaultValue={[m.derat_count, m.derat_tech, m.derat_bait, m.derat_rodents].filter(Boolean).join(' / ')} onBlur={e => {
-              const next = [...months]; next[i] = { ...next[i], derat_summary: e.target.value }; saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code)
+              const next = [...months]; next[i] = { ...next[i], derat_summary: e.target.value }; saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
             }} /></td>
             <td><input className="cell-input" placeholder="Sztuk / gryzonie" defaultValue={[m.trap_count, m.trap_rodents].filter(Boolean).join(' / ')} onBlur={e => {
-              const next = [...months]; next[i] = { ...next[i], trap_summary: e.target.value }; saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code)
+              const next = [...months]; next[i] = { ...next[i], trap_summary: e.target.value }; saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
             }} /></td>
             <td><input className="cell-input" defaultValue={m.trend || ''} onBlur={e => {
-              const next = [...months]; next[i] = { ...next[i], trend: e.target.value }; saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code)
+              const next = [...months]; next[i] = { ...next[i], trend: e.target.value }; saveDoc(supabase, doc, { months: next }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
             }} /></td>
           </tr>
         ))}</tbody></table>
-      <label>Uwagi<textarea className="cell-input" rows={2} defaultValue={doc?.data?.notes || ''} onBlur={e => saveDoc(supabase, doc, { notes: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} /></label>
+      <label>Uwagi<textarea className="cell-input" rows={2} defaultValue={doc?.data?.notes || ''} onBlur={e => saveDoc(supabase, doc, { notes: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} /></label>
     </div>
   }
 
@@ -635,14 +650,14 @@ export function RMonthlyReportPreview({
             {headR04(doc.data?.document_no)}
             <div className="r04-meta-row no-print">
               <label>Nr bieżący dokumentu
-                <input className="cell-input" defaultValue={doc.data?.document_no || ''} onBlur={e => saveDoc(supabase, doc, { document_no: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} />
+                <input className="cell-input" defaultValue={doc.data?.document_no || ''} onBlur={e => saveDoc(supabase, doc, { document_no: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} />
               </label>
               <label>Data kontroli
                 <input type="date" className="cell-input" defaultValue={(doc.data?.control_date || doc.document_date || '').slice(0, 10)}
                   onBlur={e => saveR04ControlDate(doc, e.target.value)} />
               </label>
               <label>{cfg.signLabel}
-                <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+                <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
                   <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
                 </select>
               </label>
@@ -756,15 +771,15 @@ export function RMonthlyReportPreview({
               return <td key={col.id}>
                 <select className="mini-select no-print" value={cell.mcd || ''} onChange={e => {
                   const cells = { ...(doc.data?.cells || {}), [col.id]: { ...cell, mcd: e.target.value } }
-                  saveDoc(supabase, doc, { cells }, undefined, loadHaccpDocs, setMessage, code)
+                  saveDoc(supabase, doc, { cells }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
                 }}>{cfg.mcdOptions.map(o => <option key={o || 'e'} value={o}>{o || '—'}</option>)}</select>
                 <input className="cell-input no-print" placeholder="Środek" defaultValue={cell.agent || ''} onBlur={e => {
                   const cells = { ...(doc.data?.cells || {}), [col.id]: { ...cell, agent: e.target.value } }
-                  saveDoc(supabase, doc, { cells }, undefined, loadHaccpDocs, setMessage, code)
+                  saveDoc(supabase, doc, { cells }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
                 }} />
               </td>
             })}
-            <td><select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+            <td><select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
               <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
           </tr>
         })}</tbody></table>
@@ -788,23 +803,23 @@ export function RMonthlyReportPreview({
           const isOff = off || doc.data?.is_day_off
           return <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
             <td>{formatRMonthlyPlDate(doc.document_date)}</td>
-            <td><input className="cell-input no-print" defaultValue={doc.data?.godzina || ''} onBlur={e => saveDoc(supabase, doc, { godzina: e.target.value }, undefined, loadHaccpDocs, setMessage, code)} /></td>
+            <td><input className="cell-input no-print" defaultValue={doc.data?.godzina || ''} onBlur={e => saveDoc(supabase, doc, { godzina: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} /></td>
             {[0, 1, 2, 3].map(idx => {
               const e = emps[idx] || { name: '', clothing: '' }
               return <React.Fragment key={idx}>
                 <td><input className="cell-input no-print" defaultValue={e.name || ''} onBlur={ev => {
                   const employees = [...emps]; while (employees.length < slots) employees.push({ slot: employees.length + 1, name: '', clothing: '' })
                   employees[idx] = { ...employees[idx], name: ev.target.value }
-                  saveDoc(supabase, doc, { employees }, undefined, loadHaccpDocs, setMessage, code)
+                  saveDoc(supabase, doc, { employees }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
                 }} /></td>
                 <td><select className="mini-select no-print" value={e.clothing || ''} onChange={ev => {
                   const employees = [...emps]; while (employees.length < slots) employees.push({ slot: employees.length + 1, name: '', clothing: '' })
                   employees[idx] = { ...employees[idx], clothing: ev.target.value }
-                  saveDoc(supabase, doc, { employees }, undefined, loadHaccpDocs, setMessage, code)
+                  saveDoc(supabase, doc, { employees }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
                 }}><option value="">—</option><option value="P">P</option><option value="N">N</option></select></td>
               </React.Fragment>
             })}
-            <td><select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+            <td><select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
               <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
           </tr>
         })}</tbody></table>
@@ -859,13 +874,13 @@ export function RMonthlyReportPreview({
 
     function saveCal(doc, calPatch) {
       const cal = { ...(doc.data?.calibration || {}), ...calPatch }
-      saveDoc(supabase, doc, { calibration: cal }, undefined, loadHaccpDocs, setMessage, code)
+      saveDoc(supabase, doc, { calibration: cal }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
     }
 
     function saveChamber(doc, chId, patch) {
       const cal = doc.data?.calibration || {}
       const chambersData = { ...(cal.chambers || {}), [chId]: { ...(cal.chambers?.[chId] || {}), ...patch } }
-      saveDoc(supabase, doc, { calibration: { ...cal, chambers: chambersData } }, undefined, loadHaccpDocs, setMessage, code)
+      saveDoc(supabase, doc, { calibration: { ...cal, chambers: chambersData } }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
     }
 
     const pwOpts = (cfg.pwOptions || ['', 'P', 'W']).filter(o => o !== undefined)
@@ -972,7 +987,7 @@ export function RMonthlyReportPreview({
                     ]
                   })}
                   <td>
-                    <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+                    <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
                       <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
                     </select>
                     <span className="print-only">{doc.signed_by_operator || ''}</span>
@@ -1017,12 +1032,12 @@ export function RMonthlyReportPreview({
 
     function saveMagnet(doc, colId, value) {
       const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [colId]: value }
-      saveDoc(supabase, doc, { magnets }, undefined, loadHaccpDocs, setMessage, code)
+      saveDoc(supabase, doc, { magnets }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
     }
 
     function saveUwagi(doc, value) {
       const v = value === '' ? '' : formNormalizePn(value)
-      saveDoc(supabase, doc, { uwagi_pn: v, status: v === 'N' ? 'N' : 'P' }, undefined, loadHaccpDocs, setMessage, code)
+      saveDoc(supabase, doc, { uwagi_pn: v, status: v === 'N' ? 'N' : 'P' }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
     }
 
     const headR11 = (
@@ -1078,7 +1093,7 @@ export function RMonthlyReportPreview({
               </td>
             })}
             <td>
-              <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code)}>
+              <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
                 <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
               </select>
               <span className="print-only">{doc.signed_by_operator || ''}</span>
