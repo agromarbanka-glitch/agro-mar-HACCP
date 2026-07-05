@@ -13,7 +13,7 @@ import {
   R01_ENGINE_VERSION, R01_HEADER, R01_MCD_OPTIONS, loadR01Columns, saveR01Columns, buildR01MonthPayloads,
   buildR01PeriodGroups, buildR01PrintHtml, buildR01ExcelRows, sortR01Docs, r01ColumnsFromDocs, r01CleaningForDoc,
   r01McdDisplay, formatR01PlDate, buildR01CalendarRows, buildR01SingleDayPayload, r01MakeColumn,
-  defaultR01Cleaning, normalizeMcd
+  defaultR01Cleaning, normalizeMcd, mergeR01ColumnsWithDefaults, r01MissingDefaultColumnLabels
 } from './r01Engine'
 import {
   R02_ENGINE_VERSION, R02_HEADER, R02_MCD_OPTIONS, loadR02Columns, saveR02Columns, buildR02MonthPayloads,
@@ -1268,6 +1268,7 @@ function App() {
   }
 
   async function addR13ColumnToGroup(group, label) {
+    if (!ensureCanDelete()) return
     const col = r13MakeColumn(label)
     const cols = [...(group.columns || r13ColumnsFromDocs(group.docs)), col]
     await updateR13DocsColumns(group, cols, true)
@@ -1276,16 +1277,18 @@ function App() {
   }
 
   async function removeR13ColumnFromGroup(group, columnId) {
+    if (!ensureCanDelete()) return
     const allCols = group.columns || r13ColumnsFromDocs(group.docs)
     const removed = allCols.find(c => c.id === columnId)
     const cols = allCols.filter(c => c.id !== columnId)
     if (cols.length < 1) { setMessage('R13: musi zostać co najmniej jedna szyba.'); return }
-    if (!window.confirm(`Usunąć kolumnę „${removed?.label || columnId}" z tej kartoteki?`)) return
+    if (!window.confirm(`Czy na pewno usunąć kolumnę „${removed?.label || columnId}"?\n\nTej operacji nie można cofnąć jednym kliknięciem.`)) return
     await updateR13DocsColumns(group, cols, false)
     setMessage('R13: usunięto kolumnę.')
   }
 
   async function renameR13ColumnInGroup(group, columnId, newLabel) {
+    if (!ensureCanDelete()) return
     const label = String(newLabel || '').trim()
     if (!label) return
     const cols = (group.columns || r13ColumnsFromDocs(group.docs)).map(c => c.id === columnId ? { ...c, label } : c)
@@ -1461,6 +1464,7 @@ function App() {
   }
 
   async function addR01ColumnToGroup(group, label) {
+    if (!ensureCanDelete()) return
     const col = r01MakeColumn(label)
     const cols = [...(group.columns || r01ColumnsFromDocs(group.docs)), col]
     await updateR01DocsColumns(group, cols)
@@ -1469,16 +1473,18 @@ function App() {
   }
 
   async function removeR01ColumnFromGroup(group, columnId) {
+    if (!ensureCanDelete()) return
     const allCols = group.columns || r01ColumnsFromDocs(group.docs)
     const removed = allCols.find(c => c.id === columnId)
     const cols = allCols.filter(c => c.id !== columnId)
     if (cols.length < 1) { setMessage('R01: musi zostać co najmniej jeden obiekt.'); return }
-    if (!window.confirm(`Usunąć kolumnę „${removed?.label || columnId}" z tej kartoteki?`)) return
+    if (!window.confirm(`Czy na pewno usunąć obiekt „${removed?.label || columnId}" z kartoteki R01?\n\nUsunięcie kolumny zmienia układ całej kartoteki. Tej operacji nie można łatwo cofnąć.`)) return
     await updateR01DocsColumns(group, cols)
     setMessage('R01: usunięto kolumnę.')
   }
 
   async function renameR01ColumnInGroup(group, columnId, newLabel) {
+    if (!ensureCanDelete()) return
     const label = String(newLabel || '').trim()
     if (!label) return
     const cols = (group.columns || r01ColumnsFromDocs(group.docs)).map(c => c.id === columnId ? { ...c, label } : c)
@@ -1608,11 +1614,47 @@ function App() {
   }
 
   function removeR01DefaultColumn(columnId) {
+    if (!ensureCanDelete()) return
+    const removed = r01ColumnDefs.find(c => c.id === columnId)
     const next = r01ColumnDefs.filter(c => c.id !== columnId)
     if (next.length < 1) { setMessage('R01: musi zostać co najmniej jeden obiekt.'); return }
+    if (!window.confirm(`Czy na pewno usunąć „${removed?.label || columnId}" z domyślnych obiektów R01?\n\nNowe kartoteki nie będą miały tej kolumny.`)) return
     saveR01Columns(next)
     setR01ColumnDefs(next)
     setMessage('R01: usunięto kolumnę z ustawień domyślnych.')
+  }
+
+  async function restoreR01MissingDefaultsForGroup(group) {
+    if (!ensureCanDelete()) return
+    const current = group.columns || r01ColumnsFromDocs(group.docs)
+    const missing = r01MissingDefaultColumnLabels(current)
+    if (!missing.length) {
+      setMessage('R01: wszystkie obiekty ze wzoru są już w tej kartotece.')
+      return
+    }
+    if (!window.confirm(`Przywrócić brakujące obiekty ze wzoru?\n\n${missing.join('\n')}`)) return
+    const merged = mergeR01ColumnsWithDefaults(current)
+    await updateR01DocsColumns(group, merged)
+    setMessage(`R01: przywrócono obiekty: ${missing.join(', ')}.`)
+  }
+
+  async function restoreAllR01MissingDefaults() {
+    if (!ensureCanDelete()) return
+    const groups = buildR01PeriodGroups(haccpDocs || [])
+    const affected = groups.filter(g => r01MissingDefaultColumnLabels(g.columns || r01ColumnsFromDocs(g.docs)).length > 0)
+    if (!affected.length) {
+      setMessage('R01: we wszystkich kartotekach są już pełne obiekty ze wzoru.')
+      return
+    }
+    if (!window.confirm(`Przywrócić brakujące obiekty ze wzoru w ${affected.length} kartotekach R01?`)) return
+    for (const group of affected) {
+      const merged = mergeR01ColumnsWithDefaults(group.columns || r01ColumnsFromDocs(group.docs))
+      await updateR01DocsColumns(group, merged)
+    }
+    const nextDefaults = mergeR01ColumnsWithDefaults(loadR01Columns())
+    saveR01Columns(nextDefaults)
+    setR01ColumnDefs(nextDefaults)
+    setMessage(`R01: przywrócono brakujące obiekty w ${affected.length} kartotekach.`)
   }
 
   async function saveR02Cell(doc, patch = {}, signedBy) {
@@ -1665,6 +1707,7 @@ function App() {
   }
 
   async function addR02ColumnToGroup(group, label) {
+    if (!ensureCanDelete()) return
     const col = r02MakeColumn(label)
     const cols = [...(group.columns || r02ColumnsFromDocs(group.docs)), col]
     await updateR02DocsColumns(group, cols)
@@ -1673,16 +1716,18 @@ function App() {
   }
 
   async function removeR02ColumnFromGroup(group, columnId) {
+    if (!ensureCanDelete()) return
     const allCols = group.columns || r02ColumnsFromDocs(group.docs)
     const removed = allCols.find(c => c.id === columnId)
     const cols = allCols.filter(c => c.id !== columnId)
     if (cols.length < 1) { setMessage('R02: musi zostać co najmniej jedna maszyna.'); return }
-    if (!window.confirm(`Usunąć kolumnę „${removed?.label || columnId}" z tej kartoteki?`)) return
+    if (!window.confirm(`Czy na pewno usunąć kolumnę „${removed?.label || columnId}"?\n\nTej operacji nie można cofnąć jednym kliknięciem.`)) return
     await updateR02DocsColumns(group, cols)
     setMessage('R02: usunięto kolumnę.')
   }
 
   async function renameR02ColumnInGroup(group, columnId, newLabel) {
+    if (!ensureCanDelete()) return
     const label = String(newLabel || '').trim()
     if (!label) return
     const cols = (group.columns || r02ColumnsFromDocs(group.docs)).map(c => c.id === columnId ? { ...c, label } : c)
@@ -1812,8 +1857,11 @@ function App() {
   }
 
   function removeR02DefaultColumn(columnId) {
+    if (!ensureCanDelete()) return
+    const removed = r02ColumnDefs.find(c => c.id === columnId)
     const next = r02ColumnDefs.filter(c => c.id !== columnId)
     if (next.length < 1) { setMessage('R02: musi zostać co najmniej jedna maszyna.'); return }
+    if (!window.confirm(`Czy na pewno usunąć „${removed?.label || columnId}" z domyślnych maszyn R02?`)) return
     saveR02Columns(next)
     setR02ColumnDefs(next)
     setMessage('R02: usunięto kolumnę z ustawień domyślnych.')
@@ -2929,10 +2977,10 @@ function App() {
           </label>
           <button className="secondary" onClick={() => setEmployeeForVisibleR02Group(group, defaultR02Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleR02Group(group, defaultR02Employee, true)}>Uzupełnij puste</button>
-          <button className="secondary danger" onClick={() => deleteR02Month(group)}>Usuń kartotekę</button>
+          {isAdmin(authProfile) && <button className="secondary danger" onClick={() => deleteR02Month(group)}>Usuń kartotekę</button>}
           <span className="hint">Niedziele na różowo – domyślnie puste, uzupełnij ręcznie M/C/D przy każdej maszynie.</span>
         </div>
-        <div className="no-print r13-columns-panel">
+        {isAdmin(authProfile) && <div className="no-print r13-columns-panel">
           <b>Maszyny / urządzenia w tej kartotece:</b>
           <div className="r13-columns-list">
             {columns.map(col => (
@@ -2946,7 +2994,7 @@ function App() {
             <input value={r02NewColumnLabel} onChange={e => setR02NewColumnLabel(e.target.value)} placeholder="np. Separator magnetyczny" onKeyDown={e => { if (e.key === 'Enter' && r02NewColumnLabel.trim()) addR02ColumnToGroup(group, r02NewColumnLabel) }} />
             <button type="button" className="secondary" onClick={() => addR02ColumnToGroup(group, r02NewColumnLabel)} disabled={!r02NewColumnLabel.trim()}>Dodaj maszynę</button>
           </div>
-        </div>
+        </div>}
         <table className="r02-head r13-head"><tbody><tr>
           <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
           <td className="r13-title"><b>{R02_HEADER.title}</b></td>
@@ -3028,10 +3076,15 @@ function App() {
           </label>
           <button className="secondary" onClick={() => setEmployeeForVisibleR01Group(group, defaultR01Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleR01Group(group, defaultR01Employee, true)}>Uzupełnij puste</button>
-          <button className="secondary danger" onClick={() => deleteR01Month(group)}>Usuń kartotekę</button>
+          {isAdmin(authProfile) && <>
+            <button className="secondary danger" onClick={() => deleteR01Month(group)}>Usuń kartotekę</button>
+            {r01MissingDefaultColumnLabels(columns).length > 0 && (
+              <button type="button" className="secondary" onClick={() => restoreR01MissingDefaultsForGroup(group)}>Przywróć brakujące obiekty</button>
+            )}
+          </>}
           <span className="hint">Niedziele na różowo – domyślnie puste; pomieszczenie przyjęcia surowców ma M w dni robocze.</span>
         </div>
-        <div className="no-print r13-columns-panel">
+        {isAdmin(authProfile) && <div className="no-print r13-columns-panel">
           <b>Obiekty w tej kartotece:</b>
           <div className="r13-columns-list">
             {columns.map(col => (
@@ -3045,7 +3098,7 @@ function App() {
             <input value={r01NewColumnLabel} onChange={e => setR01NewColumnLabel(e.target.value)} placeholder="np. Magazyn opakowań" onKeyDown={e => { if (e.key === 'Enter' && r01NewColumnLabel.trim()) addR01ColumnToGroup(group, r01NewColumnLabel) }} />
             <button type="button" className="secondary" onClick={() => addR01ColumnToGroup(group, r01NewColumnLabel)} disabled={!r01NewColumnLabel.trim()}>Dodaj obiekt</button>
           </div>
-        </div>
+        </div>}
         <table className="r01-head r13-head"><tbody><tr>
           <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
           <td className="r13-title"><b>{R01_HEADER.title}</b></td>
@@ -3133,10 +3186,10 @@ function App() {
           </label>
           <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleR13Group(group, defaultR13Employee, true)}>Uzupełnij puste</button>
-          <button className="secondary danger" onClick={() => deleteR13Month(group)}>Usuń kartotekę</button>
+          {isAdmin(authProfile) && <button className="secondary danger" onClick={() => deleteR13Month(group)}>Usuń kartotekę</button>}
           <span className="hint">Niedziele na różowo – domyślnie puste, można uzupełnić ręcznie (np. praca w niedzielę).</span>
         </div>
-        <div className="no-print r13-columns-panel">
+        {isAdmin(authProfile) && <div className="no-print r13-columns-panel">
           <b>Kolumny szyb w tej kartotece:</b>
           <div className="r13-columns-list">
             {columns.map(col => (
@@ -3150,7 +3203,7 @@ function App() {
             <input value={r13NewColumnLabel} onChange={e => setR13NewColumnLabel(e.target.value)} placeholder="np. Szyba 3" onKeyDown={e => { if (e.key === 'Enter' && r13NewColumnLabel.trim()) addR13ColumnToGroup(group, r13NewColumnLabel) }} />
             <button type="button" className="secondary" onClick={() => addR13ColumnToGroup(group, r13NewColumnLabel)} disabled={!r13NewColumnLabel.trim()}>Dodaj szybę</button>
           </div>
-        </div>
+        </div>}
         <table className="r13-head"><tbody><tr>
           <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
           <td className="r13-title"><b>{R13_HEADER.title}</b></td>
@@ -4088,8 +4141,11 @@ function App() {
   }
 
   function removeR13DefaultColumn(columnId) {
+    if (!ensureCanDelete()) return
+    const removed = r13ColumnDefs.find(c => c.id === columnId)
     const next = r13ColumnDefs.filter(c => c.id !== columnId)
     if (next.length < 1) { setMessage('R13: musi zostać co najmniej jedna szyba.'); return }
+    if (!window.confirm(`Czy na pewno usunąć „${removed?.label || columnId}" z domyślnych kolumn R13?`)) return
     saveR13Columns(next)
     setR13ColumnDefs(next)
     setMessage('R13: usunięto kolumnę z ustawień domyślnych.')
@@ -4100,7 +4156,7 @@ function App() {
       <div className="card inner-card no-print r13-add-panel">
         <h3>Dodaj kartotekę R02 za miesiąc</h3>
         <p className="hint">System uzupełni <b>cały miesiąc</b> – dni robocze puste do wpisania M/C/D przy każdej maszynie, <b>niedziele puste</b> (jasny czerwony) z możliwością ręcznego uzupełnienia.</p>
-        <div className="r13-columns-panel">
+        {isAdmin(authProfile) && <div className="r13-columns-panel">
           <b>Maszyny / urządzenia (domyślne dla nowych kartotek):</b>
           <div className="r13-columns-list">
             {r02ColumnDefs.map(col => (
@@ -4114,7 +4170,7 @@ function App() {
             <button type="button" className="secondary" onClick={addR02DefaultColumn} disabled={!r02NewColumnLabel.trim()}>Dodaj maszynę</button>
           </div>
           <p className="hint">Kolumny można też dopisać do istniejącej kartoteki w podglądzie (Otwórz).</p>
-        </div>
+        </div>}
         <div className="k03-bulk-row">
           <label>Rok i miesiąc
             <div className="r13-month-picker">
@@ -4160,6 +4216,7 @@ function App() {
       <div className="card inner-card no-print r13-add-panel">
         <h3>Dodaj kartotekę R01 za miesiąc</h3>
         <p className="hint">System uzupełni <b>cały miesiąc</b>: w dni robocze <b>M</b> (mycie) w kolumnie <b>Pomieszczenie przyjęcia surowców</b>, pozostałe obiekty puste do uzupełnienia. <b>Niedziele puste</b> (jasny czerwony) – można uzupełnić ręcznie.</p>
+        {isAdmin(authProfile) && <>
         <div className="r13-columns-panel">
           <b>Obiekty (domyślne dla nowych kartotek):</b>
           <div className="r13-columns-list">
@@ -4172,9 +4229,11 @@ function App() {
           <div className="r13-add-column-row">
             <input value={r01NewColumnLabel} onChange={e => setR01NewColumnLabel(e.target.value)} placeholder="np. Magazyn opakowań" onKeyDown={e => { if (e.key === 'Enter' && r01NewColumnLabel.trim()) addR01DefaultColumn() }} />
             <button type="button" className="secondary" onClick={addR01DefaultColumn} disabled={!r01NewColumnLabel.trim()}>Dodaj obiekt</button>
+            <button type="button" className="secondary" onClick={restoreAllR01MissingDefaults}>Przywróć brakujące obiekty (wszystkie R01)</button>
           </div>
           <p className="hint">Kolumny można też dopisać do istniejącej kartoteki w podglądzie (Otwórz).</p>
         </div>
+        </>}
         <div className="k03-bulk-row">
           <label>Rok i miesiąc
             <div className="r13-month-picker">
@@ -4220,7 +4279,7 @@ function App() {
       <div className="card inner-card no-print r13-add-panel">
         <h3>Dodaj kartotekę R13 za miesiąc</h3>
         <p className="hint">System uzupełni <b>cały miesiąc</b>: dni robocze (pon–sob) z <b>P</b> w każdej szybie, <b>niedziele puste</b> (jasny czerwony) – można je potem uzupełnić ręcznie.</p>
-        <div className="r13-columns-panel">
+        {isAdmin(authProfile) && <div className="r13-columns-panel">
           <b>Kolumny szyb (domyślne dla nowych kartotek):</b>
           <div className="r13-columns-list">
             {r13ColumnDefs.map(col => (
@@ -4234,7 +4293,7 @@ function App() {
             <button type="button" className="secondary" onClick={addR13DefaultColumn} disabled={!r13NewColumnLabel.trim()}>Dodaj szybę</button>
           </div>
           <p className="hint">Dodane kolumny można też dopisać do istniejącej kartoteki w podglądzie (Otwórz).</p>
-        </div>
+        </div>}
         <div className="k03-bulk-row">
           <label>Rok i miesiąc
             <div className="r13-month-picker">

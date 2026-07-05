@@ -179,13 +179,14 @@ export function RMonthlyReportSection({
     setMessage(`${code}: dodano ${col.label}.`)
   }
 
-  const colPanel = (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey ? (
+  const colPanel = allowDelete && (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey ? (
     <div className="r13-columns-panel">
       <b>{cfg.columnLabel || 'Stacje'}:</b>
       <div className="r13-columns-list">
         {columnDefs.map(col => (
           <span key={col.id} className="r13-column-chip">{col.label}
-            {columnDefs.length > 1 && <button type="button" className="mini danger" onClick={() => {
+            {allowDelete && columnDefs.length > 1 && <button type="button" className="mini danger" onClick={() => {
+              if (!window.confirm(`Czy na pewno usunąć „${col.label}" z domyślnych kolumn ${code}?`)) return
               const next = columnDefs.filter(c => c.id !== col.id)
               saveRMonthlyColumns(code, next)
               setColumnDefs(next)
@@ -459,7 +460,8 @@ export function RMonthlyReportPreview({
   }
 
   async function removeR04Station(doc, stId) {
-    if (!supabase || !doc || !window.confirm('Usunąć tę stację z kontroli?')) return
+    if (!allowDelete) { setMessage('Tylko administrator może usuwać.'); return }
+    if (!supabase || !doc || !window.confirm('Czy na pewno usunąć tę stację z kontroli?')) return
     const stations = (doc.data?.stations || []).filter(s => s.id !== stId)
     const readings = { ...(doc.data?.readings || {}) }
     delete readings[stId]
@@ -692,7 +694,7 @@ export function RMonthlyReportPreview({
                           <span className="print-only">{rd.notes || ''}</span>
                         </td>
                         <td className="no-print">
-                          {stations.length > 1 && <button type="button" className="mini danger" onClick={() => removeR04Station(doc, st.id)}>×</button>}
+                          {allowDelete && stations.length > 1 && <button type="button" className="mini danger" onClick={() => removeR04Station(doc, st.id)}>×</button>}
                         </td>
                       </tr>
                     )

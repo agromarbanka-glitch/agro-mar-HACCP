@@ -195,6 +195,19 @@ export function r01MakeColumn(label) {
   return { id: `${base}-${Date.now().toString(36).slice(-4)}`, label: trimmed, auto_m: false }
 }
 
+/** Uzupełnia brakujące kolumny ze wzoru Word (I/2024), zachowując kolejność i własne obiekty. */
+export function mergeR01ColumnsWithDefaults(currentColumns) {
+  const currentById = new Map((currentColumns || []).map(c => [c.id, { ...c }]))
+  const custom = (currentColumns || []).filter(c => !R01_DEFAULT_COLUMNS.some(d => d.id === c.id))
+  const merged = R01_DEFAULT_COLUMNS.map(def => currentById.get(def.id) || { ...def })
+  return [...merged, ...custom.map(c => ({ ...c }))]
+}
+
+export function r01MissingDefaultColumnLabels(currentColumns) {
+  const ids = new Set((currentColumns || []).map(c => c.id))
+  return R01_DEFAULT_COLUMNS.filter(d => !ids.has(d.id)).map(d => d.label)
+}
+
 export function buildR01PrintHtml(group, escapeHtml) {
   const docs = sortR01Docs(group.docs || [])
   const period = String(group.period || '')
