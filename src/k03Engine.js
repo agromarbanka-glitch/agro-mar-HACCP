@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.6'
+export const K03_ENGINE_VERSION = '3.7'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -40,31 +40,28 @@ export function formatK03PzNo(row) {
 
   let text = raw.replace(/agro[-\s]*mar[^/]*/gi, '').replace(/^\s*\/\s*/, '').trim()
 
-  const pzIndex = text.search(/\bPZ[\s./-]?\d/i)
+  const pzIndex = text.search(/\bPZ[\s./,-]?\d/i)
   if (pzIndex >= 0) {
     text = text.slice(pzIndex).trim()
-    text = text.replace(/\s+-\s+.+$/, '').trim()
-    return text
-      .replace(/^PZ\s+/i, 'PZ')
-      .replace(/\s*\/\s*/g, '/')
-      .replace(/\s+/g, '')
+    text = text.split(/\s+-\s+/)[0].trim()
+    text = text.replace(/,\s*$/, '')
+    return text.replace(/^PZ\s+/i, 'PZ')
   }
 
   const fvIndex = text.search(/\bF[\s./-]?V[\s./-]?\d/i)
   if (fvIndex >= 0) {
-    return text.slice(fvIndex).replace(/\s+-\s+.+$/, '').trim().replace(/\s*\/\s*/g, '/').replace(/\s+/g, '')
+    return text.slice(fvIndex).split(/\s+-\s+/)[0].trim().replace(/,\s*$/, '')
   }
 
   if (isAgromarName(raw)) return ''
   if (/^[a-z]\d+\/\d{3}\/\d{4}$/i.test(text)) return ''
-  return text
+  return text.replace(/,\s*$/, '')
 }
 
-/** W kolumnie „Dostawca” – nazwa kontrahenta; gdy brak, numer PZ. */
+/** W kolumnie „Dostawca” wyłącznie pełny numer PZ (bez nazw kontrahentów / odbiorców). */
 export function formatK03Dostawca(row) {
   if (row?.isShortage) return row?.supplier || ''
-  const supplier = formatK03Receiver(row?.supplier || '')
-  return supplier || formatK03PzNo(row)
+  return formatK03PzNo(row)
 }
 
 export function formatK03Receiver(value) {
@@ -125,7 +122,7 @@ export function buildK03PaperData(doc) {
       lp: i + 1,
       pzNo,
       pzDate: r.pz_date || '',
-      dostawca: formatK03Dostawca(r),
+      dostawca: pzNo,
       qty: r.qty ? Number(r.qty) : '',
       wzLp: i + 1,
       wzNo: i === 0 ? (saleRow.wz_no || doc?.document_no || '') : '',
@@ -583,7 +580,7 @@ export async function loadK03Forms(client) {
     pzBySaleKey.get(key).push({
       pz_no: pzOp.document_no || lot.lot_no || '',
       pz_date: pzDate,
-      supplier: contractorMap.get(pzOp.contractor_id)?.name || '',
+      supplier: '',
       qty,
       source_lot_no: lot.lot_no || ''
     })

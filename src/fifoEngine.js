@@ -287,7 +287,7 @@ async function enrichAllocationRows(client, allocationRows) {
     return {
       pz_no: pzOp.document_no || lot.lot_no || '',
       pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
-      supplier: contractorMap.get(pzOp.contractor_id)?.name || '',
+      supplier: '',
       qty: row.qty,
       source_lot_no: lot.lot_no || '',
       source_lot_id: row.source_lot_id
