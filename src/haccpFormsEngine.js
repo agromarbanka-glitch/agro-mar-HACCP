@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.2'
+export const HACCP_FORMS_VERSION = '1.3'
 
 function normalizeText(value) {
   return String(value || '')
@@ -76,14 +76,28 @@ function isFinishedGoodLot(lot, prodOpIds) {
   const productName = lot.products?.name || lot.product_name || ''
   const group = lot.product_group || productGroupForName(productName)
   if (isDirectToSaleProduct(productName, group)) return false
-  if (normalizeText(productName).includes('pulpa')) return false
+  if (lot.source_operation_id && prodOpIds.has(lot.source_operation_id)) return true
   const chamber = lot.chamber
   if (isCcp1Chamber(chamber)) return false
   if (chamber?.control_point === 'CP2') return false
   if (isCp3Chamber(chamber)) return true
-  if (lot.source_operation_id && prodOpIds.has(lot.source_operation_id)) return true
   const finishedGroups = new Set(['malina', 'truskawka', 'wisnia', 'porzeczka_czarna', 'porzeczka_czerwona', 'aronia', 'sliwka', 'jab_obier', 'gruszka'])
   return finishedGroups.has(group)
+}
+
+/** Pola K06 wg wzoru papierowego (wsteczna kompatybilność ze starymi kluczami). */
+export function normalizeK06Data(data = {}) {
+  const barwa = normalizePn(data.barwa ?? data.wyglad_zapach ?? 'P')
+  const zapach = normalizePn(data.zapach ?? data.smak ?? 'P')
+  return {
+    barwa,
+    zapach,
+    twardosc_jablko: normalizePn(data.twardosc_jablko ?? 'P'),
+    brak_plesni: normalizePn(data.brak_plesni ?? 'P'),
+    uwagi: data.uwagi ?? '',
+    podpis: data.podpis ?? data.podpis_kontrolujacego ?? '',
+    auto_source: data.auto_source || ''
+  }
 }
 
 function isCp3Chamber(chamber) {
@@ -124,16 +138,32 @@ function applyK04Override(doc, ov = {}) {
 }
 
 function applyK07Override(doc, ov = {}) {
-  const data = {
-    ...(doc.data || {}),
-    ...ov,
-    uwagi: Object.prototype.hasOwnProperty.call(ov, 'uwagi') ? ov.uwagi : (doc.data?.uwagi ?? 'P')
-  }
+  const base = normalizeK07Data(doc.data || {})
+  const merged = { ...base, ...ov }
+  if (Object.prototype.hasOwnProperty.call(ov, 'surowiec')) merged.surowiec = ov.surowiec
+  if (Object.prototype.hasOwnProperty.call(ov, 'numer_partii')) merged.numer_partii = ov.numer_partii
+  if (Object.prototype.hasOwnProperty.call(ov, 'partia')) merged.numer_partii = ov.partia
   return {
     ...doc,
-    data,
-    status: normalizePn(data.uwagi || 'P') === 'N' ? 'N' : 'P',
-    signed_by_operator: ov.podpis_kontrolujacego ?? doc.signed_by_operator ?? ''
+    product_name: merged.surowiec || doc.product_name || '',
+    lot_no: merged.numer_partii || doc.lot_no || '',
+    data: merged,
+    status: normalizePn(merged.stan_sita || 'P') === 'N' ? 'N' : 'P',
+    signed_by_operator: ov.podpis_kontrolujacego ?? doc.signed_by_operator ?? merged.podpis_kontrolujacego ?? ''
+  }
+}
+
+/** Pola K07 wg wzoru papierowego. */
+export function normalizeK07Data(data = {}, doc = {}) {
+  const surowiec = data.surowiec || doc.product_name || data.rodzaj_surowca || ''
+  const numerPartii = data.numer_partii || data.partia || doc.lot_no || ''
+  return {
+    godzina: data.godzina || '12:00',
+    surowiec,
+    numer_partii: numerPartii,
+    stan_sita: normalizePn(data.stan_sita || 'P'),
+    podpis_kontrolujacego: data.podpis_kontrolujacego || '',
+    operation_id: data.operation_id || doc.operation_id || null
   }
 }
 
@@ -240,27 +270,31 @@ export function buildSyntheticK04Docs(allDocs, overrides = {}) {
 /**
  * K07 – wpis przy każdym przerobie (operacja produkcja): stan sita P, ręczna korekta.
  */
-export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}) {
+export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}, haccpDocs = []) {
   const { operations = [], allocations = [], lots = [] } = trace
   const lotMap = new Map(lots.map(l => [l.id, l]))
   const result = []
+  const existingOpIds = new Set(
+    (haccpDocs || [])
+      .filter(d => d.document_type === 'K07')
+      .map(d => d.data?.operation_id || d.operation_id)
+      .filter(Boolean)
+  )
 
   for (const op of operations) {
     if (normalizeText(op.operation_type) !== 'produkcja') continue
+    if (existingOpIds.has(op.id)) continue
     const date = String(op.operation_date || '').slice(0, 10)
     if (!date) continue
 
     const related = allocations.filter(a => a.operation_id === op.id)
     const outputLots = related.map(a => lotMap.get(a.output_lot_id)).filter(Boolean)
     const inputLots = related.map(a => lotMap.get(a.source_lot_id)).filter(Boolean)
-    const parties = Array.from(new Set([
-      ...outputLots.map(l => l.lot_no),
-      ...inputLots.map(l => l.lot_no)
-    ].filter(Boolean)))
-    const products = Array.from(new Set([
-      ...outputLots.map(l => l.products?.name || ''),
-      ...inputLots.map(l => l.products?.name || '')
-    ].filter(Boolean)))
+    const surowiec = Array.from(new Set(
+      inputLots.map(l => l.products?.name || l.product_name || '').filter(Boolean)
+    )).join(', ')
+    const outputLot = outputLots[0]
+    const numerPartii = outputLot?.lot_no || ''
 
     const id = `K07-${op.id}`
     const ov = overrides[id] || {}
@@ -268,20 +302,20 @@ export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}) {
       id,
       synthetic: true,
       document_type: 'K07',
+      operation_id: op.id,
       document_date: date,
-      product_name: products.join(', ') || 'Przerób na pulę (CCP1)',
-      lot_no: parties[0] || '',
+      product_name: surowiec || 'Przerób na pulę (CCP1)',
+      lot_no: numerPartii,
       document_no: `K07/${op.document_no || date}`,
       chamber_code: 'CCP1',
       qty: 0,
       status: 'P',
       data: {
-        godzina: '09:15',
+        godzina: '12:00',
+        surowiec: surowiec || 'Przerób na pulę (CCP1)',
+        numer_partii: numerPartii,
         stan_sita: 'P',
-        sito_cale: 'P',
-        partia: parties.join(', '),
         podpis_kontrolujacego: '',
-        uwagi: 'P',
         operation_id: op.id
       },
       signed_by_operator: '',
@@ -326,14 +360,15 @@ export function buildSyntheticK06DocsFromTrace(trace = {}, haccpDocs = []) {
       chamber_code: lot.chamber?.code || 'CP3',
       qty: Number(lot.initial_qty || lot.remaining_qty || 0),
       status: 'P',
-      data: {
-        wyglad_zapach: 'P',
-        smak: 'P',
+      data: normalizeK06Data({
         barwa: 'P',
+        zapach: 'P',
+        twardosc_jablko: 'P',
+        brak_plesni: 'P',
         uwagi: '',
         podpis: '',
         auto_source: lot.source_operation_id && prodOpIds.has(lot.source_operation_id) ? 'produkcja' : 'magazyn_cp3'
-      },
+      }),
       signed_by_operator: '',
       document_version: 'I/2024',
       created_at: lot.created_at || lot.production_date
@@ -346,6 +381,7 @@ export function buildK06InsertPayload(doc) {
   return {
     document_type: 'K06',
     lot_id: doc.lot_id || null,
+    operation_id: doc.operation_id || null,
     document_date: doc.document_date,
     product_name: doc.product_name,
     lot_no: doc.lot_no,
@@ -353,8 +389,27 @@ export function buildK06InsertPayload(doc) {
     chamber_code: doc.chamber_code || 'CP3',
     qty: doc.qty || 0,
     status: doc.status || 'P',
-    data: doc.data || { wyglad_zapach: 'P', smak: 'P', barwa: 'P' },
-    signed_by_operator: doc.signed_by_operator || null,
+    data: normalizeK06Data(doc.data || {}),
+    signed_by_operator: doc.signed_by_operator || doc.data?.podpis || null,
+    document_version: 'I/2024'
+  }
+}
+
+export function buildK07InsertPayload(doc) {
+  const live = doc.data ? { ...doc, data: normalizeK07Data(doc.data, doc) } : doc
+  const d = normalizeK07Data(live.data || {}, live)
+  return {
+    document_type: 'K07',
+    operation_id: d.operation_id || live.operation_id || null,
+    document_date: live.document_date,
+    product_name: d.surowiec || live.product_name || '',
+    lot_no: d.numer_partii || live.lot_no || '',
+    document_no: live.document_no || `K07/${live.document_date || 'brak'}`,
+    chamber_code: 'CCP1',
+    qty: live.qty || 0,
+    status: live.status || (normalizePn(d.stan_sita) === 'N' ? 'N' : 'P'),
+    data: d,
+    signed_by_operator: live.signed_by_operator || d.podpis_kontrolujacego || null,
     document_version: 'I/2024'
   }
 }
@@ -393,16 +448,28 @@ export function buildK04MonthlyHtml(group, escapeHtml) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(chamber)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.5}.meta{width:25%;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:11pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K04 - Karta kontroli parametrów<br>magazynowania produktów gotowych (CP3)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Komora:</b> ${escapeHtml(chamber)}<br><b>Produkt:</b> ${escapeHtml(productLabel)}</td></tr><tr><td class="temp-note">${note}</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br>nr 1 [°C]</th><th>Temperatura<br>nr 2 [°C]</th><th>Podpis osoby<br>kontrolującej</th><th>Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
+export function buildK06MonthlyHtml(group, escapeHtml) {
+  const docs = group.docs || []
+  const year = (group.period || docs[0]?.document_date || '').slice(0, 4)
+  const month = (group.period || docs[0]?.document_date || '').slice(5, 7)
+  const rows = docs.map(doc => {
+    const d = normalizeK06Data(doc.data || {})
+    return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td class="left">${escapeHtml(doc.product_name || '')}</td><td>${escapeHtml(doc.lot_no || '')}</td><td>${normalizePn(d.barwa)}</td><td>${normalizePn(d.zapach)}</td><td>${normalizePn(d.twardosc_jablko)}</td><td>${normalizePn(d.brak_plesni)}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis || '')}</td></tr>`
+  }).join('')
+  const blanks = Array.from({ length: Math.max(0, 11 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K06 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.1}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.3}.meta{width:25%;text-align:left;vertical-align:top}.left{text-align:left}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K06 - Karta oceny jakości gotowego produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1 z 1</td></tr><tr><td></td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br>(P/N)*</th><th>Zapach<br>(P/N)*</th><th>Twardość (jabłko)<br>(P/N)*</th><th>Brak oznak pleśni<br>(P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+}
+
 export function buildK07MonthlyHtml(group, escapeHtml) {
   const docs = group.docs || []
   const year = (group.period || docs[0]?.document_date || '').slice(0, 4)
   const month = (group.period || docs[0]?.document_date || '').slice(5, 7)
   const rows = docs.map(doc => {
-    const d = doc.data || {}
-    return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(d.godzina || '09:15')}</td><td>${normalizePn(d.stan_sita || 'P')}</td><td>${normalizePn(d.sito_cale || 'P')}</td><td>${escapeHtml(d.partia || doc.lot_no || '')}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis_kontrolujacego || '')}</td><td>${normalizePn(d.uwagi || 'P')}</td></tr>`
+    const d = normalizeK07Data(doc.data || {}, doc)
+    return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(d.godzina || '12:00')}</td><td class="left">${escapeHtml(d.surowiec || '')}</td><td>${escapeHtml(d.numer_partii || '')}</td><td>${normalizePn(d.stan_sita || 'P')}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis_kontrolujacego || '')}</td></tr>`
   }).join('')
-  const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
-  return `<!doctype html><html><head><meta charset="utf-8"><title>K07 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt}.company{width:31%;font-weight:bold}.title{width:44%;font-weight:bold}.meta{width:25%;text-align:left}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K07 - Karta kontroli stanu sita na linii do przerobu na pulę (CCP1)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br>Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Stan sita<br>(P/N)*</th><th>Sito całe<br>(P/N)*</th><th>Partia / produkt</th><th>Podpis</th><th>Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  const blanks = Array.from({ length: Math.max(0, 11 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K07 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.1}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.25}.meta{width:25%;text-align:left;vertical-align:top}.left{text-align:left}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K07 - Karta kontroli stanu sita na linii do przerobu na pulpę (CCP1)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1 z 1</td></tr><tr><td style="font-size:9.5pt;text-align:left;padding:4px 8px">Godzina (kontrolę należy przeprowadzać przed i po zakończeniu procesu rozdrabniania)</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Rodzaj przerabianego surowca</th><th>Produkowany numer partii</th><th>Stan sita<br>(P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildManualMonthlyHtml(group, escapeHtml, config) {
@@ -468,23 +535,44 @@ export const MANUAL_HACCP_FORMS = {
     code: 'K06',
     title: 'Karta K06 - Karta oceny jakości gotowego produktu',
     columns: [
-      { key: 'lp', label: 'Lp.', value: (_, i) => i + 1 },
       { key: 'document_date', label: 'Data', value: d => d.document_date || '' },
-      { key: 'product_name', label: 'Produkt', value: d => d.product_name || '' },
-      { key: 'lot_no', label: 'Nr partii', value: d => d.lot_no || '' },
-      { key: 'wyglad', label: 'Wygląd/zapach (P/N)', value: d => normalizePn(d.data?.wyglad_zapach || 'P') },
-      { key: 'smak', label: 'Smak (P/N)', value: d => normalizePn(d.data?.smak || 'P') },
-      { key: 'barwa', label: 'Barwa (P/N)', value: d => normalizePn(d.data?.barwa || 'P') },
-      { key: 'podpis', label: 'Podpis', value: d => d.signed_by_operator || '' }
+      { key: 'product_name', label: 'Nazwa towaru', value: d => d.product_name || '' },
+      { key: 'lot_no', label: 'Numer partii', value: d => d.lot_no || '' },
+      { key: 'barwa', label: 'Barwa (P/N)', value: d => normalizePn(normalizeK06Data(d.data || {}).barwa) },
+      { key: 'zapach', label: 'Zapach (P/N)', value: d => normalizePn(normalizeK06Data(d.data || {}).zapach) },
+      { key: 'twardosc_jablko', label: 'Twardość (jabłko) (P/N)', value: d => normalizePn(normalizeK06Data(d.data || {}).twardosc_jablko) },
+      { key: 'brak_plesni', label: 'Brak oznak pleśni (P/N)', value: d => normalizePn(normalizeK06Data(d.data || {}).brak_plesni) },
+      { key: 'podpis', label: 'Podpis kontrolującego', value: d => d.signed_by_operator || normalizeK06Data(d.data || {}).podpis || '' }
     ],
     fields: [
       { key: 'document_date', label: 'Data', type: 'date', required: true },
-      { key: 'product_name', label: 'Produkt', type: 'text', required: true },
-      { key: 'lot_no', label: 'Nr partii', type: 'text', required: true },
-      { key: 'wyglad_zapach', label: 'Wygląd/zapach', type: 'pn', data: true },
-      { key: 'smak', label: 'Smak', type: 'pn', data: true },
+      { key: 'product_name', label: 'Nazwa towaru', type: 'text', required: true },
+      { key: 'lot_no', label: 'Numer partii', type: 'text', required: true },
       { key: 'barwa', label: 'Barwa', type: 'pn', data: true },
-      { key: 'signed_by', label: 'Podpis', type: 'employee', data: false }
+      { key: 'zapach', label: 'Zapach', type: 'pn', data: true },
+      { key: 'twardosc_jablko', label: 'Twardość (jabłko)', type: 'pn', data: true },
+      { key: 'brak_plesni', label: 'Brak oznak pleśni', type: 'pn', data: true },
+      { key: 'signed_by', label: 'Podpis kontrolującego', type: 'employee', data: false }
+    ]
+  },
+  K07: {
+    code: 'K07',
+    title: 'Karta K07 - Karta kontroli stanu sita na linii do przerobu na pulpę (CCP1)',
+    columns: [
+      { key: 'document_date', label: 'Data', value: d => d.document_date || '' },
+      { key: 'godzina', label: 'Godzina', value: d => normalizeK07Data(d.data || {}, d).godzina || '12:00' },
+      { key: 'surowiec', label: 'Rodzaj przerabianego surowca', value: d => normalizeK07Data(d.data || {}, d).surowiec || d.product_name || '' },
+      { key: 'numer_partii', label: 'Produkowany numer partii', value: d => normalizeK07Data(d.data || {}, d).numer_partii || d.lot_no || '' },
+      { key: 'stan_sita', label: 'Stan sita (P/N)', value: d => normalizePn(normalizeK07Data(d.data || {}, d).stan_sita) },
+      { key: 'podpis', label: 'Podpis kontrolującego', value: d => d.signed_by_operator || normalizeK07Data(d.data || {}, d).podpis_kontrolujacego || '' }
+    ],
+    fields: [
+      { key: 'document_date', label: 'Data przerobu', type: 'date', required: true },
+      { key: 'godzina', label: 'Godzina', type: 'text', data: true, required: false },
+      { key: 'surowiec', label: 'Rodzaj przerabianego surowca', type: 'text', data: true, required: true },
+      { key: 'numer_partii', label: 'Produkowany numer partii', type: 'text', data: true, required: true },
+      { key: 'stan_sita', label: 'Stan sita', type: 'pn', data: true },
+      { key: 'signed_by', label: 'Podpis kontrolującego', type: 'employee', data: false }
     ]
   }
 }
@@ -512,15 +600,28 @@ export function buildK04ExcelRows(group) {
   return rows
 }
 
+export function buildK06ExcelRows(group) {
+  const docs = group.docs || []
+  const rows = []
+  rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
+  rows.push(['Karta K06 - ocena jakości gotowego produktu', '', '', '', '', '', '', `Okres: ${group.period || ''}`])
+  rows.push(['Data', 'Nazwa towaru', 'Numer partii', 'Barwa (P/N)', 'Zapach (P/N)', 'Twardość (jabłko) (P/N)', 'Brak oznak pleśni (P/N)', 'Podpis kontrolującego'])
+  for (const doc of docs) {
+    const d = normalizeK06Data(doc.data || {})
+    rows.push([doc.document_date || '', doc.product_name || '', doc.lot_no || '', normalizePn(d.barwa), normalizePn(d.zapach), normalizePn(d.twardosc_jablko), normalizePn(d.brak_plesni), doc.signed_by_operator || d.podpis || ''])
+  }
+  return rows
+}
+
 export function buildK07ExcelRows(group) {
   const docs = group.docs || []
   const rows = []
   rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
-  rows.push(['Karta K07 - kontrola sita CCP1', '', '', '', '', '', `Okres: ${group.period || ''}`])
-  rows.push(['Data', 'Godzina', 'Stan sita (P/N)', 'Sito całe (P/N)', 'Partia', 'Podpis', 'Uwagi (P/N)'])
+  rows.push(['Karta K07 - kontrola sita CCP1', '', '', '', '', `Okres: ${group.period || ''}`])
+  rows.push(['Data', 'Godzina', 'Rodzaj przerabianego surowca', 'Produkowany numer partii', 'Stan sita (P/N)', 'Podpis kontrolującego'])
   for (const doc of docs) {
-    const d = doc.data || {}
-    rows.push([doc.document_date || '', d.godzina || '', normalizePn(d.stan_sita || 'P'), normalizePn(d.sito_cale || 'P'), d.partia || doc.lot_no || '', doc.signed_by_operator || d.podpis_kontrolujacego || '', normalizePn(d.uwagi || 'P')])
+    const d = normalizeK07Data(doc.data || {}, doc)
+    rows.push([doc.document_date || '', d.godzina || '12:00', d.surowiec || '', d.numer_partii || '', normalizePn(d.stan_sita || 'P'), doc.signed_by_operator || d.podpis_kontrolujacego || ''])
   }
   return rows
 }
