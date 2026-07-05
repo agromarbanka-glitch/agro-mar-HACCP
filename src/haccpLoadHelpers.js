@@ -2,6 +2,33 @@
 export const HACCP_DOC_LIST_SELECT =
   'id, document_type, lot_id, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at'
 
+/** Maks. liczba kartotek wczytywanych do przeglądarki (kilka sezonów). */
+export const HACCP_DOCS_LOAD_MAX = 50000
+
+/** Rozmiar paczki przy pobieraniu (Supabase API domyślnie max 1000/wywołanie – ustaw w Project Settings → API → Max Rows). */
+export const HACCP_DOCS_PAGE_SIZE = 2000
+
+/** Pobiera kartoteki stronicowane – omija stary limit 5000 w jednym zapytaniu. */
+export async function fetchAllHaccpDocuments(client, { maxRows = HACCP_DOCS_LOAD_MAX, pageSize = HACCP_DOCS_PAGE_SIZE } = {}) {
+  if (!client) return []
+  const rows = []
+  let offset = 0
+  while (rows.length < maxRows) {
+    const end = Math.min(offset + pageSize - 1, offset + maxRows - rows.length - 1)
+    const { data, error } = await client
+      .from('haccp_documents')
+      .select(HACCP_DOC_LIST_SELECT)
+      .order('document_date', { ascending: false })
+      .range(offset, end)
+    if (error) throw error
+    const chunk = data || []
+    rows.push(...chunk)
+    if (chunk.length < pageSize) break
+    offset += pageSize
+  }
+  return rows.slice(0, maxRows)
+}
+
 export function mergeHaccpDocs(existing, incoming) {
   const map = new Map((existing || []).map(d => [d.id, d]))
   for (const row of incoming || []) map.set(row.id, row)

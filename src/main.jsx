@@ -40,7 +40,7 @@ import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRo
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import {
-  HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
+  HACCP_DOCS_LOAD_MAX, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
 } from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
 import { LoginScreen } from './LoginScreen'
@@ -6344,13 +6344,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (haccpLoadInFlightRef.current) return haccpLoadInFlightRef.current
     haccpLoadInFlightRef.current = (async () => {
       try {
-        const { data, error } = await supabase
-          .from('haccp_documents')
-          .select(HACCP_DOC_LIST_SELECT)
-          .order('document_date', { ascending: false })
-          .limit(5000)
-        if (error) throw error
-        setHaccpDocs(data || [])
+        const data = await fetchAllHaccpDocuments(supabase)
+        setHaccpDocs(data)
+        if (data.length >= HACCP_DOCS_LOAD_MAX) {
+          setMessage(`Wczytano ${data.length.toLocaleString('pl-PL')} kartotek (górny limit). Użyj filtra dat w panelu bocznym, aby zawęzić widok.`)
+        }
       } catch (err) {
         setHaccpDocs([])
         const msg = String(err?.message || err)
