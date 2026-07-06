@@ -8,6 +8,9 @@ import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
+import {
+  K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
+} from './k02Engine'
 import { computeDashboardCompliance, complianceStatusLabel, complianceStatusClass } from './dashboardComplianceEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
 import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
@@ -340,6 +343,7 @@ function App() {
   const [r01NewColumnLabel, setR01NewColumnLabel] = useState('')
   const [defaultR02Employee, setDefaultR02Employee] = useState('')
   const [r02NewMonth, setR02NewMonth] = useState(new Date().toISOString().slice(0, 7))
+  const [k02NewMonth, setK02NewMonth] = useState(new Date().toISOString().slice(0, 7))
   const [r02ColumnDefs, setR02ColumnDefs] = useState(() => loadR02Columns())
   const [r02NewColumnLabel, setR02NewColumnLabel] = useState('')
   const [defaultK06Employee, setDefaultK06Employee] = useState('')
@@ -516,52 +520,9 @@ function App() {
     }
   }
 
-  function k02TempForProducts(productNames = []) {
-    const names = productNames.map(n => normalizeText(n)).join(' ')
-    if (names.includes('malina')) return '1'
-    return '2'
-  }
-
   function buildSyntheticK02Docs(allDocs) {
     const k01 = (allDocs || []).filter(d => d.document_type === 'K01' && d.document_date)
-    const byDay = new Map()
-    for (const d of k01) {
-      const day = String(d.document_date || '').slice(0, 10)
-      if (!day) continue
-      if (!byDay.has(day)) byDay.set(day, [])
-      byDay.get(day).push(d)
-    }
-    return Array.from(byDay.entries()).sort(([a],[b]) => a.localeCompare(b)).map(([day, docs]) => {
-      const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
-      const temp = k02TempForProducts(products)
-      const id = `K02-${day}`
-      const ov = k02Overrides[id] || {}
-      return {
-        id,
-        synthetic: true,
-        document_type: 'K02',
-        document_date: day,
-        product_name: 'CP2 – magazyn surowca',
-        lot_no: '',
-        supplier_name: '',
-        document_no: `K02/${day}`,
-        chamber_code: 'CP2',
-        qty: docs.reduce((sum, d) => sum + (Number(d.qty) || 0), 0),
-        status: ov.status ?? 'P',
-        data: {
-          godzina: Object.prototype.hasOwnProperty.call(ov, 'godzina') ? ov.godzina : '09:15',
-          temperatura_chlodnia_1: Object.prototype.hasOwnProperty.call(ov, 'temperatura_chlodnia_1') ? ov.temperatura_chlodnia_1 : temp,
-          temperatura_chlodnia_2: Object.prototype.hasOwnProperty.call(ov, 'temperatura_chlodnia_2') ? ov.temperatura_chlodnia_2 : temp,
-          podpis_kontrolujacego: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : '',
-          uwagi: Object.prototype.hasOwnProperty.call(ov, 'uwagi') ? ov.uwagi : 'P',
-          produkty: products.join(', '),
-        },
-        signed_by_operator: Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego') ? ov.podpis_kontrolujacego : '',
-        signed_by_admin: '',
-        document_version: 'I/2024',
-        created_at: day,
-      }
-    })
+    return mergeK02DisplayDocs(allDocs, k01, k02Overrides)
   }
 
 
@@ -2066,15 +2027,71 @@ function App() {
     }
   }
 
-  function setEmployeeForVisibleK02Group(group, employeeName, onlyEmpty = false) {
+  async function setEmployeeForVisibleK02Group(group, employeeName, onlyEmpty = false) {
     if (!employeeName?.trim()) { setMessage('Wybierz pracownika z listy.'); return }
     const docs = (group?.docs || [])
     const targets = onlyEmpty
       ? docs.filter(d => !k02FieldValue(getLiveK02Doc(d), 'podpis_kontrolujacego', ''))
       : docs
     if (!targets.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K02.' : 'Brak wpisów K02.'); return }
-    for (const doc of targets) setK02Override(doc, 'podpis_kontrolujacego', employeeName.trim())
+    if (!onlyEmpty && !window.confirm(`Ustawić podpis „${employeeName.trim()}" dla ${targets.length} pozycji K02?`)) return
+    const name = employeeName.trim()
+    for (const doc of targets) {
+      setK02Override(doc, 'podpis_kontrolujacego', name)
+    }
     setMessage(`Ustawiono podpis K02 dla ${targets.length} pozycji.`)
+  }
+
+  function shiftK02NewMonth(delta) {
+    const [y, m] = k02NewMonth.split('-').map(Number)
+    const d = new Date(y, m - 1 + delta, 1)
+    setK02NewMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+  }
+
+  async function createK02MonthKartoteka() {
+    if (haccpBusy) return
+    if (!supabase) {
+      setMessage('K02: brak połączenia z bazą (Supabase).')
+      return
+    }
+    const yearMonth = k02NewMonth
+    if (!yearMonth) {
+      setMessage('K02: wybierz rok i miesiąc.')
+      return
+    }
+    const existingMonth = (haccpDocs || []).filter(d =>
+      d.document_type === 'K02' && (d.data?.month_key === yearMonth || String(d.document_date || '').slice(0, 7) === yearMonth)
+    )
+    if (existingMonth.length && !window.confirm(
+      `Kartoteka K02 za ${yearMonth} ma już ${existingMonth.length} wpisów w bazie.\n\nDodać brakujące dni? (Istniejące wpisy nie zostaną zmienione.)`
+    )) return
+    const k01 = (haccpDocs || []).filter(d => d.document_type === 'K01' && String(d.document_date || '').slice(0, 7) === yearMonth)
+    const payloads = buildK02MonthPayloads(yearMonth, {
+      signedBy: defaultK02Employee || '',
+      k01ByDay: k01DocsByDay(k01)
+    })
+    const existingDates = new Set(existingMonth.map(d => String(d.document_date).slice(0, 10)))
+    const toInsert = payloads.filter(p => !existingDates.has(String(p.document_date).slice(0, 10)))
+    if (!toInsert.length) {
+      setMessage(`K02: wszystkie dni ${yearMonth} są już w kartotece.`)
+      return
+    }
+    setHaccpBusy(true)
+    try {
+      const { rows } = await batchInsertHaccpDocuments(supabase, toInsert)
+      mergeHaccpDocsBatch(rows)
+      const sundays = toInsert.filter(p => p.data?.is_day_off).length
+      setMessage(
+        `K02: utworzono kartotekę za ${yearMonth} – ${rows.length} dni` +
+        (sundays ? ` (${sundays} niedziel pustych)` : '') +
+        (defaultK02Employee ? `, podpis: ${defaultK02Employee}` : '') +
+        '. Zapis tylko w dokumentacji HACCP – FIFO bez zmian.'
+      )
+    } catch (err) {
+      setMessage(`K02: błąd tworzenia – ${err.message}`)
+    } finally {
+      setHaccpBusy(false)
+    }
   }
 
   function setK06Override(doc, field, value) {
@@ -2133,6 +2150,26 @@ function App() {
         }
       }
     })
+    if (isPersistedHaccpDoc(doc)) saveK02FieldToDb(doc, field, value)
+  }
+
+  async function saveK02FieldToDb(doc, field, value) {
+    if (!supabase || !isPersistedHaccpDoc(doc)) return
+    const nextData = { ...(doc.data || {}), [field]: value }
+    if (field === 'uwagi') nextData.uwagi = normalizePN(value)
+    const payload = {
+      data: nextData,
+      updated_at: new Date().toISOString()
+    }
+    if (field === 'podpis_kontrolujacego') payload.signed_by_operator = value || null
+    if (field === 'uwagi') payload.status = normalizePN(value)
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+      if (error) throw error
+      mergeHaccpDoc(doc.id, payload)
+    } catch (err) {
+      setMessage(`K02: błąd zapisu – ${err.message}`)
+    }
   }
 
   function k02FieldValue(doc, field, fallback = '') {
@@ -2940,7 +2977,8 @@ function App() {
         </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Podpis wybierany jest w ostatniej kolumnie dla każdej operacji.</div></div>
     }
     if (group.type === 'K02') {
-      const maxRows = Math.max(16, docs.length)
+      const manualMonth = k02GroupHasManualMonth(docs)
+      const maxRows = manualMonth ? docs.length : Math.max(16, docs.length)
       return <div className="monthly-paper k02-original">
         <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
           <label>Podpis kontrolujący (zbiorczo)
@@ -2987,7 +3025,7 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K02 uzupełnia się automatycznie: jeden pomiar dziennie o 9:15. Podpis wybierasz ręcznie – nie uzupełnia się sam. Dla jabłka, truskawki, wiśni, porzeczek i aronii temperatura 2°C; dla malin 1°C.</p>
+        <p className="hint no-print">K02: wpisy z dni przyjęć (K01) uzupełniają się automatycznie. Możesz też utworzyć pełną kartotekę miesiąca ręcznie – zapis dotyczy tylko dokumentacji HACCP, bez wpływu na FIFO. Podpis wybierasz ręcznie. Temp.: jabłka/truskawki/wiśnie/porzeczki/aronie 2°C; maliny 1°C.</p>
       </div>
     }
 
@@ -4548,6 +4586,63 @@ function App() {
     setMessage('R13: usunięto kolumnę z ustawień domyślnych.')
   }
 
+  function renderK02Section() {
+    return <>
+      <div className="card inner-card no-print r13-add-panel">
+        <h3>Utwórz kartotekę K02 za miesiąc</h3>
+        <p className="hint">
+          System utworzy <b>wpis na każdy dzień kalendarza</b> wybranego miesiąca (niedziele puste).
+          Dni z przyjęciem PZ (K01) dostaną domyślną temperaturę wg asortymentu (maliny 1°C, pozostałe 2°C).
+          Zapis trafia tylko do dokumentacji HACCP – <b>nie zmienia partii, operacji ani FIFO</b>.
+        </p>
+        <div className="k03-bulk-row">
+          <label>Rok i miesiąc
+            <div className="r13-month-picker">
+              <button type="button" className="mini secondary" onClick={() => shiftK02NewMonth(-1)} title="Poprzedni miesiąc">◀</button>
+              <input type="month" value={k02NewMonth} onChange={e => setK02NewMonth(e.target.value)} />
+              <button type="button" className="mini secondary" onClick={() => shiftK02NewMonth(1)} title="Następny miesiąc">▶</button>
+            </div>
+          </label>
+          <label>Podpis kontrolujący (domyślny)
+            <select value={defaultK02Employee} onChange={e => {
+              const v = e.target.value
+              setDefaultK02Employee(v)
+              try { localStorage.setItem(K02_DEFAULT_EMPLOYEE_KEY, v) } catch (_) {}
+            }}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button onClick={createK02MonthKartoteka} disabled={haccpBusy}>{haccpBusy ? 'Tworzenie…' : 'Utwórz kartotekę miesiąca'}</button>
+        </div>
+        <p className="hint">Silnik K02: {K02_ENGINE_VERSION}. Bez K01 nadal działają wpisy auto z dni przyjęć; ręczna kartoteka uzupełnia cały miesiąc.</p>
+      </div>
+      {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek K02 w filtrze – utwórz miesiąc powyżej lub poczekaj na przyjęcia PZ (K01).</p>}
+      {haccpMonthlyGroups.length > 0 && <>
+        <h3>Lista kartotek K02</h3>
+        <div className="table-wrap docs-table-wrap"><table className="docs-table">
+          <thead><tr><th>Okres</th><th>Wpisy</th><th>Typ</th><th>N</th><th>Akcje</th></tr></thead>
+          <tbody>{haccpMonthlyGroups.map(g => (
+            <tr key={g.key}>
+              <td><b>{periodLabel(g)}</b></td>
+              <td>{g.docs.length}</td>
+              <td>{k02GroupHasManualMonth(g.docs) ? 'ręczna / miesiąc' : 'auto z K01'}</td>
+              <td>{g.docs.filter(d => normalizePN(d.data?.uwagi || d.status) === 'N').length || '—'}</td>
+              <td className="row-actions">
+                <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
+                <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
+                <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && (
+                  <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy}><Trash2 size={14}/> Usuń</button>
+                )}
+              </td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </>}
+    </>
+  }
+
   function renderR02Section() {
     return <>
       <div className="card inner-card no-print r13-add-panel">
@@ -5320,7 +5415,9 @@ function App() {
     const label = kartotekaGroupLabel(group)
     const fifoNote = group.type === 'K03'
       ? '\n\nFIFO i rozliczenia partii NIE zostaną zmienione – znika tylko dokumentacja K03. WZ wróci do kolejki do ponownego utworzenia K03.'
-      : ''
+      : group.type === 'K02'
+        ? '\n\nFIFO, partie i operacje magazynowe NIE zostaną zmienione – usuwana jest tylko kartoteka pomiarów CP2.'
+        : ''
     if (!confirmDelete(`Całą kartotekę ${group.type}${label ? `: ${label}` : ''} (${deletable.length} wpisów).\n\nWpis trafi do historii – administrator może przywrócić.${fifoNote}`)) return
     setHaccpBusy(true)
     try {
@@ -7554,6 +7651,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           </div>
         </div>
 
+        {docsFilter === 'K02' && renderK02Section()}
+
         {docsFilter === 'K03' && <>
           <section className="card k03-bulk-panel">
             <div className="section-title"><RefreshCcw size={20}/><div>
@@ -7605,7 +7704,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         {docsFilter === 'K01.1' && renderK011Section()}
         {getDocFormCfg(docsFilter) && docsHubSection === 'kartoteki' && renderManualHaccpEntrySection()}
 
-        {!['K01.1', 'K04.1', 'K05'].includes(docsFilter) && <>
+        {!['K01.1', 'K04.1', 'K05', 'K02'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – uzupełnij K03 (WZ) i odśwież magazyn, lub przypisz partie w CP3.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – utwórz K03 dla WZ (przerób / bez przerobu), potem odśwież kartoteki.</p>}
