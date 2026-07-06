@@ -38,14 +38,18 @@ export function mergeHaccpDocs(existing, incoming) {
 }
 
 export function patchHaccpDocInList(list, id, patch) {
-  return (list || []).map(d => {
-    if (d.id !== id) return d
-    return {
-      ...d,
-      ...patch,
-      data: patch.data !== undefined ? { ...(d.data || {}), ...patch.data } : d.data
-    }
-  })
+  const arr = list || []
+  const idx = arr.findIndex(d => d.id === id)
+  if (idx < 0) return arr
+  const d = arr[idx]
+  const next = {
+    ...d,
+    ...patch,
+    data: patch.data !== undefined ? { ...(d.data || {}), ...patch.data } : d.data
+  }
+  const out = arr.slice()
+  out[idx] = next
+  return out
 }
 
 /** Wstawia wiele wpisów naraz (chunki po 50) zamiast osobnego requestu na każdy dzień. */

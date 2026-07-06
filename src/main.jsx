@@ -42,7 +42,7 @@ import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRo
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import {
-  HACCP_DOCS_LOAD_MAX, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
+  HACCP_DOCS_LOAD_MAX, HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
 } from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
 import { LoginScreen } from './LoginScreen'
@@ -1841,7 +1841,7 @@ function App() {
     try {
       const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
       if (error) throw error
-      await loadHaccpDocs()
+      mergeHaccpDoc(doc.id, payload)
     } catch (err) {
       setMessage(`R02: błąd zapisu – ${err.message}`)
     }
@@ -1865,13 +1865,14 @@ function App() {
         for (const col of nextColumns) {
           cleaning[col.id] = old[col.id] !== undefined && old[col.id] !== '' ? old[col.id] : (sunday ? '' : (col.auto_m ? 'M' : ''))
         }
-        const { error } = await supabase.from('haccp_documents').update({
+        const payload = {
           data: { ...(doc.data || {}), machine_columns: nextColumns, cleaning },
           updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
+        }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
         if (error) throw error
+        mergeHaccpDoc(doc.id, payload)
       }
-      await loadHaccpDocs()
     } catch (err) {
       setMessage(`R02: ${err.message}`)
     }
@@ -1916,8 +1917,8 @@ function App() {
           updated_at: new Date().toISOString()
         }).eq('id', doc.id)
         if (error) throw error
+        mergeHaccpDoc(doc.id, { signed_by_operator: employeeName })
       }
-      await loadHaccpDocs()
       setMessage(`Ustawiono podpis R02 dla ${docs.length} dni.`)
     } catch (err) {
       setMessage(`R02: ${err.message}`)
@@ -1989,13 +1990,14 @@ function App() {
     const columns = r02ColumnsFromDocs([doc])
     const cleaning = r02CleaningForDoc(doc, columns)
     try {
-      const { error } = await supabase.from('haccp_documents').update({
+      const payload = {
         document_date: newDate,
         data: { ...(doc.data || {}), is_day_off: sunday, cleaning },
         updated_at: new Date().toISOString()
-      }).eq('id', doc.id)
+      }
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
       if (error) throw error
-      await loadHaccpDocs()
+      mergeHaccpDoc(doc.id, payload)
     } catch (err) {
       setMessage(`R02: ${err.message}`)
     }
@@ -2014,9 +2016,9 @@ function App() {
     const sunday = isSundayDate(date)
     const payload = buildR02SingleDayPayload(yearMonth, date, columns, defaultR02Employee || sortR02Docs(group.docs)[0]?.signed_by_operator || '', sunday)
     try {
-      const { error } = await supabase.from('haccp_documents').insert(payload)
+      const { data, error } = await supabase.from('haccp_documents').insert(payload).select(HACCP_DOC_LIST_SELECT).single()
       if (error) throw error
-      await loadHaccpDocs()
+      mergeHaccpDocsBatch(data ? [data] : [])
       setMessage(`R02: dodano wpis na ${formatR02PlDate(date)}${sunday ? ' (dzień wolny – uzupełnij ręcznie)' : ''}.`)
     } catch (err) {
       setMessage(`R02: ${err.message}`)
@@ -4364,7 +4366,7 @@ function App() {
         </div>}
       </div>
       <div className="actions no-print" style={{ marginBottom: 12 }}>
-        <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
+        <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W06', w06Docs)}><Printer size={16}/> Druk / PDF</button>
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W06', w06Docs)}>Pobierz Excel</button>
       </div>
@@ -4450,7 +4452,7 @@ function App() {
     const w03Docs = sortW03Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W03'))
     return <>
       <div className="actions no-print" style={{ marginBottom: 12 }}>
-        <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
+        <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W03', w03Docs)}><Printer size={16}/> Druk / PDF</button>
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W03', w03Docs)}>Pobierz Excel</button>
         {isAdmin(authProfile) && <button className="secondary" onClick={() => ensureW03Seed(true)}>Przywróć wzór (7 obiektów)</button>}
@@ -4732,7 +4734,7 @@ function App() {
               <p className="hint">{cards.find(c => c[0] === code)?.[2]}</p>
             </div>
             <div className="actions docs-actions">
-              <button className="secondary" onClick={() => loadHaccpDocs()}><RefreshCcw size={16}/> Odśwież</button>
+              <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
             </div>
           </div>
           {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : code === 'R09' ? (
@@ -5369,7 +5371,7 @@ function App() {
         await loadK03TraceData()
         await loadFifoChangeLog()
       }
-      loadHaccpDocs()
+      loadHaccpDocs({ syncK01: true })
       loadEmployees()
       loadAuxMaterials()
     })()
@@ -6807,17 +6809,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     return inserted
   }
 
-  async function loadHaccpDocs() {
+  async function loadHaccpDocs(options = {}) {
     if (!supabase) return
     if (haccpLoadInFlightRef.current) return haccpLoadInFlightRef.current
     haccpLoadInFlightRef.current = (async () => {
       try {
-        const k01Added = await syncAutoK01Documents()
+        if (options.syncK01) {
+          const k01Added = await syncAutoK01Documents()
+          if (k01Added > 0) {
+            setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
+          }
+        }
         const data = await fetchAllHaccpDocuments(supabase)
         setHaccpDocs(data)
-        if (k01Added > 0) {
-          setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
-        }
         if (data.length >= HACCP_DOCS_LOAD_MAX) {
           setMessage(`Wczytano ${data.length.toLocaleString('pl-PL')} kartotek (górny limit). Użyj filtra dat w panelu bocznym, aby zawęzić widok.`)
         }
@@ -6838,12 +6842,39 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   function mergeHaccpDoc(id, patch) {
     setHaccpDocs(prev => patchHaccpDocInList(prev, id, patch))
+    setSelectedHaccpDoc(prev => {
+      if (!prev?.groupPreview || !prev.group?.docs?.some(d => d.id === id)) return prev
+      return {
+        ...prev,
+        group: {
+          ...prev.group,
+          docs: patchHaccpDocInList(prev.group.docs, id, patch)
+        }
+      }
+    })
+  }
+
+  function haccpDocBelongsToGroup(doc, group) {
+    if (!doc || !group?.type) return false
+    if (doc.document_type !== group.type) return false
+    const period = doc.data?.month_key || String(doc.document_date || '').slice(0, 7)
+    return period === group.period
   }
 
   function mergeHaccpDocsBatch(rows, removedIds = []) {
     setHaccpDocs(prev => {
       const filtered = removedIds.length ? prev.filter(d => !removedIds.includes(d.id)) : prev
       return mergeHaccpDocs(filtered, rows)
+    })
+    setSelectedHaccpDoc(prev => {
+      if (!prev?.groupPreview || !prev.group) return prev
+      let docs = prev.group.docs || []
+      const hadRemoved = removedIds.some(id => docs.some(d => d.id === id))
+      if (removedIds.length) docs = docs.filter(d => !removedIds.includes(d.id))
+      const matching = (rows || []).filter(r => haccpDocBelongsToGroup(r, prev.group))
+      if (matching.length) docs = mergeHaccpDocs(docs, matching)
+      if (!hadRemoved && !matching.length) return prev
+      return { ...prev, group: { ...prev.group, docs } }
     })
   }
 
@@ -7060,7 +7091,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <label>Okres kontroli (miesiąc)
           <input type="month" value={dashboardMonth} onChange={e => setDashboardMonth(e.target.value)} />
         </label>
-        <button className="secondary" onClick={() => { loadHaccpDocs(); loadFifoData(); loadK03TraceData(); loadAuxMaterials() }}><RefreshCcw size={16}/> Odśwież dane</button>
+        <button className="secondary" onClick={() => { loadHaccpDocs({ syncK01: true }); loadFifoData(); loadK03TraceData(); loadAuxMaterials() }}><RefreshCcw size={16}/> Odśwież dane</button>
       </div>
       <div className="compliance-summary-row">
         <span className={complianceStatusClass('ok')}>{dashboardCompliance.summary.ok} uzupełnione</span>
@@ -7504,7 +7535,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <p className="hint">{HACCPCARDS.find(c => c[0] === docsFilter)?.[2]}</p>
           </div>
           <div className="actions docs-actions">
-            <button className="secondary" onClick={() => { loadHaccpDocs(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież</button>
+            <button className="secondary" onClick={() => { loadHaccpDocs({ syncK01: true }); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież</button>
             {docsFilter === 'K03' && <>
               <button className="secondary" onClick={() => runResyncOpenK03(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'K03…' : 'Napraw otwarte K03'}</button>
               <button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'FIFO…' : 'Uzupełnij FIFO'}</button>
@@ -7672,7 +7703,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         authProfile={authProfile}
         authSession={authSession}
         setMessage={setMessage}
-        onRestored={() => { loadHaccpDocs(); loadEmployees() }}
+        onRestored={() => { loadHaccpDocs({ syncK01: true }); loadEmployees() }}
       />
     )}
 

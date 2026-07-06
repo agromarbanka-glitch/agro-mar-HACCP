@@ -376,13 +376,11 @@ export function RMonthlyReportPreview({
       for (const doc of dayDocs) {
         const cells = { ...(doc.data?.cells || {}) }
         cells[colId] = { ...(cells[colId] || {}), mcd: mcdValue }
-        const { error } = await supabase.from('haccp_documents').update({
-          data: { ...(doc.data || {}), cells },
-          updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
+        const payload = { data: { ...(doc.data || {}), cells }, updated_at: new Date().toISOString() }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
         if (error) throw error
+        if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
       }
-      await loadHaccpDocs()
       setMessage(`${code}: ustawiono ${mcdValue} w kolumnie „${colLabel}" (${dayDocs.length} dni). Możesz zmienić pojedyncze komórki ręcznie.`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
