@@ -30,13 +30,12 @@ export const R_MONTHLY_CONFIGS = {
     mcdOptions: ['', 'M', 'C', 'M/C'],
     mcdLegend: '* M – mycie, C – czyszczenie, M/C – mycie i czyszczenie',
     defaultColumns: [
-      { id: 'veh-1', label: 'Samochód 1 (nr rej.)' },
-      { id: 'veh-2', label: 'Samochód 2 (nr rej.)' }
+      { id: 'veh-1', label: 'Samochód (nr rej.)' }
     ],
     columnLabel: 'Samochód',
     addColumnLabel: 'Dodaj pojazd',
-    createHint: 'Cały miesiąc – wpis M/C i nazwa środka czyszczącego przy każdym pojeździe.',
-    signLabel: 'Podpis'
+    createHint: 'W jednym miesiącu może być wiele kartotek – każda dla innego samochodu. Podaj nr rejestracyjny i kierowcę, potem utwórz kartotekę.',
+    signLabel: 'Kierowca (podpis)'
   },
   R04: {
     code: 'R04',

@@ -14,6 +14,8 @@ import {
   buildCalendarRows,
   formatRMonthlyPlDate,
   columnsFromDocs,
+  makeR03RegisterKey,
+  buildR03VehicleColumn,
   r08MakeChamber,
   r04MakeStation,
   buildR04ControlPayload,
@@ -57,8 +59,11 @@ export function RMonthlyReportSection({
   const [defaultEmployee, setDefaultEmployee] = useState('')
   const [newRow, setNewRow] = useState(() => defaultNewRow(cfg))
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
+  const [newVehicleReg, setNewVehicleReg] = useState('')
 
   if (!cfg) return null
+
+  const isR03MultiVehicle = code === 'R03'
 
   function shiftMonth(delta) {
     const [y, m] = newMonth.split('-').map(Number)
@@ -72,7 +77,20 @@ export function RMonthlyReportSection({
     const period = cfg.periodMode === 'quarter'
       ? (() => { const [y, m] = newMonth.split('-').map(Number); return `${y}-Q${Math.ceil(m / 3)}` })()
       : newMonth
-    const existing = (haccpDocs || []).filter(d => d.document_type === code && (
+
+    if (isR03MultiVehicle) {
+      const vehicleReg = String(newVehicleReg || '').trim()
+      if (!vehicleReg) { setMessage('R03: podaj numer rejestracyjny samochodu.'); return }
+      if (!defaultEmployee) { setMessage('R03: wybierz kierowcę z listy.'); return }
+      const dup = (haccpDocs || []).some(d =>
+        d.document_type === 'R03'
+        && (d.data?.month_key === newMonth || String(d.document_date || '').slice(0, 7) === newMonth)
+        && String(d.data?.vehicle_reg_no || '').trim().toLowerCase() === vehicleReg.toLowerCase()
+      )
+      if (dup) { setMessage(`R03: kartoteka dla ${vehicleReg} w ${newMonth} już istnieje.`); return }
+    }
+
+    const existing = isR03MultiVehicle ? [] : (haccpDocs || []).filter(d => d.document_type === code && (
       d.data?.month_key === newMonth || d.data?.quarter_key === period || d.data?.month_key === period
     ))
     if (existing.length) {
@@ -89,10 +107,19 @@ export function RMonthlyReportSection({
           removedIds.push(doc.id)
         }
       }
-      const payloads = buildRMonthlyMonthPayloads(code, newMonth, defaultEmployee, columnDefs, haccpDocs)
-      const skipDupCheck = ['single-month', 'register-rows', 'quarter-trend', 'station-matrix', 'r04-control'].includes(cfg.layout)
+      const r03Options = isR03MultiVehicle
+        ? { vehicleRegNo: String(newVehicleReg || '').trim(), registerKey: makeR03RegisterKey(newVehicleReg) }
+        : {}
+      const r03Columns = isR03MultiVehicle ? [buildR03VehicleColumn(newVehicleReg)] : columnDefs
+      const payloads = buildRMonthlyMonthPayloads(code, newMonth, defaultEmployee, r03Columns, haccpDocs, r03Options)
+      const skipDupCheck = ['single-month', 'register-rows', 'quarter-trend', 'station-matrix', 'r04-control'].includes(cfg.layout) || isR03MultiVehicle
+      const registerKey = r03Options.registerKey
       const existingDates = new Set(
-        skipDupCheck ? [] : (haccpDocs || []).filter(d => d.document_type === code).map(d => d.document_date)
+        skipDupCheck ? [] : (haccpDocs || []).filter(d => {
+          if (d.document_type !== code) return false
+          if (isR03MultiVehicle) return d.data?.register_key === registerKey
+          return true
+        }).map(d => d.document_date)
       )
       const toInsert = skipDupCheck
         ? payloads
@@ -107,7 +134,8 @@ export function RMonthlyReportSection({
       } else {
         await loadHaccpDocs()
       }
-      setMessage(`${code}: utworzono kartotekę (${rows.length} wpisów)${defaultEmployee ? `, podpis: ${defaultEmployee}` : ''}.`)
+      if (isR03MultiVehicle) setNewVehicleReg('')
+      setMessage(`${code}: utworzono kartotekę (${rows.length} wpisów)${isR03MultiVehicle ? ` – ${r03Options.vehicleRegNo}, kierowca: ${defaultEmployee}` : defaultEmployee ? `, podpis: ${defaultEmployee}` : ''}.`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
     } finally {
@@ -198,7 +226,7 @@ export function RMonthlyReportSection({
     setMessage(`${code}: dodano ${col.label}.`)
   }
 
-  const colPanel = allowDelete && (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey ? (
+  const colPanel = allowDelete && !isR03MultiVehicle && (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey ? (
     <div className="r13-columns-panel">
       <b>{cfg.columnLabel || 'Stacje'}:</b>
       <div className="r13-columns-list">
@@ -280,13 +308,18 @@ export function RMonthlyReportSection({
             <button type="button" className="mini secondary" onClick={() => shiftMonth(1)}>▶</button>
           </div>
         </label>
-        <label>{cfg.signLabel}
+        {isR03MultiVehicle && (
+          <label>Nr rejestracyjny samochodu
+            <input value={newVehicleReg} onChange={e => setNewVehicleReg(e.target.value)} placeholder="np. WGM 12345" />
+          </label>
+        )}
+        <label>{isR03MultiVehicle ? 'Kierowca' : cfg.signLabel}
           <select value={defaultEmployee} onChange={e => setDefaultEmployee(e.target.value)}>
             <option value="">Wybierz pracownika</option>
             {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
           </select>
         </label>
-        <button onClick={createMonth} disabled={creating}>{creating ? 'Tworzenie…' : 'Utwórz kartotekę'}</button>
+        <button onClick={createMonth} disabled={creating}>{creating ? 'Tworzenie…' : isR03MultiVehicle ? 'Utwórz kartotekę samochodu' : 'Utwórz kartotekę'}</button>
       </div>
       <p className="hint">Silnik kartotek: {R_MONTHLY_ENGINE_VERSION}</p>
     </div>
@@ -295,10 +328,17 @@ export function RMonthlyReportSection({
     {hubManualGroups.length > 0 && <>
       <h3>Lista kartotek {code}</h3>
       <div className="table-wrap docs-table-wrap"><table className="docs-table">
-        <thead><tr><th>Okres</th><th>Wpisy</th><th>Akcje</th></tr></thead>
+        <thead><tr>
+          <th>Okres</th>
+          {isR03MultiVehicle && <th>Samochód</th>}
+          {isR03MultiVehicle && <th>Kierowca</th>}
+          <th>Wpisy</th><th>Akcje</th>
+        </tr></thead>
         <tbody>{hubManualGroups.map(g => (
           <tr key={g.key}>
-            <td><b>{g.period}</b></td>
+            <td><b>{g.displayLabel || g.period}</b></td>
+            {isR03MultiVehicle && <td>{g.vehicleRegNo || '—'}</td>}
+            {isR03MultiVehicle && <td>{g.driver || '—'}</td>}
             <td>{g.docs.filter(d => !d.data?.is_shell).length || g.docs.length}</td>
             <td className="row-actions">
               <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
@@ -413,7 +453,13 @@ export function RMonthlyReportPreview({
   }
 
   async function addMissingDay(date) {
-    const payload = buildRMonthlySingleDayPayload(code, period.replace(/-Q\d$/, '') || period.slice(0, 7), date, columns, defaultEmployee, isSundayDate(date))
+    const monthKey = period.replace(/-Q\d$/, '') || period.slice(0, 7)
+    const meta = docs[0]?.data || {}
+    const payload = buildRMonthlySingleDayPayload(code, monthKey, date, columns, defaultEmployee, isSundayDate(date), {
+      register_key: meta.register_key,
+      vehicle_reg_no: meta.vehicle_reg_no,
+      driver: meta.driver
+    })
     await supabase.from('haccp_documents').insert(payload)
     await loadHaccpDocs()
   }
@@ -731,6 +777,9 @@ export function RMonthlyReportPreview({
     const calendar = buildCalendarRows(period.length === 7 ? period : `${period}-01`.slice(0, 7), docs)
     const mcdBulkOptions = (cfg.mcdOptions || ['', 'M', 'C']).filter(o => o)
     return <div className="monthly-paper r02-paper r13-paper">{toolbar}{head}
+      {code === 'R03' && group.vehicleRegNo && (
+        <p className="r03-vehicle-meta"><b>Samochód:</b> {group.vehicleRegNo}{group.driver ? <> &nbsp; <b>Kierowca:</b> {group.driver}</> : null}</p>
+      )}
       {code === 'R03' && (
         <div className="no-print r03-column-bulk card inner-card" style={{ marginBottom: 12 }}>
           <b>Zastosuj M / C / M/C do całej kolumny (dni robocze):</b>

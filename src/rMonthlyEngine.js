@@ -11,7 +11,23 @@ import { getRMonthlyConfig, rMonthlyStorageKey } from './rMonthlyConfigs'
 
 export { isSundayDate }
 
-export const R_MONTHLY_ENGINE_VERSION = '1.0'
+export const R_MONTHLY_ENGINE_VERSION = '1.1'
+
+export function makeR03RegisterKey(vehicleReg) {
+  const slug = String(vehicleReg || '').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'pojazd'
+  return `r03-${slug}-${Date.now().toString(36)}`
+}
+
+export function buildR03VehicleColumn(vehicleReg) {
+  const label = String(vehicleReg || '').trim() || 'Samochód'
+  return { id: `veh-${Date.now().toString(36).slice(-6)}`, label }
+}
+
+export function r03RegisterKeyFromDoc(doc) {
+  return doc?.data?.register_key || 'legacy'
+}
 
 export function formatRMonthlyPlDate(iso) {
   if (!iso) return ''
@@ -229,8 +245,9 @@ export function buildRMonthlyPeriodGroups(code, docs) {
       const q = Math.ceil((m || 1) / 3)
       period = `${y}-Q${q}`
     }
-    const key = `${code}|${period}`
-    if (!map.has(key)) map.set(key, { key, type: code, period, docs: [] })
+    const registerKey = code === 'R03' ? r03RegisterKeyFromDoc(doc) : ''
+    const key = code === 'R03' ? `${code}|${period}|${registerKey}` : `${code}|${period}`
+    if (!map.has(key)) map.set(key, { key, type: code, period, registerKey: registerKey || undefined, docs: [] })
     map.get(key).docs.push(doc)
   }
   return Array.from(map.values())
@@ -243,14 +260,26 @@ export function buildRMonthlyPeriodGroups(code, docs) {
       if (cfg.layout === 'r04-control') {
         docsForGroup = allDocs.filter(d => !d.data?.is_shell && (d.data?.stations || d.data?.readings))
       }
+      const vehicleRegNo = code === 'R03'
+        ? (rows[0]?.data?.vehicle_reg_no || columns[0]?.label || '')
+        : ''
+      const driver = code === 'R03'
+        ? (rows.find(d => !d.data?.is_day_off)?.signed_by_operator || rows[0]?.data?.driver || rows[0]?.signed_by_operator || '')
+        : ''
+      const displayLabel = code === 'R03'
+        ? `${g.period} – ${vehicleRegNo || 'samochód'}${driver ? ` (${driver})` : ''}`
+        : g.period
       return {
         ...g,
         docs: docsForGroup,
         columns,
-        config: cfg
+        config: cfg,
+        vehicleRegNo,
+        driver,
+        displayLabel
       }
     })
-    .sort((a, b) => String(b.period).localeCompare(String(a.period)))
+    .sort((a, b) => String(b.period).localeCompare(String(a.period)) || String(a.vehicleRegNo || '').localeCompare(String(b.vehicleRegNo || ''), 'pl'))
 }
 
 export function buildCalendarRows(yearMonth, docs = []) {
@@ -309,9 +338,41 @@ function defaultStationReadings(stations) {
   return readings
 }
 
-export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', columnDefs = loadRMonthlyColumns(code), allDocs = []) {
+export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', columnDefs = loadRMonthlyColumns(code), allDocs = [], options = {}) {
   const cfg = getRMonthlyConfig(code)
   if (!cfg) return []
+
+  if (code === 'R03' && options.vehicleRegNo) {
+    const vehicleRegNo = String(options.vehicleRegNo).trim()
+    const registerKey = options.registerKey || makeR03RegisterKey(vehicleRegNo)
+    const cols = [buildR03VehicleColumn(vehicleRegNo)]
+    const regSuffix = registerKey.slice(-8)
+    return calendarDaysInMonth(yearMonth).map((day, i) => {
+      const sunday = day.isSunday
+      const data = {
+        month_key: yearMonth,
+        register_key: registerKey,
+        vehicle_reg_no: vehicleRegNo,
+        driver: signedBy || '',
+        sort_order: i + 1,
+        is_day_off: sunday,
+        columns: cols,
+        stations: cols,
+        cells: defaultDayCells(cols, sunday, cfg.layout)
+      }
+      return {
+        document_type: code,
+        document_date: day.date,
+        document_no: `${code}/${yearMonth}/${regSuffix}/${String(i + 1).padStart(2, '0')}`,
+        product_name: cfg.header.title,
+        status: 'P',
+        data,
+        signed_by_operator: sunday ? '' : (signedBy || ''),
+        qty: 0,
+        updated_at: new Date().toISOString()
+      }
+    })
+  }
 
   if (cfg.layout === 'single-month') {
     return [{
@@ -436,7 +497,7 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
   })
 }
 
-export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs, signedBy = '', sunday = false) {
+export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs, signedBy = '', sunday = false, meta = {}) {
   const cfg = getRMonthlyConfig(code)
   if (cfg?.layout === 'r11-magnets') {
     const cols = (columnDefs?.length ? columnDefs : loadRMonthlyColumns(code)).map(c => ({ ...c }))
@@ -445,15 +506,25 @@ export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs,
   const cols = columnDefs.map(c => ({ ...c }))
   const isSunday = sunday || isSundayDate(date)
   const sortOrder = calendarDaysInMonth(yearMonth).findIndex(d => d.date === date) + 1
-  const base = { month_key: yearMonth, sort_order: sortOrder || 99, is_day_off: isSunday, columns: cols, stations: cols }
+  const base = {
+    month_key: yearMonth,
+    sort_order: sortOrder || 99,
+    is_day_off: isSunday,
+    columns: cols,
+    stations: cols,
+    ...(meta.register_key ? { register_key: meta.register_key } : {}),
+    ...(meta.vehicle_reg_no ? { vehicle_reg_no: meta.vehicle_reg_no } : {}),
+    ...(meta.driver ? { driver: meta.driver } : {})
+  }
   let data = { ...base }
   if (cfg?.layout === 'daily-employees') data = { ...base, godzina: '', employees: emptyEmployees(cfg.employeeSlots || 12) }
   else if (cfg?.layout === 'grid-mcd-agent') data = { ...base, cells: defaultDayCells(cols, isSunday, cfg.layout) }
   else if (cfg?.layout === 'daily-calibration') data = { ...base, chamber_columns: cols, calibration: defaultCalibration(isSunday, cols) }
+  const regSuffix = meta.register_key ? `/${String(meta.register_key).slice(-8)}` : ''
   return {
     document_type: code,
     document_date: date,
-    document_no: `${code}/${yearMonth}/${String(sortOrder || 99).padStart(2, '0')}`,
+    document_no: `${code}/${yearMonth}${regSuffix}/${String(sortOrder || 99).padStart(2, '0')}`,
     product_name: cfg?.header?.title || code,
     status: 'P',
     data,
@@ -532,6 +603,9 @@ ${rows.map((doc, i) => `<tr><td>${i + 1}</td>${cfg.rowFields.map(f => `<td>${esc
 </tbody></table>`
   } else if (cfg.layout === 'grid-mcd-agent') {
     const columns = group.columns || columnsFromDocs(code, docs)
+    const vehicleLine = code === 'R03' && group.vehicleRegNo
+      ? `<p><b>Samochód (nr rej.):</b> ${escapeHtml(group.vehicleRegNo)}${group.driver ? ` &nbsp; <b>Kierowca:</b> ${escapeHtml(group.driver)}` : ''}</p>`
+      : ''
     const calendar = buildCalendarRows(period, docs)
     const colH = columns.map(c => `<th>${escapeHtml(c.label)}<br/><small>M/C + środek</small></th>`).join('')
     const rows = calendar.map(row => {
@@ -545,7 +619,7 @@ ${rows.map((doc, i) => `<tr><td>${i + 1}</td>${cfg.rowFields.map(f => `<td>${esc
       }).join('')
       return `<tr class="${off}"><td>${row.lp}</td><td>${formatRMonthlyPlDate(doc.document_date)}</td>${cells}<td>${escapeHtml(doc.signed_by_operator || '')}</td></tr>`
     }).join('')
-    body = `<table><thead><tr><th>Lp.</th><th>Dzień</th>${colH}<th>${escapeHtml(cfg.signLabel)}</th></tr></thead><tbody>${rows}</tbody></table>`
+    body = `${vehicleLine}<table><thead><tr><th>Lp.</th><th>Dzień</th>${colH}<th>${escapeHtml(cfg.signLabel)}</th></tr></thead><tbody>${rows}</tbody></table>`
   } else if (cfg.layout === 'daily-employees') {
     const calendar = buildCalendarRows(period, docs)
     const slots = cfg.employeeSlots || 12

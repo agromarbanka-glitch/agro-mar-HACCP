@@ -6858,7 +6858,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (!doc || !group?.type) return false
     if (doc.document_type !== group.type) return false
     const period = doc.data?.month_key || String(doc.document_date || '').slice(0, 7)
-    return period === group.period
+    if (period !== group.period) return false
+    if (group.type === 'R03') {
+      const docKey = doc.data?.register_key || 'legacy'
+      const groupKey = group.registerKey || 'legacy'
+      return docKey === groupKey
+    }
+    return true
   }
 
   function mergeHaccpDocsBatch(rows, removedIds = []) {
