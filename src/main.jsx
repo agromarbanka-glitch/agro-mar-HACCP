@@ -2836,39 +2836,52 @@ function App() {
     await setDocumentEmployee(doc, employeeName)
   }
 
+  function resolvePreviewGroup(selection) {
+    if (!selection?.groupPreview || !selection.group) {
+      return hubManualGroups.find(g => g.key === selection?.group?.key)
+        || haccpMonthlyGroups.find(g => g.key === selection?.group?.key)
+        || selection?.group
+        || null
+    }
+    const freshById = new Map((haccpDocs || []).map(d => [d.id, d]))
+    const opened = selection.group
+    const mergedDocs = (opened.docs || []).map(d => freshById.get(d.id) || d)
+    const freshMeta = haccpMonthlyGroups.find(g => g.key === opened.key)
+      || hubManualGroups.find(g => g.key === opened.key)
+    return {
+      ...(freshMeta || opened),
+      ...opened,
+      docs: mergedDocs.length ? mergedDocs : (freshMeta?.docs || opened.docs || [])
+    }
+  }
+
   async function setEmployeeForVisibleK01Group(group, employeeName, onlyEmpty = false) {
-    if (!supabase || !group || !employeeName) return
+    if (!supabase || !group) return
+    if (!employeeName?.trim()) { setMessage('Wybierz pracownika z listy.'); return }
+    const name = employeeName.trim()
     const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_przyjmujacego))
     if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów do uzupełnienia.' : 'Brak pozycji do zmiany podpisu.'); return }
-    const confirmed = window.confirm(`Ustawić podpis "${employeeName}" dla ${docs.length} pozycji w tej kartotece K01? Poprzednie podpisy w tych wierszach zostaną zastąpione.`)
-    if (!confirmed) return
+    if (!onlyEmpty && !window.confirm(`Ustawić podpis „${name}" dla ${docs.length} pozycji w tej kartotece K01? Poprzednie podpisy w tych wierszach zostaną zastąpione.`)) return
     try {
       for (const doc of docs) {
-        const nextData = { ...(doc.data || {}), podpis_przyjmujacego: employeeName }
-        const { error } = await supabase
-          .from('haccp_documents')
-          .update({ data: nextData, signed_by_operator: employeeName, updated_at: new Date().toISOString() })
-          .eq('id', doc.id)
+        const payload = {
+          data: { ...(doc.data || {}), podpis_przyjmujacego: name },
+          signed_by_operator: name,
+          updated_at: new Date().toISOString()
+        }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
         if (error) throw error
-        await supabase.from('haccp_document_history').insert({
+        mergeHaccpDoc(doc.id, payload)
+        supabase.from('haccp_document_history').insert({
           document_id: doc.id,
           action: 'wybor_pracownika_zbiorczy',
           field_name: 'signed_by_operator',
           old_value: doc.signed_by_operator || '',
-          new_value: employeeName,
+          new_value: name,
           reason: 'Zbiorcze ustawienie podpisu przyjmującego w kartotece K01',
           changed_by: userRole
-        })
+        }).then(() => {}).catch(() => {})
       }
-      const ids = new Set(docs.map(d => d.id))
-      setHaccpDocs(prev => prev.map(d => ids.has(d.id) ? { ...d, data: { ...(d.data || {}), podpis_przyjmujacego: employeeName }, signed_by_operator: employeeName } : d))
-      setSelectedHaccpDoc(prev => {
-        if (!prev) return prev
-        if (prev.groupPreview && prev.group?.docs) {
-          return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => ids.has(d.id) ? { ...d, data: { ...(d.data || {}), podpis_przyjmujacego: employeeName }, signed_by_operator: employeeName } : d) } }
-        }
-        return prev
-      })
       setMessage(`Ustawiono podpis dla ${docs.length} pozycji K01.`)
     } catch (err) {
       setMessage(`Błąd zbiorczego ustawiania podpisu: ${err.message}`)
@@ -5168,9 +5181,7 @@ function App() {
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
-      const liveGroup = hubManualGroups.find(g => g.key === doc.group?.key)
-        || haccpMonthlyGroups.find(g => g.key === doc.group?.key)
-        || doc.group
+      const liveGroup = resolvePreviewGroup(doc)
       return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(liveGroup)}</div><div className="modal-actions no-print">
         {liveGroup.type === 'K03' && (liveGroup.docs || [])[0] && (liveGroup.docs[0].frozen
           ? <>
@@ -6562,32 +6573,25 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function setDocumentEmployee(doc, employeeName) {
     if (!supabase || !doc) return
-    const nextData = { ...(doc.data || {}), podpis_przyjmujacego: employeeName || '' }
+    const name = String(employeeName || '').trim()
+    const payload = {
+      data: { ...(doc.data || {}), podpis_przyjmujacego: name },
+      signed_by_operator: name || null,
+      updated_at: new Date().toISOString()
+    }
     try {
-      const { error } = await supabase
-        .from('haccp_documents')
-        .update({ data: nextData, signed_by_operator: employeeName || null, updated_at: new Date().toISOString() })
-        .eq('id', doc.id)
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
       if (error) throw error
-      await supabase.from('haccp_document_history').insert({
+      mergeHaccpDoc(doc.id, payload)
+      supabase.from('haccp_document_history').insert({
         document_id: doc.id,
         action: 'wybor_pracownika',
         field_name: 'podpis_przyjmujacego',
         old_value: doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '',
-        new_value: employeeName || '',
+        new_value: name,
         reason: 'Wybór podpisu przyjmującego z listy pracowników',
         changed_by: userRole
-      })
-      const updated = { ...doc, data: nextData, signed_by_operator: employeeName || '' }
-      setHaccpDocs(prev => prev.map(d => d.id === doc.id ? updated : d))
-      setSelectedHaccpDoc(prev => {
-        if (!prev) return prev
-        if (prev.groupPreview && prev.group?.docs) {
-          return { ...prev, group: { ...prev.group, docs: prev.group.docs.map(d => d.id === doc.id ? updated : d) } }
-        }
-        if (prev.id === doc.id) return updated
-        return prev
-      })
+      }).then(() => {}).catch(() => {})
       setMessage('Podpis przyjmującego zapisany.')
     } catch (err) {
       setMessage(`Błąd zapisu podpisu: ${err.message}`)
