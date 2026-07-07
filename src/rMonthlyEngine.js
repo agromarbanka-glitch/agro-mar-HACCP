@@ -57,7 +57,14 @@ export function r00ClothingMap(doc, columns, { sunday = false } = {}) {
   const out = {}
   for (const col of columns) {
     const val = map[col.id]
-    out[col.id] = sunday || doc?.data?.is_day_off ? (val || '') : (val || 'P')
+    const isOff = sunday || doc?.data?.is_day_off
+    if (isOff) {
+      out[col.id] = val ?? ''
+    } else if (Object.prototype.hasOwnProperty.call(map, col.id)) {
+      out[col.id] = val ?? ''
+    } else {
+      out[col.id] = 'P'
+    }
   }
   return out
 }

@@ -52,7 +52,7 @@ function defaultNewRow(cfg) {
 export function RMonthlyReportSection({
   code, supabase, employees, haccpDocs, hubManualGroups, loadHaccpDocs, mergeHaccpDoc, mergeHaccpDocsBatch, setMessage,
   setSelectedHaccpDoc, printHaccpGroup, exportHaccpGroupExcel,
-  allowDelete = false, onAuditDelete, kartotekaLocalPrints = {}
+  allowDelete = false, onAuditDelete, kartotekaLocalPrints = {}, onTogglePrintStatus
 }) {
   const cfg = getRMonthlyConfig(code)
   const [newMonth, setNewMonth] = useState(new Date().toISOString().slice(0, 7))
@@ -368,7 +368,7 @@ export function RMonthlyReportSection({
         </tr></thead>
         <tbody>{hubManualGroups.map(g => (
           <tr key={g.key}>
-            <td><b>{g.displayLabel || g.period}</b><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
+            <td><b>{g.displayLabel || g.period}</b><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} onToggle={onTogglePrintStatus} /></td>
             {isR03MultiVehicle && <td>{g.vehicleRegNo || '—'}</td>}
             {isR03MultiVehicle && <td>{g.driver || '—'}</td>}
             <td>{g.docs.filter(d => !d.data?.is_shell).length || g.docs.length}</td>
