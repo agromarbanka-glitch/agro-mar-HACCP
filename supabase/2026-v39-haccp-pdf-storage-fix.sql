@@ -1,8 +1,24 @@
--- Archiwum PDF: kategorie (Badania, Karty Charakterystyki, Inne + własne) + pliki w Storage.
--- Nie dotyka FIFO, partii ani operacji magazynowych.
+-- Naprawa wgrywania PDF do Archiwum (Windows / różne typy MIME plików).
+-- Uruchom w Supabase SQL Editor jeśli upload „wisi” lub kończy się błędem MIME.
+-- Bezpieczne do wielokrotnego uruchomienia.
 
 BEGIN;
 
+-- Bucket bez restrykcji MIME (Windows często zgłasza application/octet-stream zamiast application/pdf)
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'haccp-pdf-files',
+  'haccp-pdf-files',
+  false,
+  52428800,
+  NULL
+)
+ON CONFLICT (id) DO UPDATE SET
+  public = false,
+  file_size_limit = 52428800,
+  allowed_mime_types = NULL;
+
+-- Tabele (gdy v38 nie było uruchomione)
 CREATE TABLE IF NOT EXISTS public.haccp_pdf_categories (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL UNIQUE,
@@ -50,20 +66,6 @@ CREATE POLICY "haccp_pdf_files_auth" ON public.haccp_pdf_files
   FOR ALL TO authenticated
   USING (public.is_active_app_user())
   WITH CHECK (public.is_active_app_user());
-
--- Bucket Storage (prywatny – podgląd/pobranie przez signed URL)
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES (
-  'haccp-pdf-files',
-  'haccp-pdf-files',
-  false,
-  52428800,
-  NULL
-)
-ON CONFLICT (id) DO UPDATE SET
-  public = false,
-  file_size_limit = 52428800,
-  allowed_mime_types = NULL;
 
 DROP POLICY IF EXISTS "haccp_pdf_storage_select" ON storage.objects;
 CREATE POLICY "haccp_pdf_storage_select" ON storage.objects

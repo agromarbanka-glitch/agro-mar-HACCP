@@ -3,7 +3,7 @@
  * Wyłącznie dokumentacja – bez wpływu na FIFO / magazyn.
  */
 
-export const PDF_ARCHIVE_ENGINE_VERSION = '1.0'
+export const PDF_ARCHIVE_ENGINE_VERSION = '1.1'
 export const PDF_STORAGE_BUCKET = 'haccp-pdf-files'
 
 const FILE_SELECT = 'id, category_id, title, document_date, original_filename, storage_path, file_size, mime_type, signed_by_operator, notes, uploaded_by_name, created_at, updated_at, haccp_pdf_categories(id, name, sort_order, is_system)'
@@ -106,24 +106,121 @@ function buildStoragePath(categoryId, fileId, originalFilename) {
   return `${categoryId}/${fileId}.${ext}`
 }
 
-export async function uploadPdfDocument(client, file, meta, uploadedByName = '') {
+export function formatPdfUploadError(err) {
+  const msg = String(err?.message || err || 'Nieznany błąd')
+  const status = err?.statusCode || err?.status || ''
+  const code = err?.error || err?.code || ''
+  const blob = `${msg} ${code} ${status}`.toLowerCase()
+
+  if (/does not exist|relation.*haccp_pdf|42p01/i.test(blob)) {
+    return 'Brak tabel archiwum PDF w Supabase. Uruchom SQL: 2026-v38-haccp-pdf-archiwum.sql (lub 2026-v39-haccp-pdf-storage-fix.sql).'
+  }
+  if (/bucket not found|invalid bucket|404.*bucket/i.test(blob)) {
+    return 'Brak bucketa Storage „haccp-pdf-files”. Uruchom migrację SQL v38 lub v39 w Supabase.'
+  }
+  if (/mime|content.type|invalid file type|415/i.test(blob)) {
+    return 'Storage odrzucił typ pliku. Uruchom w Supabase SQL: 2026-v39-haccp-pdf-storage-fix.sql (usuwa restrykcję MIME).'
+  }
+  if (/row-level security|policy|42501|403|jwt|not authenticated|session/i.test(blob)) {
+    return 'Brak uprawnień (sesja lub RLS). Wyloguj się i zaloguj ponownie. Sprawdź też LOGOWANIE-KROK-5 w Supabase.'
+  }
+  if (/payload too large|413|file_size_limit/i.test(blob)) {
+    return 'Plik za duży (max 50 MB na plik w archiwum PDF).'
+  }
+  if (/duplicate|unique|already exists/i.test(blob)) {
+    return 'Ten plik już istnieje w archiwum – spróbuj ponownie.'
+  }
+  if (/timeout|network|failed to fetch|aborted/i.test(blob)) {
+    return 'Przekroczono czas wysyłania – sprawdź internet i rozmiar pliku, spróbuj ponownie.'
+  }
+  return msg
+}
+
+/** Sprawdza czy migracja SQL i bucket Storage są gotowe. */
+export async function checkPdfArchiveSetup(client) {
+  if (!client) {
+    return { ok: false, tablesOk: false, storageOk: false, categoriesCount: 0, hint: 'Brak połączenia z Supabase (.env).' }
+  }
+  let tablesOk = false
+  let categoriesCount = 0
+  let tablesError = ''
+  try {
+    const { count, error } = await client
+      .from('haccp_pdf_categories')
+      .select('id', { count: 'exact', head: true })
+    if (error) throw error
+    tablesOk = true
+    categoriesCount = count ?? 0
+  } catch (err) {
+    tablesError = formatPdfUploadError(err)
+  }
+
+  let storageOk = false
+  let storageError = ''
+  if (tablesOk) {
+    try {
+      const { error } = await client.storage.from(PDF_STORAGE_BUCKET).list('', { limit: 1 })
+      if (error) throw error
+      storageOk = true
+    } catch (err) {
+      storageError = formatPdfUploadError(err)
+    }
+  }
+
+  const ok = tablesOk && storageOk
+  let hint = ''
+  if (!tablesOk) hint = tablesError || 'Uruchom migrację SQL archiwum PDF w Supabase.'
+  else if (!storageOk) hint = storageError || 'Bucket Storage nie jest skonfigurowany – uruchom migrację v39.'
+  return { ok, tablesOk, storageOk, categoriesCount, hint }
+}
+
+async function ensurePdfUploadSession(client) {
+  const { data, error } = await client.auth.getSession()
+  if (error) throw error
+  if (!data?.session) {
+    throw new Error('Sesja wygasła – wyloguj się i zaloguj ponownie.')
+  }
+  return data.session
+}
+
+export async function uploadPdfDocument(client, file, meta, uploadedByName = '', { onProgress } = {}) {
   if (!client) throw new Error('Brak połączenia z bazą.')
   if (!file) throw new Error('Wybierz plik PDF.')
-  const mime = file.type || 'application/pdf'
-  if (!/pdf/i.test(mime) && !String(file.name || '').toLowerCase().endsWith('.pdf')) {
-    throw new Error('Dozwolone są tylko pliki PDF.')
+  const name = String(file.name || '')
+  if (!/\.pdf$/i.test(name)) {
+    throw new Error('Dozwolone są tylko pliki z rozszerzeniem .pdf')
   }
   if (!meta?.category_id) throw new Error('Wybierz kategorię dokumentu.')
+
+  await ensurePdfUploadSession(client)
 
   const fileId = crypto.randomUUID()
   const storagePath = buildStoragePath(meta.category_id, fileId, file.name)
   const title = String(meta.title || '').trim() || titleFromFilename(file.name)
 
+  onProgress?.('Wysyłanie pliku do Storage…')
+  let body = file
+  try {
+    if (typeof file.arrayBuffer === 'function') {
+      body = await file.arrayBuffer()
+    }
+  } catch (_) {
+    body = file
+  }
+
   const { error: upErr } = await client.storage
     .from(PDF_STORAGE_BUCKET)
-    .upload(storagePath, file, { contentType: 'application/pdf', upsert: false })
-  if (upErr) throw upErr
+    .upload(storagePath, body, {
+      contentType: 'application/pdf',
+      cacheControl: '3600',
+      upsert: false
+    })
+  if (upErr) {
+    const friendly = formatPdfUploadError(upErr)
+    throw new Error(friendly)
+  }
 
+  onProgress?.('Zapisywanie metadanych…')
   const payload = {
     id: fileId,
     category_id: meta.category_id,
@@ -146,7 +243,7 @@ export async function uploadPdfDocument(client, file, meta, uploadedByName = '')
     .single()
   if (error) {
     await client.storage.from(PDF_STORAGE_BUCKET).remove([storagePath]).catch(() => {})
-    throw error
+    throw new Error(formatPdfUploadError(error))
   }
   return normalizePdfFileRow(data)
 }

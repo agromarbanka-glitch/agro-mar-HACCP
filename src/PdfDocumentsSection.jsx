@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { RefreshCcw, Upload, Eye, Download, Trash2, FolderOpen, Plus, X } from 'lucide-react'
+import { RefreshCcw, Upload, Eye, Download, Trash2, FolderOpen, Plus, X, AlertTriangle } from 'lucide-react'
 import { confirmDelete, isAdmin } from './authEngine'
 import {
   PDF_ARCHIVE_ENGINE_VERSION,
@@ -13,7 +13,9 @@ import {
   getPdfSignedUrl,
   downloadPdfFile,
   formatPdfFileSize,
-  titleFromFilename
+  titleFromFilename,
+  checkPdfArchiveSetup,
+  formatPdfUploadError
 } from './pdfDocumentsEngine'
 
 export function PdfDocumentsSection({ supabase, employees, authProfile, authSession, setMessage }) {
@@ -24,6 +26,8 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [uploadStep, setUploadStep] = useState('')
+  const [setup, setSetup] = useState(null)
   const [newCategoryName, setNewCategoryName] = useState('')
   const [uploadForm, setUploadForm] = useState({
     file: null,
@@ -44,6 +48,14 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
     if (!supabase) return
     setLoading(true)
     try {
+      const setupStatus = await checkPdfArchiveSetup(supabase)
+      setSetup(setupStatus)
+      if (!setupStatus.tablesOk) {
+        setCategories([])
+        setFiles([])
+        setAllFilesForCounts([])
+        return
+      }
       const [cats, docs, allDocs] = await Promise.all([
         loadPdfCategories(supabase),
         loadPdfDocuments(supabase, { categoryId: categoryFilter, search }),
@@ -52,17 +64,20 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       setCategories(cats)
       setFiles(docs)
       setAllFilesForCounts(allDocs)
-      if (!uploadForm.category_id && cats.length) {
-        setUploadForm(prev => ({ ...prev, category_id: cats[0].id }))
-      }
     } catch (err) {
-      setMessage(`Archiwum PDF: ${err.message}`)
+      setMessage(`Archiwum PDF: ${formatPdfUploadError(err)}`)
     } finally {
       setLoading(false)
     }
-  }, [supabase, categoryFilter, search, setMessage, uploadForm.category_id])
+  }, [supabase, categoryFilter, search, setMessage])
 
   useEffect(() => { loadAll() }, [loadAll])
+
+  useEffect(() => {
+    if (categories.length && !uploadForm.category_id) {
+      setUploadForm(prev => ({ ...prev, category_id: categories[0].id }))
+    }
+  }, [categories, uploadForm.category_id])
 
   const countsByCategory = useMemo(() => {
     const m = new Map()
@@ -81,7 +96,7 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       setUploadForm(prev => ({ ...prev, category_id: cat.id }))
       setMessage(`Dodano kategorię „${cat.name}".`)
     } catch (err) {
-      setMessage(`Kategoria: ${err.message}`)
+      setMessage(`Kategoria: ${formatPdfUploadError(err)}`)
     }
   }
 
@@ -94,18 +109,24 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       await loadAll()
       setMessage(`Usunięto kategorię „${cat.name}".`)
     } catch (err) {
-      setMessage(`Kategoria: ${err.message}`)
+      setMessage(`Kategoria: ${formatPdfUploadError(err)}`)
     }
   }
 
   function onFilePick(e) {
     const file = e.target.files?.[0]
     if (!file) return
+    if (!/\.pdf$/i.test(file.name || '')) {
+      setMessage('Wybierz plik z rozszerzeniem .pdf')
+      e.target.value = ''
+      return
+    }
     setUploadForm(prev => ({
       ...prev,
       file,
       title: prev.title || titleFromFilename(file.name)
     }))
+    setMessage(`Wybrano: ${file.name} (${formatPdfFileSize(file.size)}). Kliknij „Zapisz w archiwum”.`)
   }
 
   async function handleUpload(e) {
@@ -113,9 +134,16 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
     if (!supabase || uploading) return
     if (!uploadForm.file) { setMessage('Wybierz plik PDF.'); return }
     if (!uploadForm.category_id) { setMessage('Wybierz kategorię.'); return }
+    if (setup && !setup.ok) {
+      setMessage(setup.hint || 'Archiwum PDF nie jest skonfigurowane w Supabase – uruchom migrację SQL.')
+      return
+    }
     setUploading(true)
+    setUploadStep('Przygotowanie…')
     try {
-      await uploadPdfDocument(supabase, uploadForm.file, uploadForm, uploaderName)
+      await uploadPdfDocument(supabase, uploadForm.file, uploadForm, uploaderName, {
+        onProgress: setUploadStep
+      })
       setUploadForm(prev => ({
         ...prev,
         file: null,
@@ -128,9 +156,10 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       await loadAll()
       setMessage('PDF zapisany w archiwum.')
     } catch (err) {
-      setMessage(`Upload PDF: ${err.message}`)
+      setMessage(`Upload PDF: ${formatPdfUploadError(err)}`)
     } finally {
       setUploading(false)
+      setUploadStep('')
     }
   }
 
@@ -144,7 +173,7 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       setPreviewUrl(url || '')
       if (!url) setMessage('Nie udało się wygenerować podglądu.')
     } catch (err) {
-      setMessage(`Podgląd: ${err.message}`)
+      setMessage(`Podgląd: ${formatPdfUploadError(err)}`)
     } finally {
       setPreviewLoading(false)
     }
@@ -160,7 +189,7 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
     try {
       await downloadPdfFile(supabase, doc)
     } catch (err) {
-      setMessage(`Pobieranie: ${err.message}`)
+      setMessage(`Pobieranie: ${formatPdfUploadError(err)}`)
     }
   }
 
@@ -173,7 +202,7 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       if (preview?.id === doc.id) setPreview(updated)
       setMessage('Zmieniono kategorię.')
     } catch (err) {
-      setMessage(`Kategoria: ${err.message}`)
+      setMessage(`Kategoria: ${formatPdfUploadError(err)}`)
     }
   }
 
@@ -185,7 +214,7 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       if (preview?.id === doc.id) setPreview(p => ({ ...p, signed_by_operator: signedBy }))
       setMessage('Zapisano podpis.')
     } catch (err) {
-      setMessage(`Podpis: ${err.message}`)
+      setMessage(`Podpis: ${formatPdfUploadError(err)}`)
     }
   }
 
@@ -198,9 +227,11 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
       await loadAll()
       setMessage('Usunięto dokument PDF.')
     } catch (err) {
-      setMessage(`Usuwanie: ${err.message}`)
+      setMessage(`Usuwanie: ${formatPdfUploadError(err)}`)
     }
   }
+
+  const setupBlocked = setup && !setup.ok
 
   return (
     <>
@@ -213,13 +244,26 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
               Badania, karty charakterystyki i inne dokumenty IFS/HACCP. Pliki są przechowywane w Supabase Storage –
               podgląd w przeglądarce i pobranie na dysk. Nie wpływa na FIFO ani magazyn partii.
             </p>
-            <p className="hint">Silnik: {PDF_ARCHIVE_ENGINE_VERSION}. Uruchom migrację SQL: <code>2026-v38-haccp-pdf-archiwum.sql</code></p>
+            <p className="hint">Silnik: {PDF_ARCHIVE_ENGINE_VERSION}. Przy problemach z uploadem uruchom w Supabase SQL: <code>2026-v39-haccp-pdf-storage-fix.sql</code></p>
           </div>
         </div>
         <button type="button" className="secondary" onClick={loadAll} disabled={loading}>
           <RefreshCcw size={16} /> {loading ? 'Odświeżanie…' : 'Odśwież listę'}
         </button>
       </section>
+
+      {setupBlocked && (
+        <section className="card pdf-archive-setup-warn">
+          <div className="section-title">
+            <AlertTriangle size={20} />
+            <div>
+              <h3>Archiwum PDF wymaga konfiguracji Supabase</h3>
+              <p>{setup.hint}</p>
+              <p className="hint">W Supabase → SQL Editor wklej i uruchom cały plik <code>2026-v39-haccp-pdf-storage-fix.sql</code>, potem kliknij „Odśwież listę”.</p>
+            </div>
+          </div>
+        </section>
+      )}
 
       <div className="pdf-archive-layout">
         <aside className="card pdf-archive-sidebar">
@@ -264,33 +308,41 @@ export function PdfDocumentsSection({ supabase, employees, authProfile, authSess
         <div className="pdf-archive-main">
           <section className="card inner-card no-print">
             <h3><Upload size={18} /> Wgraj PDF</h3>
+            <p className="hint">1. Wybierz plik PDF → 2. Uzupełnij kategorię → 3. Kliknij <b>Zapisz w archiwum</b> (sam wybór pliku jeszcze nic nie wysyła).</p>
             <form className="pdf-upload-form" onSubmit={handleUpload}>
               <label className="full-width">Plik PDF *
-                <input id="pdf-archive-file-input" type="file" accept="application/pdf,.pdf" onChange={onFilePick} />
+                <input id="pdf-archive-file-input" type="file" accept="application/pdf,.pdf" onChange={onFilePick} disabled={uploading || setupBlocked} />
               </label>
+              {uploadForm.file && (
+                <p className="hint full-width pdf-picked-file">
+                  Wybrany: <b>{uploadForm.file.name}</b> ({formatPdfFileSize(uploadForm.file.size)})
+                </p>
+              )}
               <label>Tytuł / opis
-                <input value={uploadForm.title} onChange={e => setUploadForm(p => ({ ...p, title: e.target.value }))} placeholder="np. Badanie wody – styczeń 2026" />
+                <input value={uploadForm.title} onChange={e => setUploadForm(p => ({ ...p, title: e.target.value }))} placeholder="np. Badanie wody – styczeń 2026" disabled={uploading} />
               </label>
               <label>Kategoria *
-                <select value={uploadForm.category_id} onChange={e => setUploadForm(p => ({ ...p, category_id: e.target.value }))}>
-                  <option value="">Wybierz…</option>
+                <select value={uploadForm.category_id} onChange={e => setUploadForm(p => ({ ...p, category_id: e.target.value }))} disabled={uploading || !categories.length}>
+                  <option value="">{categories.length ? 'Wybierz…' : 'Brak kategorii – uruchom SQL'}</option>
                   {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </label>
               <label>Data dokumentu
-                <input type="date" value={uploadForm.document_date} onChange={e => setUploadForm(p => ({ ...p, document_date: e.target.value }))} />
+                <input type="date" value={uploadForm.document_date} onChange={e => setUploadForm(p => ({ ...p, document_date: e.target.value }))} disabled={uploading} />
               </label>
               <label>Podpis / odpowiedzialny
-                <select value={uploadForm.signed_by_operator} onChange={e => setUploadForm(p => ({ ...p, signed_by_operator: e.target.value }))}>
+                <select value={uploadForm.signed_by_operator} onChange={e => setUploadForm(p => ({ ...p, signed_by_operator: e.target.value }))} disabled={uploading}>
                   <option value="">—</option>
                   {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
                 </select>
               </label>
               <label className="full-width">Uwagi
-                <input value={uploadForm.notes} onChange={e => setUploadForm(p => ({ ...p, notes: e.target.value }))} placeholder="Opcjonalnie" />
+                <input value={uploadForm.notes} onChange={e => setUploadForm(p => ({ ...p, notes: e.target.value }))} placeholder="Opcjonalnie" disabled={uploading} />
               </label>
               <div className="actions">
-                <button type="submit" disabled={uploading}>{uploading ? 'Wgrywanie…' : 'Zapisz w archiwum'}</button>
+                <button type="submit" disabled={uploading || setupBlocked || !categories.length}>
+                  {uploading ? (uploadStep || 'Wgrywanie…') : 'Zapisz w archiwum'}
+                </button>
               </div>
             </form>
           </section>
