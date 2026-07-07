@@ -19,13 +19,6 @@ export function normalizeK01Data(data = {}, signedBy = '') {
   }
 }
 
-function contractorNameFromOp(op) {
-  if (!op) return ''
-  if (op.contractors?.name) return op.contractors.name
-  if (op.contractor_name) return op.contractor_name
-  return op.supplier_name || ''
-}
-
 export function buildK01DocFromLot(lot, operation, options = {}) {
   const op = operation || {}
   const date = String(op.operation_date || lot.production_date || lot.created_at || '').slice(0, 10)
@@ -40,7 +33,7 @@ export function buildK01DocFromLot(lot, operation, options = {}) {
     document_date: date,
     product_name: productName,
     lot_no: lot.lot_no || '',
-    supplier_name: options.supplierName || contractorNameFromOp(op),
+    supplier_name: options.supplierName || null,
     document_no: op.document_no || `K01/${lot.lot_no || lot.id}`,
     chamber_code: lot.chamber?.code || '',
     qty: Number(lot.initial_qty || lot.remaining_qty || 0),

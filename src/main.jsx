@@ -2524,17 +2524,19 @@ function App() {
   }
 
   function getK01SupplierName(doc) {
-    const manual = cleanSupplierName(doc?.data?.faktyczny_dostawca || doc?.data?.dostawca_rzeczywisty || doc?.data?.dostawca || '')
-    if (manual) return manual
-    return cleanSupplierName(doc?.supplier_name || '')
+    return cleanSupplierName(doc?.data?.faktyczny_dostawca || doc?.data?.dostawca_rzeczywisty || doc?.data?.dostawca || '')
   }
 
+  /** K01: domyślnie tylko nr PZ; ręczny dostawca opcjonalnie przez „Zmień dostawcę”. */
   function shortSupplier(nameOrDoc, docNo) {
     const isDoc = nameOrDoc && typeof nameOrDoc === 'object'
     const doc = isDoc ? nameOrDoc : null
-    const supplier = doc ? getK01SupplierName(doc) : cleanSupplierName(nameOrDoc)
-    const no = doc ? doc.document_no : docNo
-    return [supplier || 'Brak dostawcy', no].filter(Boolean).join(' / ')
+    const pzNo = String(doc?.document_no || docNo || '').trim()
+    const manual = doc ? getK01SupplierName(doc) : cleanSupplierName(nameOrDoc)
+    if (manual && pzNo) return `${manual} / ${pzNo}`
+    if (pzNo) return pzNo
+    if (manual) return manual
+    return 'Brak nr PZ'
   }
 
   function buildK01PrintHtml(doc) {

@@ -73,7 +73,8 @@ function pickContractorFromRow(row, documentType, documentNo) {
 
   if (isInbound) {
     if (supplier && !isAgromarName(supplier)) return supplier
-    if (receiver && !isAgromarName(receiver)) return receiver
+    // Przy PZ/MM odbiorcą jest AGRO-MAR – nie używamy kolumny „Odbiorca” jako dostawcy.
+    return ''
   } else if (isOutbound) {
     if (receiver && !isAgromarName(receiver)) return receiver
     if (supplier && !isAgromarName(supplier)) return supplier
