@@ -61,6 +61,8 @@ import { PROTOKOLY_CARDS, PROTOKOLY_ENGINE_VERSION } from './protokolyEngine'
 import { SPECYFIKACJE_CARDS, SPECYFIKACJE_ENGINE_VERSION } from './specyfikacjeEngine'
 import { getHaccpDocForm, buildHubDocGroups, hubPeriodLabel, buildDocumentHtml } from './haccpDocRegistry'
 import { importPdfForDocType, PDF_IMPORT_VERSION, PDF_IMPORT_DOC_TYPES } from './pdfImportEngine'
+import { markKartotekaPrinted, kartotekaGroupFromDoc, loadLocalKartotekaPrints } from './kartotekaPrintEngine'
+import { KartotekaPrintBadge } from './KartotekaPrintBadge'
 import * as XLSX from 'xlsx'
 import './style.css'
 
@@ -298,6 +300,7 @@ function App() {
   const [importRows, setImportRows] = useState([])
   const [importPreview, setImportPreview] = useState([])
   const [haccpDocs, setHaccpDocs] = useState([])
+  const [kartotekaLocalPrints, setKartotekaLocalPrints] = useState(() => loadLocalKartotekaPrints())
   const [docsFilter, setDocsFilter] = useState('K01')
   const [docsWykazFilter, setDocsWykazFilter] = useState('W01')
   const [docsRaportFilter, setDocsRaportFilter] = useState('R00')
@@ -2441,6 +2444,19 @@ function App() {
     return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]))
   }
 
+  async function markGroupPrinted(group) {
+    if (!group) return
+    try {
+      await markKartotekaPrinted(supabase, group, {
+        printedBy: authDisplayName(authProfile, authSession),
+        onMergeDoc: mergeHaccpDoc,
+        onLocalUpdate: setKartotekaLocalPrints
+      })
+    } catch (_) {
+      /* informacyjne – nie blokuj druku */
+    }
+  }
+
   function printHtmlInIframe(html) {
     try {
       const oldFrame = document.getElementById('haccp-print-frame')
@@ -2526,10 +2542,12 @@ function App() {
       win.document.open()
       win.document.write(buildK01PrintHtml(doc))
       win.document.close()
+      void markGroupPrinted(kartotekaGroupFromDoc(doc))
       return
     }
     setSelectedHaccpDoc(doc)
     setTimeout(() => window.print(), 250)
+    void markGroupPrinted(kartotekaGroupFromDoc(doc))
   }
 
   async function changeHaccpStatus(doc, newStatus) {
@@ -2805,6 +2823,7 @@ function App() {
       : cfg ? buildManualMonthlyHtml(group, escapeHtml, cfg)
       : buildK02MonthlyHtml(group)
     printHtmlInIframe(html)
+    await markGroupPrinted(group)
   }
 
   function printHaccpDocument(doc) {
@@ -2814,6 +2833,7 @@ function App() {
       ? buildDocumentHtml(doc, cfg)
       : buildManualMonthlyHtml({ type: doc.document_type, period: String(doc.document_date || '').slice(0, 7), docs: [doc] }, escapeHtml, cfg)
     printHtmlInIframe(html)
+    void markGroupPrinted(kartotekaGroupFromDoc(doc))
   }
 
   function exportHaccpGroupExcel(group) {
@@ -3901,28 +3921,34 @@ function App() {
   }
 
   function printManualHaccpPeriod(type, docs) {
+    const registerGroup = { key: `${type}|register`, type, docs: docs || [] }
     if (type === 'W03') {
       printHtmlInIframe(buildW03PrintHtml(docs, w03Meta, escapeHtml))
+      void markGroupPrinted(registerGroup)
       return
     }
     if (type === 'W06') {
       printHtmlInIframe(buildW06PrintHtml(docs, escapeHtml))
+      void markGroupPrinted(registerGroup)
       return
     }
     if (type === 'K06') {
       const period = String(docs[0]?.document_date || haccpMonth).slice(0, 7)
       printHtmlInIframe(buildK06MonthlyHtml({ type, period, docs }, escapeHtml))
+      void markGroupPrinted({ key: `${type}|${period}`, type, period, docs })
       return
     }
     if (type === 'K07') {
       const period = String(docs[0]?.document_date || haccpMonth).slice(0, 7)
       printHtmlInIframe(buildK07MonthlyHtml({ type, period, docs }, escapeHtml))
+      void markGroupPrinted({ key: `${type}|${period}`, type, period, docs })
       return
     }
     const cfg = getDocFormCfg(type)
     if (!cfg || !docs.length) { setMessage('Brak wpisów do wydruku.'); return }
     const period = String(docs[0]?.document_date || haccpMonth).slice(0, cfg.periodMode === 'year' ? 4 : 7)
     printHtmlInIframe(buildManualMonthlyHtml({ type, period, docs }, escapeHtml, cfg))
+    void markGroupPrinted({ key: `${type}|${period}`, type, period, docs })
   }
 
   function exportManualHaccpPeriodExcel(type, docs) {
@@ -3988,6 +4014,7 @@ function App() {
     return <>
       <div className="actions no-print">
         <button className="secondary" onClick={() => printManualHaccpPeriod(type, periodDocs)}><Printer size={16}/> Druk/PDF – {type}</button>
+        <KartotekaPrintBadge group={{ key: `${type}|${period}`, type, period, docs: periodDocs }} localPrints={kartotekaLocalPrints} />
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel(type, periodDocs)}>Pobierz Excel</button>
       </div>
       <h3>Podgląd kartoteki {type} – {cfg.periodMode === 'year' ? year : `${year}-${month}`} ({periodDocs.length} wpisów)</h3>
@@ -4420,6 +4447,7 @@ function App() {
       <div className="actions no-print" style={{ marginBottom: 12 }}>
         <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W06', w06Docs)}><Printer size={16}/> Druk / PDF</button>
+        <KartotekaPrintBadge group={{ key: 'W06|register', type: 'W06', docs: w06Docs }} localPrints={kartotekaLocalPrints} />
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W06', w06Docs)}>Pobierz Excel</button>
       </div>
       <div className="w06-paper haccp-paper">
@@ -4506,6 +4534,7 @@ function App() {
       <div className="actions no-print" style={{ marginBottom: 12 }}>
         <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W03', w03Docs)}><Printer size={16}/> Druk / PDF</button>
+        <KartotekaPrintBadge group={{ key: 'W03|register', type: 'W03', docs: w03Docs }} localPrints={kartotekaLocalPrints} />
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W03', w03Docs)}>Pobierz Excel</button>
         {isAdmin(authProfile) && <button className="secondary" onClick={() => ensureW03Seed(true)}>Przywróć wzór (7 obiektów)</button>}
       </div>
@@ -4625,7 +4654,7 @@ function App() {
           <thead><tr><th>Okres</th><th>Wpisy</th><th>Typ</th><th>N</th><th>Akcje</th></tr></thead>
           <tbody>{haccpMonthlyGroups.map(g => (
             <tr key={g.key}>
-              <td><b>{periodLabel(g)}</b></td>
+              <td><b>{periodLabel(g)}</b><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
               <td>{g.docs.length}</td>
               <td>{k02GroupHasManualMonth(g.docs) ? 'ręczna / miesiąc' : 'auto z K01'}</td>
               <td>{g.docs.filter(d => normalizePN(d.data?.uwagi || d.status) === 'N').length || '—'}</td>
@@ -4689,7 +4718,7 @@ function App() {
           <thead><tr><th>Miesiąc</th><th>Dni w miesiącu</th><th>Akcje</th></tr></thead>
           <tbody>{hubManualGroups.map(g => (
             <tr key={g.key}>
-              <td><b>{g.period}</b> <span className="hint">({(g.columns || r02ColumnsFromDocs(g.docs)).length} maszyn)</span></td>
+              <td><b>{g.period}</b> <span className="hint">({(g.columns || r02ColumnsFromDocs(g.docs)).length} maszyn)</span><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
               <td>{g.docs.length}</td>
               <td className="row-actions">
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
@@ -4752,7 +4781,7 @@ function App() {
           <thead><tr><th>Miesiąc</th><th>Dni w miesiącu</th><th>Akcje</th></tr></thead>
           <tbody>{hubManualGroups.map(g => (
             <tr key={g.key}>
-              <td><b>{g.period}</b> <span className="hint">({(g.columns || r01ColumnsFromDocs(g.docs)).length} obiektów)</span></td>
+              <td><b>{g.period}</b> <span className="hint">({(g.columns || r01ColumnsFromDocs(g.docs)).length} obiektów)</span><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
               <td>{g.docs.length}</td>
               <td className="row-actions">
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
@@ -4813,7 +4842,7 @@ function App() {
           <tbody>{hubManualGroups.map(g => {
             const cols = g.columns || r13ColumnsFromDocs(g.docs)
             return <tr key={g.key}>
-              <td><b>{g.period}</b> <span className="hint">({cols.map(c => c.label).join(', ')})</span></td>
+              <td><b>{g.period}</b> <span className="hint">({cols.map(c => c.label).join(', ')})</span><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
               <td>{g.docs.length}</td>
               <td>{g.docs.filter(d => r13DocStatus(d, cols) === 'N').length || '—'}</td>
               <td className="row-actions">
@@ -4867,6 +4896,7 @@ function App() {
                 if (!ensureCanDelete()) return
                 await auditDeleteHaccpDocuments(supabase, docs, getAuditActor(), reason)
               }}
+              kartotekaLocalPrints={kartotekaLocalPrints}
             />
           ) : <>
           {cfg && renderManualHaccpEntrySection()}
@@ -4878,7 +4908,7 @@ function App() {
               <tbody>{hubManualGroups.map(g => {
                 const gcfg = getDocFormCfg(g.type)
                 return <tr key={g.key}>
-                  <td><b>{hubPeriodLabel(g, gcfg)}</b></td>
+                  <td><b>{hubPeriodLabel(g, gcfg)}</b><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
                   <td>{g.docs.length}</td>
                   <td>{g.docs.filter(d => d.status === 'N').length || '—'}</td>
                   <td className="row-actions">
@@ -5164,7 +5194,10 @@ function App() {
       </tr></thead><tbody>${trs}</tbody></table></div><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},500)}</script></body></html>`
   }
 
-  function printK011() { printHtmlInIframe(buildK011Html(auxVisibleRows)) }
+  function printK011() {
+    printHtmlInIframe(buildK011Html(auxVisibleRows))
+    void markGroupPrinted({ key: `K01.1|${auxYear}|H${auxHalf}`, type: 'K01.1', docs: [] })
+  }
 
   function exportK011Excel() {
     const rows = [
@@ -5212,7 +5245,7 @@ function App() {
         <h3>Lista kartotek K01.1</h3>
         <table><thead><tr><th>Kartoteka</th><th>Okres</th><th>Wpisy</th><th>Akcje</th></tr></thead><tbody>
           {auxHalfCounts().map(row => <tr key={`${row.year}-${row.half}`}>
-            <td>K01.1</td><td>{row.year} – {row.label}</td><td>{row.count}</td>
+            <td>K01.1</td><td>{row.year} – {row.label}<KartotekaPrintBadge group={{ key: `K01.1|${row.year}|H${row.half}`, type: 'K01.1', docs: [] }} localPrints={kartotekaLocalPrints} /></td><td>{row.count}</td>
             <td className="row-actions"><button className="mini secondary" onClick={()=>openAuxHalf(row.year,row.half)}>Otwórz / Edytuj</button>{String(auxYear)===String(row.year)&&String(auxHalf)===String(row.half) ? <span className="status ok">otwarta</span> : null}</td>
           </tr>)}
         </tbody></table>
@@ -5256,7 +5289,7 @@ function App() {
           <button type="button" className="secondary" onClick={resetAuxForm}>Wyczyść</button>
         </div>
       </div>
-      <div className="actions no-print"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
+      <div className="actions no-print"><button className="secondary" onClick={loadAuxMaterials}><RefreshCcw size={16}/> Odśwież</button><button className="secondary" onClick={printK011}><Printer size={16}/> Druk/PDF</button><KartotekaPrintBadge group={{ key: `K01.1|${auxYear}|H${auxHalf}`, type: 'K01.1', docs: [] }} localPrints={kartotekaLocalPrints} /><button className="secondary" onClick={exportK011Excel}>Pobierz Excel</button></div>
       <h3 className="no-print">Podgląd otwartej kartoteki: K01.1 – {auxYear}, {periodLabel}</h3>
       <div className="k011-original haccp-paper">
         <table className="k011-head"><tbody><tr>
@@ -5285,7 +5318,7 @@ function App() {
             <button className="secondary" onClick={() => unfreezeK03Document(liveGroup.docs[0])}>Odmroź</button>
           </>
           : <span className="pill">Roboczy – uzupełnij dane; prawidłowy K03 zamraża się automatycznie przy tworzeniu</span>)}
-        <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button>
+        <button className="secondary" onClick={() => printHaccpGroup(liveGroup)}><Printer size={16}/> Drukuj / PDF</button><KartotekaPrintBadge group={liveGroup} localPrints={kartotekaLocalPrints} /><button className="secondary" onClick={() => exportHaccpGroupExcel(liveGroup)}>Pobierz Excel</button>
         {isAdmin(authProfile) && liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
@@ -7728,7 +7761,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
                 const wfTag = k03DocWorkflowTag(doc)
                 return <tr key={g.key} className={doc.frozen ? 'row-frozen' : ''}>
-                  <td>{doc.document_date || '-'}</td>
+                  <td>{doc.document_date || '-'}<KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
                   <td><b>{doc.document_no || '-'}</b></td>
                   <td>{doc.lot_no || '-'}</td>
                   <td>{doc.product_name || g.product}</td>
@@ -7751,7 +7784,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 </tr>
               }
               return <tr key={g.key}>
-                <td>{periodLabel(g)}</td>
+                <td>{periodLabel(g)}<KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} /></td>
                 <td>{g.product}{g.chamber ? ` / ${g.chamber}` : ''}</td>
                 <td>{g.docs.length}</td>
                 <td>{g.docs.filter(d => d.status === 'N').length || '—'}</td>

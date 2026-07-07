@@ -619,6 +619,17 @@ button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); 
 .pdf-preview-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .pdf-preview-head h3 { margin: 0 0 4px; }
 .pdf-preview-frame { width: 100%; min-height: 70vh; border: 1px solid var(--line); border-radius: 10px; background: #f3f4f6; }
+.kartoteka-print-badge {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #22c55e;
+  margin-left: 6px;
+  vertical-align: middle;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22);
+  flex-shrink: 0;
+}
 @media (max-width: 960px) {
   .pdf-archive-layout { grid-template-columns: 1fr; }
   .pdf-upload-form { grid-template-columns: 1fr; }
