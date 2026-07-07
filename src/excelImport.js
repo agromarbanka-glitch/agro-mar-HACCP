@@ -3,12 +3,9 @@ import * as XLSX from 'xlsx'
 const REQUIRED = {
   documentType: ['Rodzaj', 'Typ', 'Dokument', 'Rodzaj dokumentu'],
   documentNo: ['Nr', 'Numer', 'Nr dokumentu', 'Nr faktury', 'Numer faktury', 'Nr Faktury', 'Numer dokumentu'],
-  issueDate: ['Data wystawienia', 'Data', 'Data dokumentu', 'Data wystawienia dokumentu'],
-  qty: ['Ilość.1', 'Ilość', 'Ilosc', 'Qty'],
-  productName: ['Produkt/usługa', 'Produkt', 'Towar', 'Nazwa produktu', 'Asortyment', 'Surowiec', 'Nazwa towaru', 'Materiał'],
+  issueDate: ['Data wystawienia', 'Data wystaw', 'Data wysta', 'Data', 'Data dokumentu', 'Data wystawienia dokumentu'],
+  productName: ['Produkt/usługa', 'Produkt/us', 'Produkt', 'Towar', 'Nazwa produktu', 'Asortyment', 'Surowiec', 'Nazwa towaru', 'Materiał'],
   // Przy PZ/MM dostawcą NIE jest AGRO-MAR z kolumny „Odbiorca”.
-  // Najpierw bierzemy faktycznego dostawcę z kolumn „Dostawca/Nadawca”,
-  // a „Odbiorca” zostawiamy dla WZ/FV jako klienta/odbiorcę.
   supplierName: ['Dostawca', 'Nadawca', 'Dane dostawcy', 'Nazwa dostawcy', 'Sprzedawca', 'Producent', 'Rolnik', 'Wystawca', 'Kontrahent', 'Dostawca / Odbiorca', 'Dostawca/Odbiorca'],
   receiverName: ['Odbiorca', 'Nabywca', 'Dane odbiorcy', 'Nazwa odbiorcy', 'Klient', 'Kontrahent odbiorcy'],
   nip: ['NIP', 'Nip', 'NIP kontrahenta', 'Nip dostawcy', 'Nip odbiorcy'],
@@ -36,6 +33,36 @@ function pick(row, names) {
     if (found && row[found] !== '') return row[found]
   }
   return ''
+}
+
+/** Klucze kolumn w kolejności arkusza (sheet_to_json zachowuje kolejność). */
+function getSheetColumnKeys(sheet, headerRow) {
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', range: headerRow })
+  return rows.length ? Object.keys(rows[0]) : []
+}
+
+function isQtyColumnKey(key) {
+  const n = normalizeHeader(key)
+  return /^ilo[sść]|ilosc|^qty$/.test(n)
+}
+
+/**
+ * W eksporcie magazynowym są dwie kolumny „Ilość”:
+ * – pierwsza (przed produktem): suma całego PZ/WZ,
+ * – ostatnia (przy produkcie): ilość danej pozycji.
+ * Bierzemy ostatnią niepustą kolumnę ilości (od prawej).
+ */
+export function pickLineQty(row, orderedColumnKeys = []) {
+  const qtyKeys = (orderedColumnKeys.length ? orderedColumnKeys : Object.keys(row)).filter(isQtyColumnKey)
+  if (!qtyKeys.length) return parseQty(pick(row, ['Ilość', 'Ilość.1', 'Ilosc', 'Qty']))
+
+  for (let i = qtyKeys.length - 1; i >= 0; i -= 1) {
+    const raw = row[qtyKeys[i]]
+    if (raw === '' || raw == null) continue
+    const n = parseQty(raw)
+    if (n !== 0 || raw === 0 || raw === '0') return n
+  }
+  return 0
 }
 
 function inferDocumentType(documentType, documentNo) {
@@ -73,7 +100,6 @@ function pickContractorFromRow(row, documentType, documentNo) {
 
   if (isInbound) {
     if (supplier && !isAgromarName(supplier)) return supplier
-    // Przy PZ/MM odbiorcą jest AGRO-MAR – nie używamy kolumny „Odbiorca” jako dostawcy.
     return ''
   } else if (isOutbound) {
     if (receiver && !isAgromarName(receiver)) return receiver
@@ -108,11 +134,20 @@ function pickContractorFromRow(row, documentType, documentNo) {
 
 function forwardFillExcelRows(rows) {
   const out = []
-  let last = { documentType: '', documentNo: '', contractorName: '', nip: '' }
+  let last = { documentType: '', documentNo: '', contractorName: '', nip: '', issueDate: '' }
 
   for (const row of rows) {
     const documentType = inferDocumentType(row.documentType, row.documentNo)
     const documentNo = String(row.documentNo || '').trim() || last.documentNo
+
+    let issueDate = String(row.issueDate || '').trim()
+    if (issueDate) {
+      last.issueDate = issueDate
+    } else if (last.issueDate) {
+      // Puste komórki daty pod pierwszym wierszem PZ = ta sama data co wyżej.
+      issueDate = last.issueDate
+    }
+
     let contractorName = String(row.contractorName || '').trim()
     if (contractorName && !isAgromarName(contractorName)) {
       last.contractorName = contractorName
@@ -128,6 +163,7 @@ function forwardFillExcelRows(rows) {
       ...row,
       documentType: documentType || last.documentType,
       documentNo,
+      issueDate,
       contractorName: contractorName && !isAgromarName(contractorName) ? contractorName : pickContractorFromRow(row, documentType || last.documentType, documentNo),
       nip
     })
@@ -164,16 +200,13 @@ function normalizeNip(value) {
   return d.length === 10 ? d : ''
 }
 
-function pickContractorForRow(row, documentType, documentNo) {
-  return pickContractorFromRow(row, documentType, documentNo)
-}
-
 export async function readAgromarExcel(file) {
   const buffer = await file.arrayBuffer()
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
   const sheetName = workbook.SheetNames[0]
   const sheet = workbook.Sheets[sheetName]
   const headerRow = findHeaderRowIndex(sheet)
+  const columnKeys = getSheetColumnKeys(sheet, headerRow)
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', range: headerRow })
 
   const mapped = rows
@@ -190,13 +223,16 @@ export async function readAgromarExcel(file) {
         }
       }
       documentType = inferDocumentType(documentType, documentNo)
+      const productName = String(pick(row, REQUIRED.productName)).trim()
+      const qty = pickLineQty(row, columnKeys)
+
       return {
         rowNo: headerRow + index + 2,
         documentType,
         documentNo,
         issueDate: parseExcelDate(pick(row, REQUIRED.issueDate)),
-        qty: parseQty(pick(row, REQUIRED.qty)),
-        productName: String(pick(row, REQUIRED.productName)).trim(),
+        qty,
+        productName,
         contractorName: pickContractorFromRow(row, documentType, documentNo),
         nip: normalizeNip(pick(row, REQUIRED.nip)),
         invoiceNo: String(pick(row, REQUIRED.invoiceNo)).trim(),
@@ -204,15 +240,14 @@ export async function readAgromarExcel(file) {
       }
     })
     .filter(row => row.documentNo || row.productName || row.qty || row.contractorName)
+    .filter(row => row.productName)
 
   return forwardFillExcelRows(mapped)
 }
 
 export function classifyOperation(documentType, documentNo) {
   const text = `${documentType} ${documentNo}`.toUpperCase()
-  // Przyjęcia na magazyn: PZ oraz przesunięcia magazynowe MM.
   if (text.includes('PZ') || text.includes('MM')) return 'przyjecie'
-  // Rozchody/sprzedaż: WZ, FV, FS. Ilości w Excelu mogą być ujemne, ale w bazie zapisujemy je jako dodatni rozchód.
   if (text.includes('WZ') || text.includes('FV') || text.includes('FS') || text.includes('RR')) return 'sprzedaz'
   return 'przyjecie'
 }
