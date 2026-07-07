@@ -381,8 +381,12 @@ export function computeDashboardCompliance(ctx = {}) {
     checkK06(base),
     checkK07(base),
     checkDailyCalendarDocs(docsOfType(haccpDocs, 'R00'), yearMonth, 'R00', d => {
-      const slots = d.data?.employee_slots || d.data?.slots || []
-      return Array.isArray(slots) ? slots.some(s => String(s?.name || s || '').trim()) : isDocSigned(d)
+      if (d.data?.is_day_off) return true
+      const clothing = d.data?.clothing
+      if (clothing && Object.keys(clothing).length) return Object.values(clothing).some(v => v === 'P' || v === 'N')
+      const emps = d.data?.employees
+      if (Array.isArray(emps)) return emps.some(e => e.clothing === 'P' || e.clothing === 'N' || String(e.name || '').trim())
+      return isDocSigned(d)
     }),
     checkR01(base),
     checkDailyCalendarDocs(docsOfType(haccpDocs, 'R02'), yearMonth, 'R02', d => {

@@ -11,7 +11,65 @@ import { getRMonthlyConfig, rMonthlyStorageKey } from './rMonthlyConfigs'
 
 export { isSundayDate }
 
-export const R_MONTHLY_ENGINE_VERSION = '1.1'
+export const R_MONTHLY_ENGINE_VERSION = '1.2'
+
+export const R00_DEFAULT_GODZINA = '8:00'
+
+export function defaultR00Columns(count = 8) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `emp-${i + 1}`,
+    label: ''
+  }))
+}
+
+export function r00MakeEmployeeColumn(name, existing = []) {
+  const trimmed = String(name || '').trim()
+  const label = trimmed || `Nr ${existing.length + 1}`
+  const base = trimmed.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'pracownik'
+  return { id: `${base}-${Date.now().toString(36).slice(-4)}`, label }
+}
+
+/** Kolumny pracowników – z danych kartoteki lub legacy employees[]. */
+export function r00ResolveColumns(docs, fallback) {
+  const fromDocs = columnsFromDocs('R00', docs, fallback)
+  if (fromDocs.length && fromDocs.some(c => String(c.label || '').trim())) return fromDocs
+  const first = sortRMonthlyDocs(docs)[0]
+  const legacy = first?.data?.employees
+  if (Array.isArray(legacy) && legacy.length) {
+    return legacy.map((e, i) => ({
+      id: String(e.slot ? `emp-${e.slot}` : `emp-${i + 1}`),
+      label: String(e.name || '').trim()
+    }))
+  }
+  return fromDocs.length ? fromDocs : defaultR00Columns(8)
+}
+
+export function r00ClothingMap(doc, columns, { sunday = false } = {}) {
+  const map = { ...(doc?.data?.clothing || {}) }
+  const legacy = doc?.data?.employees
+  if (Array.isArray(legacy) && legacy.length && !Object.keys(map).length) {
+    columns.forEach((col, i) => {
+      const leg = legacy[i]
+      if (leg?.clothing) map[col.id] = leg.clothing
+    })
+  }
+  const out = {}
+  for (const col of columns) {
+    const val = map[col.id]
+    out[col.id] = sunday || doc?.data?.is_day_off ? (val || '') : (val || 'P')
+  }
+  return out
+}
+
+export function defaultR00DayData(columns, sunday) {
+  const cols = (columns || defaultR00Columns(8)).map(c => ({ ...c }))
+  return {
+    godzina: sunday ? '' : R00_DEFAULT_GODZINA,
+    clothing: Object.fromEntries(cols.map(c => [c.id, sunday ? '' : 'P'])),
+    columns: cols
+  }
+}
 
 export function makeR03RegisterKey(vehicleReg) {
   const slug = String(vehicleReg || '').trim().toLowerCase()
@@ -255,7 +313,7 @@ export function buildRMonthlyPeriodGroups(code, docs) {
       const allDocs = sortRMonthlyDocs(g.docs)
       const rows = allDocs.filter(d => !d.data?.is_shell)
       const keepAll = ['register-rows', 'station-matrix', 'r04-control', 'single-month', 'quarter-trend'].includes(cfg.layout)
-      const columns = columnsFromDocs(code, rows.length ? rows : allDocs)
+      const columns = code === 'R00' ? r00ResolveColumns(rows.length ? rows : allDocs, loadRMonthlyColumns(code)) : columnsFromDocs(code, rows.length ? rows : allDocs)
       let docsForGroup = keepAll ? allDocs : (rows.length ? rows : allDocs.filter(d => !d.data?.is_shell))
       if (cfg.layout === 'r04-control') {
         docsForGroup = allDocs.filter(d => !d.data?.is_shell && (d.data?.stations || d.data?.readings))
@@ -289,10 +347,6 @@ export function buildCalendarRows(yearMonth, docs = []) {
     lp: i + 1,
     doc: docByDate.get(day.date) || null
   }))
-}
-
-function emptyEmployees(count = 12) {
-  return Array.from({ length: count }, (_, i) => ({ slot: i + 1, name: '', clothing: '' }))
 }
 
 function defaultDayCells(columns, sunday, layout) {
@@ -465,7 +519,9 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
     }]
   }
 
-  const cols = columnDefs.map(c => ({ ...c }))
+  let cols = (columnDefs || []).map(c => ({ ...c }))
+  if (!cols.length && cfg.layout === 'daily-employees') cols = defaultR00Columns(8)
+  if (cfg.layout === 'daily-employees') saveRMonthlyColumns(code, cols)
   return calendarDaysInMonth(yearMonth).map((day, i) => {
     const sunday = day.isSunday
     const base = {
@@ -477,7 +533,7 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
     }
     let data = { ...base }
     if (cfg.layout === 'daily-employees') {
-      data = { ...base, godzina: '', employees: emptyEmployees(cfg.employeeSlots || 12) }
+      data = { ...base, ...defaultR00DayData(cols, sunday) }
     } else if (cfg.layout === 'grid-mcd-agent') {
       data = { ...base, cells: defaultDayCells(cols, sunday, cfg.layout) }
     } else if (cfg.layout === 'daily-calibration') {
@@ -503,7 +559,8 @@ export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs,
     const cols = (columnDefs?.length ? columnDefs : loadRMonthlyColumns(code)).map(c => ({ ...c }))
     return buildR11SingleDayPayload(yearMonth, date, cols, signedBy, sunday)
   }
-  const cols = columnDefs.map(c => ({ ...c }))
+  let cols = (columnDefs || []).map(c => ({ ...c }))
+  if (!cols.length && cfg?.layout === 'daily-employees') cols = defaultR00Columns(8)
   const isSunday = sunday || isSundayDate(date)
   const sortOrder = calendarDaysInMonth(yearMonth).findIndex(d => d.date === date) + 1
   const base = {
@@ -517,7 +574,7 @@ export function buildRMonthlySingleDayPayload(code, yearMonth, date, columnDefs,
     ...(meta.driver ? { driver: meta.driver } : {})
   }
   let data = { ...base }
-  if (cfg?.layout === 'daily-employees') data = { ...base, godzina: '', employees: emptyEmployees(cfg.employeeSlots || 12) }
+  if (cfg?.layout === 'daily-employees') data = { ...base, ...defaultR00DayData(cols, isSunday) }
   else if (cfg?.layout === 'grid-mcd-agent') data = { ...base, cells: defaultDayCells(cols, isSunday, cfg.layout) }
   else if (cfg?.layout === 'daily-calibration') data = { ...base, chamber_columns: cols, calibration: defaultCalibration(isSunday, cols) }
   const regSuffix = meta.register_key ? `/${String(meta.register_key).slice(-8)}` : ''
@@ -621,18 +678,24 @@ ${rows.map((doc, i) => `<tr><td>${i + 1}</td>${cfg.rowFields.map(f => `<td>${esc
     }).join('')
     body = `${vehicleLine}<table><thead><tr><th>Lp.</th><th>Dzień</th>${colH}<th>${escapeHtml(cfg.signLabel)}</th></tr></thead><tbody>${rows}</tbody></table>`
   } else if (cfg.layout === 'daily-employees') {
+    const columns = r00ResolveColumns(docs, group.columns || loadRMonthlyColumns(code))
     const calendar = buildCalendarRows(period, docs)
-    const slots = cfg.employeeSlots || 12
+    const empHead = columns.map((c, i) => `<th>${escapeHtml(c.label || `Nr ${i + 1}`)}</th>`).join('')
+    const pnHead = columns.map(() => '<th><small>Stan odzieży roboczej (P/N)*</small></th>').join('')
     const rows = calendar.map(row => {
       const doc = row.doc
       const off = row.isSunday || doc?.data?.is_day_off ? 'day-off' : ''
-      if (!doc) return `<tr class="${off}"><td>${formatRMonthlyPlDate(row.date)}</td><td colspan="${slots + 2}">—</td></tr>`
-      const emps = doc.data?.employees || emptyEmployees(slots)
-      const cells = emps.slice(0, 4).map(e => `<td>${escapeHtml(e.name || '—')}<br/>${escapeHtml(e.clothing || '—')}</td>`).join('')
-      return `<tr class="${off}"><td>${formatRMonthlyPlDate(doc.document_date)}<br/>${escapeHtml(doc.data?.godzina || '')}</td>${cells}<td>${escapeHtml(doc.signed_by_operator || '')}</td></tr>`
+      if (!doc) return `<tr class="${off}"><td>${formatRMonthlyPlDate(row.date)}</td><td colspan="${columns.length + 2}">—</td></tr>`
+      const clothing = r00ClothingMap(doc, columns, { sunday: row.isSunday || doc.data?.is_day_off })
+      const cells = columns.map(col => `<td>${escapeHtml(clothing[col.id] || '—')}</td>`).join('')
+      return `<tr class="${off}"><td>${formatRMonthlyPlDate(doc.document_date)}</td><td>${escapeHtml(doc.data?.godzina || R00_DEFAULT_GODZINA)}</td>${cells}<td>${escapeHtml(doc.signed_by_operator || '')}</td></tr>`
     }).join('')
-    body = `<table><thead><tr><th>Data / godz.</th><th>Nr 1–4 (nazwisko / P/N)*</th><th colspan="3"></th><th>Podpis</th></tr></thead><tbody>${rows}</tbody></table>
-<p>* P – prawidłowo, N – nieprawidłowo (odzież)</p>`
+    body = `<table><thead>
+      <tr><th rowspan="2">Data</th><th rowspan="2">Godzina</th><th colspan="${columns.length}">Dane pracowników (imię i nazwisko)</th><th rowspan="2">${escapeHtml(cfg.signLabel)}</th></tr>
+      <tr>${empHead}</tr>
+      <tr><th></th><th></th>${pnHead}<th></th></tr>
+    </thead><tbody>${rows}</tbody></table>
+    <p>* P – prawidłowo, N – nieprawidłowo (odzież robocza)</p>`
   } else if (cfg.layout === 'daily-calibration') {
     const chambers = group.columns || columnsFromDocs(code, docs)
     const thermoSpan = Math.max(chambers.length * 3, 1)
@@ -760,15 +823,17 @@ export function buildRMonthlyExcelRows(code, group) {
       }), doc.signed_by_operator || ''])
     })
   } else if (cfg?.layout === 'daily-employees') {
-    rows.push(['Data', 'Godzina', 'Pracownicy 1-4 (nazwisko / P/N)', '', '', '', '', cfg.signLabel])
+    const columns = r00ResolveColumns(docs, group.columns || loadRMonthlyColumns(code))
+    rows.push(['Data', 'Godzina', ...columns.map((c, i) => c.label || `Nr ${i + 1}`), cfg.signLabel])
+    rows.push(['', '', ...columns.map(() => 'Stan odzieży P/N'), ''])
     buildCalendarRows(period, docs).forEach(row => {
       const doc = row.doc
-      if (!doc) { rows.push([formatRMonthlyPlDate(row.date), '', '', '', '', '', '']); return }
-      const emps = doc.data?.employees || []
+      if (!doc) { rows.push([formatRMonthlyPlDate(row.date), '', ...columns.map(() => ''), '']); return }
+      const clothing = r00ClothingMap(doc, columns, { sunday: row.isSunday || doc.data?.is_day_off })
       rows.push([
         formatRMonthlyPlDate(doc.document_date),
-        doc.data?.godzina || '',
-        ...emps.slice(0, 4).flatMap(e => [e.name || '', e.clothing || '']),
+        doc.data?.godzina || R00_DEFAULT_GODZINA,
+        ...columns.map(col => clothing[col.id] || ''),
         doc.signed_by_operator || ''
       ])
     })

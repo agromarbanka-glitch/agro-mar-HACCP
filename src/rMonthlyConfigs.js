@@ -9,13 +9,18 @@ export const R_MONTHLY_CONFIGS = {
     layout: 'daily-employees',
     periodMode: 'month',
     storageKey: 'agro-mar-r00-slots-v1',
+    defaultGodzina: '8:00',
     header: {
       title: 'Raport R00 – Raport dopuszczenia pracowników do pracy',
       version: 'I/2024'
     },
-    employeeSlots: 12,
-    slotLabel: n => `Nr ${n}`,
-    createHint: 'Cały miesiąc – dni robocze z 12 miejscami na pracowników (P/N odzieży), niedziele puste (czerwone).',
+    defaultColumns: Array.from({ length: 8 }, (_, i) => ({
+      id: `emp-${i + 1}`,
+      label: ''
+    })),
+    columnLabel: 'Pracownicy',
+    addColumnLabel: 'Dodaj pracownika',
+    createHint: 'Cały miesiąc – pracownicy jako kolumny u góry (jak we wzorze Word), dni robocze z godz. 8:00 i P odzieży, niedziele puste (czerwone).',
     signLabel: 'Podpis kontrolującego'
   },
   R03: {

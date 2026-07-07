@@ -21,7 +21,11 @@ import {
   buildR04ControlPayload,
   defaultR04Reading,
   resolveR04Stations,
-  findPreviousR04Control
+  findPreviousR04Control,
+  r00MakeEmployeeColumn,
+  r00ResolveColumns,
+  r00ClothingMap,
+  R00_DEFAULT_GODZINA
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 import {
@@ -61,6 +65,7 @@ export function RMonthlyReportSection({
   const [newRow, setNewRow] = useState(() => defaultNewRow(cfg))
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
   const [newVehicleReg, setNewVehicleReg] = useState('')
+  const [r00PickEmployee, setR00PickEmployee] = useState('')
 
   if (!cfg) return null
 
@@ -183,7 +188,7 @@ export function RMonthlyReportSection({
   }
 
   function addDefaultColumn() {
-    if (!allowDelete) { setMessage('Tylko administrator może zmieniać strukturę kartoteki.'); return }
+    if (code !== 'R00' && !allowDelete) { setMessage('Tylko administrator może zmieniać strukturę kartoteki.'); return }
     if (code === 'R08') {
       addR08Chamber(newChamberKind)
       return
@@ -199,6 +204,18 @@ export function RMonthlyReportSection({
       setColumnDefs(next)
       setNewColumnLabel('')
       setMessage(`${code}: dodano kolumnę „${col.label}”.`)
+      return
+    }
+    if (code === 'R00') {
+      const name = String(newColumnLabel || r00PickEmployee || '').trim()
+      if (!name) { setMessage('R00: wybierz pracownika z listy lub wpisz imię i nazwisko.'); return }
+      const col = r00MakeEmployeeColumn(name, columnDefs)
+      const next = [...columnDefs, col]
+      saveRMonthlyColumns(code, next)
+      setColumnDefs(next)
+      setNewColumnLabel('')
+      setR00PickEmployee('')
+      setMessage(`R00: dodano pracownika „${col.label}".`)
       return
     }
     const col = rMonthlyMakeColumn(newColumnLabel, code.toLowerCase())
@@ -227,14 +244,14 @@ export function RMonthlyReportSection({
     setMessage(`${code}: dodano ${col.label}.`)
   }
 
-  const colPanel = allowDelete && !isR03MultiVehicle && (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey ? (
+  const colPanel = (cfg.layout === 'daily-employees' || (allowDelete && !isR03MultiVehicle && (cfg.defaultColumns || cfg.defaultStations || cfg.defaultChambers || cfg.layout === 'r04-control' || cfg.layout === 'r11-magnets') && cfg.storageKey)) ? (
     <div className="r13-columns-panel">
-      <b>{cfg.columnLabel || 'Stacje'}:</b>
+      <b>{code === 'R00' ? 'Pracownicy (kolumny u góry tabeli – jak we wzorze Word):' : `${cfg.columnLabel || 'Stacje'}:`}</b>
       <div className="r13-columns-list">
-        {columnDefs.map(col => (
-          <span key={col.id} className="r13-column-chip">{col.label}
-            {allowDelete && columnDefs.length > 1 && <button type="button" className="mini danger" onClick={() => {
-              if (!confirmDelete(`„${col.label}" z domyślnych kolumn ${code}.`)) return
+        {columnDefs.map((col, i) => (
+          <span key={col.id} className="r13-column-chip">{col.label || (code === 'R00' ? `Nr ${i + 1}` : col.label)}
+            {(allowDelete || code === 'R00') && columnDefs.length > 1 && allowDelete && <button type="button" className="mini danger" onClick={() => {
+              if (!confirmDelete(`„${col.label || `Nr ${i + 1}`}" z domyślnych kolumn ${code}.`)) return
               const next = columnDefs.filter(c => c.id !== col.id)
               saveRMonthlyColumns(code, next)
               setColumnDefs(next)
@@ -242,7 +259,21 @@ export function RMonthlyReportSection({
           </span>
         ))}
       </div>
-      {code === 'R08' ? (
+      {code === 'R00' ? (
+        <div className="r13-add-column-row r00-add-employee-row">
+          <label>Z listy pracowników
+            <select value={r00PickEmployee} onChange={e => { setR00PickEmployee(e.target.value); if (e.target.value) setNewColumnLabel('') }}>
+              <option value="">— wybierz —</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <label>Lub wpisz ręcznie
+            <input value={newColumnLabel} onChange={e => { setNewColumnLabel(e.target.value); setR00PickEmployee('') }} placeholder="Imię i nazwisko" />
+          </label>
+          <button type="button" className="secondary" onClick={addDefaultColumn}>Dodaj pracownika</button>
+          <p className="hint">Domyślnie 8 kolumn; możesz dodać dowolnie wiele. Dni robocze: godz. {R00_DEFAULT_GODZINA}, odzież P.</p>
+        </div>
+      ) : code === 'R08' ? (
         <div className="r13-add-column-row">
           <label>Typ chłodni
             <select value={newChamberKind} onChange={e => setNewChamberKind(e.target.value)}>
@@ -393,6 +424,7 @@ export function RMonthlyReportPreview({
   const [previewStationKind, setPreviewStationKind] = useState('derat')
   const [newColumnLabel, setNewColumnLabel] = useState('')
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
+  const [r00PickEmployee, setR00PickEmployee] = useState('')
 
   useEffect(() => {
     if (cfg?.layout !== 'single-month' || !singleDoc) return
@@ -406,7 +438,56 @@ export function RMonthlyReportPreview({
   const period = String(group.period || '')
   const year = period.slice(0, 4)
   const month = period.includes('Q') ? period.slice(5) : period.slice(5, 7)
-  const columns = group.columns || columnsFromDocs(code, docs)
+  const columns = code === 'R00'
+    ? r00ResolveColumns(docs, group.columns || columnsFromDocs(code, docs))
+    : (group.columns || columnsFromDocs(code, docs))
+
+  async function syncR00ColumnsToGroup(nextCols) {
+    if (!supabase || code !== 'R00') return
+    saveRMonthlyColumns(code, nextCols)
+    try {
+      for (const doc of docs) {
+        const clothing = { ...(doc.data?.clothing || {}) }
+        for (const col of nextCols) {
+          if (clothing[col.id] === undefined && !doc.data?.is_day_off) clothing[col.id] = 'P'
+        }
+        for (const key of Object.keys(clothing)) {
+          if (!nextCols.some(c => c.id === key)) delete clothing[key]
+        }
+        const payload = {
+          data: { ...(doc.data || {}), columns: nextCols.map(c => ({ ...c })), clothing },
+          updated_at: new Date().toISOString()
+        }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+        if (error) throw error
+        if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
+      }
+      if (!mergeHaccpDoc) await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`R00: ${err.message}`)
+    }
+  }
+
+  async function updateR00ColumnLabel(colId, label) {
+    const nextCols = columns.map(c => c.id === colId ? { ...c, label: String(label || '').trim() } : c)
+    await syncR00ColumnsToGroup(nextCols)
+  }
+
+  async function addR00ColumnToGroup(name) {
+    const trimmed = String(name || '').trim()
+    if (!trimmed) { setMessage('R00: wybierz z listy lub wpisz imię i nazwisko.'); return }
+    const col = r00MakeEmployeeColumn(trimmed, columns)
+    await syncR00ColumnsToGroup([...columns, col])
+    setNewColumnLabel('')
+    setR00PickEmployee('')
+    setMessage(`R00: dodano pracownika „${col.label}”.`)
+  }
+
+  async function removeR00Column(colId) {
+    if (columns.length <= 1) { setMessage('R00: musi zostać co najmniej jeden pracownik.'); return }
+    if (!confirmDelete('Kolumnę pracownika z tej kartoteki.')) return
+    await syncR00ColumnsToGroup(columns.filter(c => c.id !== colId))
+  }
 
   async function applyColumnMcd(colId, mcdValue, colLabel) {
     if (!supabase || !mcdValue) return
@@ -837,40 +918,86 @@ export function RMonthlyReportPreview({
 
   if (cfg.layout === 'daily-employees') {
     const calendar = buildCalendarRows(period, docs)
-    const slots = cfg.employeeSlots || 12
-    return <div className="monthly-paper r13-paper">{toolbar}{head}
-      <p className="hint no-print">Edycja pierwszych 4 miejsc na ekranie; pełna lista 12 w danych. * P/N odzieży roboczej.</p>
-      <table className="r13-table"><thead><tr><th>Data</th><th>Godzina</th>
-        {[1, 2, 3, 4].map(n => <th key={n} colSpan={2}>Nr {n} (nazwisko / P/N)</th>)}
-        <th>{cfg.signLabel}</th></tr></thead>
+    const empCols = columns
+    return <div className="monthly-paper r13-paper r00-paper">{toolbar}{head}
+      <div className="no-print r00-employee-toolbar">
+        <p className="hint">Pracownicy u góry tabeli (jak we wzorze). Dni robocze: godz. {R00_DEFAULT_GODZINA}, odzież <b>P</b>. Niedziele puste.</p>
+        <div className="r00-add-employee-row">
+          <label>Z listy
+            <select value={r00PickEmployee} onChange={e => { setR00PickEmployee(e.target.value); if (e.target.value) setNewColumnLabel('') }}>
+              <option value="">—</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <label>Lub ręcznie
+            <input value={newColumnLabel} onChange={e => { setNewColumnLabel(e.target.value); setR00PickEmployee('') }} placeholder="Imię i nazwisko" />
+          </label>
+          <button type="button" className="secondary mini" onClick={() => addR00ColumnToGroup(newColumnLabel || r00PickEmployee)}>+ Dodaj pracownika</button>
+        </div>
+      </div>
+      <div className="table-wrap r00-table-wrap">
+      <table className="r13-table r00-table"><thead>
+        <tr>
+          <th rowSpan={2}>Data</th>
+          <th rowSpan={2}>Godzina</th>
+          <th colSpan={empCols.length}>Dane pracowników (imię i nazwisko)</th>
+          <th rowSpan={2}>{cfg.signLabel}</th>
+        </tr>
+        <tr>{empCols.map((col, i) => (
+          <th key={col.id} className="r00-emp-head">
+            <span className="print-only">{col.label || `Nr ${i + 1}`}</span>
+            <span className="no-print r00-emp-head-edit">
+              <small>Nr {i + 1}</small>
+              <select className="mini-select" value="" onChange={e => { if (e.target.value) updateR00ColumnLabel(col.id, e.target.value) }}>
+                <option value="">Lista…</option>
+                {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+              </select>
+              <input className="cell-input" defaultValue={col.label || ''} key={`${col.id}-${col.label}`} placeholder="Imię i nazwisko" onBlur={e => updateR00ColumnLabel(col.id, e.target.value)} />
+              {allowDelete && empCols.length > 1 && (
+                <button type="button" className="mini danger" onClick={() => removeR00Column(col.id)} title="Usuń kolumnę">×</button>
+              )}
+            </span>
+          </th>
+        ))}</tr>
+        <tr>
+          <th></th><th></th>
+          {empCols.map(col => <th key={`pn-${col.id}`}><small>Stan odzieży (P/N)*</small></th>)}
+          <th></th>
+        </tr>
+      </thead>
         <tbody>{calendar.map(row => {
           const doc = row.doc
           const off = row.isSunday
-          if (!doc) return <tr key={row.date} className={`${off ? 'r13-day-off' : ''} no-print`}><td>{formatRMonthlyPlDate(row.date)}</td><td colSpan={9}><button type="button" className="mini secondary" onClick={() => addMissingDay(row.date)}>Dodaj dzień</button></td></tr>
-          const emps = doc.data?.employees || []
+          if (!doc) return <tr key={row.date} className={`${off ? 'r13-day-off' : ''} no-print`}><td>{formatRMonthlyPlDate(row.date)}</td><td colSpan={empCols.length + 2}><button type="button" className="mini secondary" onClick={() => addMissingDay(row.date)}>Dodaj dzień</button></td></tr>
           const isOff = off || doc.data?.is_day_off
+          const clothing = r00ClothingMap(doc, empCols, { sunday: isOff })
           return <tr key={doc.id} className={isOff ? 'r13-day-off' : ''}>
             <td>{formatRMonthlyPlDate(doc.document_date)}</td>
-            <td><input className="cell-input no-print" defaultValue={doc.data?.godzina || ''} onBlur={e => saveDoc(supabase, doc, { godzina: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} /></td>
-            {[0, 1, 2, 3].map(idx => {
-              const e = emps[idx] || { name: '', clothing: '' }
-              return <React.Fragment key={idx}>
-                <td><input className="cell-input no-print" defaultValue={e.name || ''} onBlur={ev => {
-                  const employees = [...emps]; while (employees.length < slots) employees.push({ slot: employees.length + 1, name: '', clothing: '' })
-                  employees[idx] = { ...employees[idx], name: ev.target.value }
-                  saveDoc(supabase, doc, { employees }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
-                }} /></td>
-                <td><select className="mini-select no-print" value={e.clothing || ''} onChange={ev => {
-                  const employees = [...emps]; while (employees.length < slots) employees.push({ slot: employees.length + 1, name: '', clothing: '' })
-                  employees[idx] = { ...employees[idx], clothing: ev.target.value }
-                  saveDoc(supabase, doc, { employees }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
-                }}><option value="">—</option><option value="P">P</option><option value="N">N</option></select></td>
-              </React.Fragment>
-            })}
-            <td><select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
-              <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
+            <td>
+              <input className="cell-input no-print" defaultValue={doc.data?.godzina || R00_DEFAULT_GODZINA} key={`t-${doc.id}-${doc.data?.godzina}`} onBlur={e => saveDoc(supabase, doc, { godzina: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} />
+              <span className="print-only">{doc.data?.godzina || R00_DEFAULT_GODZINA}</span>
+            </td>
+            {empCols.map(col => (
+              <td key={col.id}>
+                <select className="mini-select no-print" value={clothing[col.id] || ''} onChange={e => {
+                  const next = { ...(doc.data?.clothing || {}), [col.id]: e.target.value }
+                  saveDoc(supabase, doc, { clothing: next }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
+                }}>
+                  <option value="">—</option><option value="P">P</option><option value="N">N</option>
+                </select>
+                <span className="print-only">{clothing[col.id] || '—'}</span>
+              </td>
+            ))}
+            <td>
+              <select className="mini-select no-print" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
+                <option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+              </select>
+              <span className="print-only">{doc.signed_by_operator || ''}</span>
+            </td>
           </tr>
         })}</tbody></table>
+      </div>
+      <p className="hint">* P – prawidłowo, N – nieprawidłowo (odzież robocza)</p>
     </div>
   }
 
