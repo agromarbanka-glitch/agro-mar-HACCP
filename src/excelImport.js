@@ -200,7 +200,16 @@ function normalizeNip(value) {
   return d.length === 10 ? d : ''
 }
 
-export async function readAgromarExcel(file) {
+/** Przesunięcia magazynowe MM – pomijane przy imporcie operacji. */
+export function isMmDocument(documentType, documentNo) {
+  const type = String(documentType || '').trim().toUpperCase()
+  const no = String(documentNo || '').trim().toUpperCase()
+  if (type === 'MM' || type.startsWith('MM/') || type.startsWith('MM ')) return true
+  if (/^MM[\/\s_-]/.test(no)) return true
+  return false
+}
+
+export async function readAgromarExcel(file, { skipMm = true } = {}) {
   const buffer = await file.arrayBuffer()
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
   const sheetName = workbook.SheetNames[0]
@@ -242,12 +251,16 @@ export async function readAgromarExcel(file) {
     .filter(row => row.documentNo || row.productName || row.qty || row.contractorName)
     .filter(row => row.productName)
 
-  return forwardFillExcelRows(mapped)
+  const filled = forwardFillExcelRows(mapped)
+  const skippedMmCount = skipMm ? filled.filter(row => isMmDocument(row.documentType, row.documentNo)).length : 0
+  const rows = skipMm ? filled.filter(row => !isMmDocument(row.documentType, row.documentNo)) : filled
+  return { rows, skippedMmCount }
 }
 
 export function classifyOperation(documentType, documentNo) {
   const text = `${documentType} ${documentNo}`.toUpperCase()
-  if (text.includes('PZ') || text.includes('MM')) return 'przyjecie'
+  if (isMmDocument(documentType, documentNo)) return 'pominiete_mm'
+  if (text.includes('PZ')) return 'przyjecie'
   if (text.includes('WZ') || text.includes('FV') || text.includes('FS') || text.includes('RR')) return 'sprzedaz'
   return 'przyjecie'
 }

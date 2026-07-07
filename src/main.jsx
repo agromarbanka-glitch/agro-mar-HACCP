@@ -5729,9 +5729,12 @@ function App() {
     setFileName(file.name)
     setMessage('')
     try {
-      const parsed = await readAgromarExcel(file)
+      const { rows: parsed, skippedMmCount } = await readAgromarExcel(file)
       setRows(parsed)
       let loadMsg = `Wczytano ${parsed.length} wierszy. System pobiera tylko potrzebne dane: nr PZ/WZ/FV, datę, produkt i ilość.`
+      if (skippedMmCount > 0) {
+        loadMsg += ` Pominięto ${skippedMmCount} wierszy MM (przesunięcia magazynowe).`
+      }
       if (supabase) {
         const classified = parsed.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) }))
         const groups = groupImportRows(classified)

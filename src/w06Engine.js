@@ -550,8 +550,9 @@ export function listW06ImportBatches(docs) {
 }
 
 export async function parseW06FromExcelFile(file) {
-  const rows = enrichContractorsByDocument(await readAgromarExcel(file))
-  const parsed = parseW06PartiesFromExcelRows(rows, file.name)
+  const { rows } = await readAgromarExcel(file)
+  const enriched = enrichContractorsByDocument(rows)
+  const parsed = parseW06PartiesFromExcelRows(enriched, file.name)
   return {
     text: parsed.preview,
     unreadable: !parsed.parties.length,
