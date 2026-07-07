@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
+import { saveImportToSupabase, getExistingOperationKeys, formatImportNetworkError } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -280,6 +281,8 @@ function App() {
   const [authReady, setAuthReady] = useState(skipAuth)
   const [haccpBusy, setHaccpBusy] = useState(false)
   const [importDeleting, setImportDeleting] = useState(false)
+  const [importSaving, setImportSaving] = useState(false)
+  const [importProgress, setImportProgress] = useState('')
   const loadedForUserRef = useRef(null)
   const haccpLoadInFlightRef = useRef(null)
   const userRole = authProfile?.role || 'magazynier'
@@ -5763,24 +5766,6 @@ function App() {
   return [...groups.values()]
 }
 
-async function getExistingOperationKeys(groups) {
-  const keys = new Set()
-  const documentNos = [...new Set(groups.map(g => g.documentNo).filter(Boolean))]
-
-  for (let i = 0; i < documentNos.length; i += 100) {
-    const chunk = documentNos.slice(i, i + 100)
-    const { data, error } = await supabase
-      .from('operations')
-      .select('operation_type, document_no')
-      .in('document_no', chunk)
-    if (error) throw error
-    for (const op of data || []) {
-      keys.add(`${op.operation_type}|${op.document_no}`)
-    }
-  }
-  return keys
-}
-
 async function findCompatibleChamber(productGroup, controlPoint) {
   const { data: chambers, error: chambersErr } = await supabase
     .from('storage_chambers')
@@ -7056,101 +7041,38 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setMessage('Najpierw wczytaj plik Excel.')
       return
     }
+    if (importSaving) return
 
-    setMessage('Trwa import. Nie klikaj ponownie przycisku zapisu...')
+    setImportSaving(true)
+    setImportProgress('Start…')
+    setMessage('Trwa import. Nie zamykaj karty – duże pliki zapisują się partiami…')
 
     try {
-      const productCache = new Map()
-      const contractorCache = new Map()
       const groups = groupImportRows(filteredRows)
-      const existingKeys = await getExistingOperationKeys(groups)
+      setImportProgress('Sprawdzanie duplikatów…')
+      const existingKeys = await getExistingOperationKeys(supabase, groups)
       const groupsToImport = groups
         .filter(g => !existingKeys.has(`${g.operation}|${g.documentNo}`))
         .sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
       const duplicateCount = groups.length - groupsToImport.length
 
-      const { data: imported, error: fileError } = await supabase
-        .from('imported_files')
-        .insert({
-          filename: fileName || 'import.xlsx',
-          rows_count: rows.length,
-          status: duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
-        })
-        .select('id')
-        .single()
-      if (fileError) throw fileError
-
-      let importedOperations = 0
-      let importedItems = 0
-      let createdLots = 0
-      let rozchodItems = 0
-
-      for (const group of groupsToImport) {
-        const contractorId = await getOrCreateContractor(group.contractorName, contractorCache)
-
-        const { data: op, error: opErr } = await supabase
-          .from('operations')
-          .insert({
-            operation_type: group.operation,
-            operation_date: group.issueDate,
-            document_no: group.documentNo,
-            invoice_no: group.invoiceNo,
-            contractor_id: contractorId,
-            imported_file_id: imported.id,
-            notes: group.notes || null
-          })
-          .select('id')
-          .single()
-        if (opErr) {
-          // Dodatkowe zabezpieczenie przy równoczesnym lub ponownym imporcie.
-          if (String(opErr.message || '').includes('duplicate')) continue
-          throw opErr
-        }
-        importedOperations += 1
-
-        for (const row of group.items) {
-          const productId = await getOrCreateProduct(row.productName, productCache)
-          const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
-          // W plikach WZ/FV ilości często są ujemne. Do FIFO i partii zapisujemy zawsze dodatnią ilość,
-          // a kierunek operacji określa, czy to przychód czy rozchód.
-          const itemQty = Math.abs(Number(row.qty) || 0)
-          if (itemQty <= 0) continue
-          let lotId = null
-
-          const { data: item, error: itemErr } = await supabase
-            .from('operation_items')
-            .insert({
-              operation_id: op.id,
-              product_id: productId,
-              qty: itemQty,
-              unit: 'kg',
-              direction,
-              raw_product_name: row.productName
-            })
-            .select('id')
-            .single()
-          if (itemErr) throw itemErr
-          importedItems += 1
-
-          if (direction === 'przychod') {
-            lotId = await createIncomingLot(productId, op.id, group.issueDate, itemQty, row.productName)
-            createdLots += 1
-            const { error: itemLotErr } = await supabase
-              .from('operation_items')
-              .update({ lot_id: lotId })
-              .eq('id', item.id)
-            if (itemLotErr) throw itemLotErr
-          } else {
-            rozchodItems += 1
-          }
-        }
-      }
+      const importDeps = { normalizeText, productGroupForName, baseCodeForProduct, targetControlPointForProduct }
+      const { importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
+        groupsToImport,
+        rowsCount: rows.length,
+        fileName,
+        duplicateCount,
+        deps: importDeps,
+        onProgress: setImportProgress
+      })
 
       setFifoRecalculating(true)
       let fifoAllocations = 0
       let shortageCount = 0
       let shortageKg = 0
+      let fifoWarning = ''
       try {
+        setImportProgress('Przeliczanie FIFO…')
         const snaps = supabase ? await loadK03Snapshots(supabase) : []
         const frozenKeys = frozenKeysFromSnapshots(snaps)
         const fifoResult = await recalculateFifoIncremental(supabase, { frozenKeys })
@@ -7159,29 +7081,38 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           shortageCount = (fifoResult.shortages || []).length
           shortageKg = (fifoResult.shortages || []).reduce((sum, s) => sum + Number(s.shortage || 0), 0)
         }
+      } catch (fifoErr) {
+        fifoWarning = ` FIFO: ${fifoErr?.message || fifoErr}.`
       } finally {
         setFifoRecalculating(false)
       }
 
       const importMsg =
         `Import zakończony. Zaimportowano dokumentów: ${importedOperations}, pozycji: ${importedItems}, utworzono partii: ${createdLots}, rozliczeń FIFO: ${fifoAllocations}. Pominięto duplikatów: ${duplicateCount}.` +
-        (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '')
+        (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '') +
+        fifoWarning
 
-      const suggestions = supabase ? await suggestFrozenK03UnfreezeAfterImport(supabase, groups) : []
+      setImportProgress('Odświeżanie widoków…')
+      const suggestions = supabase ? await suggestFrozenK03UnfreezeAfterImport(supabase, groups).catch(() => []) : []
       setK03UnfreezeSuggestions(suggestions)
 
       setMessage(
         importMsg +
         (suggestions.length ? ` Sprawdź ${suggestions.length} zamrożonych K03 do ewentualnego odmrożenia (baner poniżej).` : '')
       )
-      await loadFifoData()
-      await loadK03TraceData()
-      await loadImports()
-      await loadHaccpDocs()
-      await loadK03SnapshotsOnly()
-      await loadFifoChangeLog()
+      await Promise.all([
+        loadFifoData(),
+        loadK03TraceData(),
+        loadImports(),
+        loadHaccpDocs(),
+        loadK03SnapshotsOnly(),
+        loadFifoChangeLog()
+      ])
     } catch (err) {
-      setMessage(`Błąd zapisu do Supabase: ${err.message}`)
+      setMessage(formatImportNetworkError(err))
+    } finally {
+      setImportSaving(false)
+      setImportProgress('')
     }
   }
 
@@ -7279,7 +7210,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Pobieramy tylko potrzebne pola: nr dokumentu/PZ, data wystawienia, ilość i produkt.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase}>Zapisz import do Supabase</button></div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button></div>
 
       {rows.length > 0 && <>
         <div className="summary">
@@ -7305,7 +7236,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase}>Zapisz import do Supabase</button></div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button></div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>
