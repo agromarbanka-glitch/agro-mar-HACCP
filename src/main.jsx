@@ -5768,47 +5768,7 @@ function App() {
   return [...groups.values()]
 }
 
-async function findCompatibleChamber(productGroup, controlPoint) {
-  const { data: chambers, error: chambersErr } = await supabase
-    .from('storage_chambers')
-    .select('id, code, name, control_point')
-    .eq('control_point', controlPoint)
-    .eq('is_active', true)
-    .order('code', { ascending: true })
-  if (chambersErr) throw chambersErr
-  if (!chambers?.length) return null
-
-  const chamberIds = chambers.map(c => c.id)
-  const { data: activeLots, error: lotsErr } = await supabase
-    .from('lots')
-    .select('storage_chamber_id, product_group, remaining_qty')
-    .in('storage_chamber_id', chamberIds)
-    .gt('remaining_qty', 0)
-  if (lotsErr) throw lotsErr
-
-  const groupsByChamber = new Map()
-  for (const lot of activeLots || []) {
-    if (!lot.storage_chamber_id || !lot.product_group) continue
-    if (!groupsByChamber.has(lot.storage_chamber_id)) groupsByChamber.set(lot.storage_chamber_id, new Set())
-    groupsByChamber.get(lot.storage_chamber_id).add(lot.product_group)
-  }
-
-  // Najpierw wybierz komorę, w której jest już ta sama grupa produktu.
-  for (const chamber of chambers) {
-    const groups = groupsByChamber.get(chamber.id)
-    if (groups && groups.size === 1 && groups.has(productGroup)) return chamber.id
-  }
-
-  // Potem wybierz pustą komorę.
-  for (const chamber of chambers) {
-    if (!groupsByChamber.has(chamber.id)) return chamber.id
-  }
-
-  const occupied = chambers.map(ch => `${ch.code}: ${Array.from(groupsByChamber.get(ch.id) || []).join(', ') || 'pusta'}`).join('; ')
-  throw new Error(`Brak wolnej komory ${controlPoint} dla grupy ${productGroup}. Nie wolno mieszać różnych asortymentów w jednej komorze. Obecnie: ${occupied}`)
-}
-
-async function createIncomingLot(productId, operationId, operationDate, qty, productName, forcedControlPoint = null) {
+async function createIncomingLot(productId, operationId, operationDate, qty, productName) {
   const { data: lotNo, error: lotNoErr } = await supabase.rpc('generate_lot_no', {
     p_product_id: productId,
     p_date: operationDate
@@ -5816,11 +5776,6 @@ async function createIncomingLot(productId, operationId, operationDate, qty, pro
   if (lotNoErr) throw lotNoErr
 
   const productGroup = productGroupForName(productName)
-  const controlPoint = forcedControlPoint === null ? null : (forcedControlPoint || targetControlPointForProduct(productName))
-  let storageChamberId = null
-  if (controlPoint) {
-    storageChamberId = await findCompatibleChamber(productGroup, controlPoint)
-  }
 
   const { data: lot, error: lotErr } = await supabase
     .from('lots')
@@ -5833,7 +5788,7 @@ async function createIncomingLot(productId, operationId, operationDate, qty, pro
       remaining_qty: qty,
       unit: 'kg',
       product_group: productGroup,
-      storage_chamber_id: storageChamberId
+      storage_chamber_id: null
     })
     .select('id')
     .single()
@@ -6376,7 +6331,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       })
       if (outItemErr) throw outItemErr
 
-      const outputLotId = await createIncomingLot(outputProductId, op.id, today, outputQty, productionOutputName, targetControlPointForProductionOutput(productionOutputName))
+      const outputLotId = await createIncomingLot(outputProductId, op.id, today, outputQty, productionOutputName)
       const { error: inItemErr } = await supabase.from('operation_items').insert({
         operation_id: op.id,
         product_id: outputProductId,
@@ -7058,7 +7013,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         .sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
       const duplicateCount = groups.length - groupsToImport.length
 
-      const importDeps = { normalizeText, productGroupForName, baseCodeForProduct, targetControlPointForProduct }
+      const importDeps = { normalizeText, productGroupForName, baseCodeForProduct }
       const { importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
         groupsToImport,
         rowsCount: rows.length,

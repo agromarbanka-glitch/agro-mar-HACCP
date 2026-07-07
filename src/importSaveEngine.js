@@ -44,62 +44,6 @@ export async function getExistingOperationKeys(client, groups) {
   return keys
 }
 
-class ChamberAllocator {
-  constructor(chambers, activeLots) {
-    this.chambersByCp = new Map()
-    for (const ch of chambers || []) {
-      if (!this.chambersByCp.has(ch.control_point)) this.chambersByCp.set(ch.control_point, [])
-      this.chambersByCp.get(ch.control_point).push(ch)
-    }
-    this.groupsByChamber = new Map()
-    for (const lot of activeLots || []) {
-      if (!lot.storage_chamber_id || !lot.product_group) continue
-      if (!this.groupsByChamber.has(lot.storage_chamber_id)) this.groupsByChamber.set(lot.storage_chamber_id, new Set())
-      this.groupsByChamber.get(lot.storage_chamber_id).add(lot.product_group)
-    }
-  }
-
-  pick(productGroup, controlPoint) {
-    const chambers = this.chambersByCp.get(controlPoint) || []
-    if (!chambers.length) return null
-
-    for (const chamber of chambers) {
-      const groups = this.groupsByChamber.get(chamber.id)
-      if (groups && groups.size === 1 && groups.has(productGroup)) return chamber.id
-    }
-    for (const chamber of chambers) {
-      if (!this.groupsByChamber.has(chamber.id)) return chamber.id
-    }
-
-    const occupied = chambers
-      .map(ch => `${ch.code}: ${Array.from(this.groupsByChamber.get(ch.id) || []).join(', ') || 'pusta'}`)
-      .join('; ')
-    throw new Error(
-      `Brak wolnej komory ${controlPoint} dla grupy ${productGroup}. Nie wolno mieszać różnych asortymentów w jednej komorze. Obecnie: ${occupied}`
-    )
-  }
-
-  assign(chamberId, productGroup) {
-    if (!chamberId || !productGroup) return
-    if (!this.groupsByChamber.has(chamberId)) this.groupsByChamber.set(chamberId, new Set())
-    this.groupsByChamber.get(chamberId).add(productGroup)
-  }
-}
-
-async function loadChamberAllocator(client) {
-  const [{ data: chambers, error: chambersErr }, { data: activeLots, error: lotsErr }] = await Promise.all([
-    withImportRetry(() =>
-      client.from('storage_chambers').select('id, code, name, control_point').eq('is_active', true).order('code', { ascending: true })
-    ),
-    withImportRetry(() =>
-      client.from('lots').select('storage_chamber_id, product_group, remaining_qty').gt('remaining_qty', 0)
-    )
-  ])
-  if (chambersErr) throw chambersErr
-  if (lotsErr) throw lotsErr
-  return new ChamberAllocator(chambers, activeLots)
-}
-
 async function insertInChunks(client, table, rows, select, chunkSize) {
   const out = []
   for (let i = 0; i < rows.length; i += chunkSize) {
@@ -184,10 +128,9 @@ async function ensureContractorIds(client, contractorNames) {
   return map
 }
 
-async function createIncomingLot(client, {
-  productId, operationId, operationDate, qty, productName, forcedControlPoint, deps, chamberAllocator
-}) {
-  const { productGroupForName, targetControlPointForProduct } = deps
+/** Partie bez komory – przypisanie ręczne w zakładce Magazyn. */
+async function createIncomingLot(client, { productId, operationId, operationDate, qty, productName, deps }) {
+  const { productGroupForName } = deps
 
   const { data: lotNo, error: lotNoErr } = await withImportRetry(() =>
     client.rpc('generate_lot_no', { p_product_id: productId, p_date: operationDate })
@@ -195,12 +138,6 @@ async function createIncomingLot(client, {
   if (lotNoErr) throw lotNoErr
 
   const productGroup = productGroupForName(productName)
-  const controlPoint = forcedControlPoint === null ? null : (forcedControlPoint || targetControlPointForProduct(productName))
-  let storageChamberId = null
-  if (controlPoint) {
-    storageChamberId = chamberAllocator.pick(productGroup, controlPoint)
-    chamberAllocator.assign(storageChamberId, productGroup)
-  }
 
   const { data: lot, error: lotErr } = await withImportRetry(() =>
     client.from('lots').insert({
@@ -212,7 +149,7 @@ async function createIncomingLot(client, {
       remaining_qty: qty,
       unit: 'kg',
       product_group: productGroup,
-      storage_chamber_id: storageChamberId
+      storage_chamber_id: null
     }).select('id').single()
   )
   if (lotErr) throw lotErr
@@ -250,10 +187,9 @@ export async function saveImportToSupabase(client, {
   }
 
   notify('Przygotowanie słowników produktów i kontrahentów…')
-  const [productMap, contractorMap, chamberAllocator] = await Promise.all([
+  const [productMap, contractorMap] = await Promise.all([
     ensureProductIds(client, allProductNames, deps),
-    ensureContractorIds(client, allContractorNames),
-    loadChamberAllocator(client)
+    ensureContractorIds(client, allContractorNames)
   ])
 
   let importedOperations = 0
@@ -352,9 +288,7 @@ export async function saveImportToSupabase(client, {
         operationDate: meta.group.issueDate,
         qty: meta.itemQty,
         productName: meta.row.productName,
-        forcedControlPoint: undefined,
-        deps,
-        chamberAllocator
+        deps
       })
       createdLots += 1
 
