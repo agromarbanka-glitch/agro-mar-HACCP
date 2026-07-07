@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
-import { readAgromarExcel, classifyOperation } from './excelImport'
-import { saveImportToSupabase, getExistingOperationKeys, formatImportNetworkError } from './importSaveEngine'
+import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -302,6 +302,9 @@ function App() {
   const [dashboardMonth, setDashboardMonth] = useState(() => new Date().toISOString().slice(0, 7))
   const [importRows, setImportRows] = useState([])
   const [importPreview, setImportPreview] = useState([])
+  const [importDuplicates, setImportDuplicates] = useState([])
+  const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
+  const [importOrphanCount, setImportOrphanCount] = useState(0)
   const [haccpDocs, setHaccpDocs] = useState([])
   const [kartotekaLocalPrints, setKartotekaLocalPrints] = useState(() => loadLocalKartotekaPrints())
   const [docsFilter, setDocsFilter] = useState('K01')
@@ -418,7 +421,9 @@ function App() {
   const docsFiltersSkipSave = useRef(true)
   const docsHubNavRef = useRef(null)
 
-  const filteredRows = useMemo(() => rows.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) })), [rows])
+  const filteredRows = useMemo(() => rows
+    .map(r => ({ ...r, documentNo: normalizeDocumentNo(r.documentNo), operation: classifyOperation(r.documentType, r.documentNo) }))
+    .filter(r => r.operation !== 'pominiete_mm'), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
   const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
   const qtySum = filteredRows.reduce((s, r) => s + (Number(r.qty) || 0), 0)
@@ -5728,6 +5733,9 @@ function App() {
     if (!file) return
     setFileName(file.name)
     setMessage('')
+    setImportDuplicates([])
+    setImportDuplicateDetails(new Map())
+    setImportOrphanCount(0)
     try {
       const { rows: parsed, skippedMmCount } = await readAgromarExcel(file)
       setRows(parsed)
@@ -5738,6 +5746,21 @@ function App() {
       if (supabase) {
         const classified = parsed.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) }))
         const groups = groupImportRows(classified)
+        const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
+        const { duplicates } = splitImportGroupsByExisting(groups, keys)
+        setImportDuplicates(duplicates)
+        setImportDuplicateDetails(details)
+        setImportOrphanCount(orphanCount)
+        if (orphanCount > 0) {
+          loadMsg += ` Znaleziono ${orphanCount} osieroconych operacji z usuniętych importów – nie blokują ponownego zapisu.`
+        }
+        if (duplicates.length) {
+          const examples = duplicates.slice(0, 5).map(d => {
+            const det = details.get(`${d.operation}|${normalizeDocumentNo(d.documentNo)}`)
+            return `${d.documentNo}${det?.importFilename ? ` (${det.importFilename})` : ''}`
+          }).join(', ')
+          loadMsg += ` W bazie jest już ${duplicates.length} aktywnych dokumentów – przy zapisie zostaną pominięte. Np.: ${examples}${duplicates.length > 5 ? '…' : ''}.`
+        }
         const suggestions = await suggestFrozenK03UnfreezeAfterImport(supabase, groups)
         setK03UnfreezeSuggestions(suggestions)
         if (suggestions.length) {
@@ -5754,11 +5777,12 @@ function App() {
   const groups = new Map()
   for (const row of rows) {
     if (!row.documentNo || !row.productName || !Number(row.qty)) continue
-    const key = `${row.operation}|${row.documentNo}`
+    const docNo = normalizeDocumentNo(row.documentNo)
+    const key = `${row.operation}|${docNo}`
     if (!groups.has(key)) {
       groups.set(key, {
         operation: row.operation,
-        documentNo: row.documentNo,
+        documentNo: docNo,
         issueDate: row.issueDate || new Date().toISOString().slice(0, 10),
         invoiceNo: row.invoiceNo || null,
         contractorName: row.contractorName || null,
@@ -7010,11 +7034,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     try {
       const groups = groupImportRows(filteredRows)
       setImportProgress('Sprawdzanie duplikatów…')
-      const existingKeys = await getExistingOperationKeys(supabase, groups)
-      const groupsToImport = groups
-        .filter(g => !existingKeys.has(`${g.operation}|${g.documentNo}`))
-        .sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
-      const duplicateCount = groups.length - groupsToImport.length
+      const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
+      const { duplicates, fresh: groupsToImport } = splitImportGroupsByExisting(groups, keys)
+      setImportDuplicates(duplicates)
+      setImportDuplicateDetails(details)
+      setImportOrphanCount(orphanCount)
+      groupsToImport.sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
+      const duplicateCount = duplicates.length
 
       const importDeps = { normalizeText, productGroupForName, baseCodeForProduct }
       const { importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
@@ -7049,6 +7075,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       const importMsg =
         `Import zakończony. Zaimportowano dokumentów: ${importedOperations}, pozycji: ${importedItems}, utworzono partii: ${createdLots}, rozliczeń FIFO: ${fifoAllocations}. Pominięto duplikatów: ${duplicateCount}.` +
+        (orphanCount ? ` Zignorowano ${orphanCount} osieroconych operacji (usunięte importy).` : '') +
+        (duplicateCount ? ` Przykłady pominiętych: ${duplicates.slice(0, 5).map(d => d.documentNo).join(', ')}${duplicateCount > 5 ? '…' : ''}.` : '') +
         (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '') +
         fifoWarning
 
@@ -7210,6 +7238,28 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <td>{row.documentType}</td><td>{row.documentNo}</td><td>{row.issueDate}</td><td>{row.productName}</td><td>{row.qty}</td><td>{row.contractorName}</td><td><span className="pill">{row.operation}</span></td>
           </tr>)}</tbody>
         </table></div>
+      </>}
+      {importDuplicates.length > 0 && <>
+        <h3>Duplikaty w bazie ({importDuplicates.length} dokumentów)</h3>
+        <p className="hint">Te numery PZ/WZ są już w aktywnych operacjach magazynowych. Przy zapisie zostaną pominięte. Jeśli usunąłeś importy, a lista nadal się pokazuje – odśwież stronę i wgraj plik ponownie.</p>
+        {importOrphanCount > 0 && <p className="hint">Osierocone operacje z usuniętych importów ({importOrphanCount}) nie blokują zapisu.</p>}
+        <div className="table-wrap small"><table>
+          <thead><tr><th>Typ</th><th>Nr dokumentu</th><th>Data w pliku</th><th>Pozycji</th><th>Źródło w bazie</th></tr></thead>
+          <tbody>{importDuplicates.slice(0, 50).map((g, i) => {
+            const det = importDuplicateDetails.get(`${g.operation}|${normalizeDocumentNo(g.documentNo)}`)
+            const src = det?.importFilename
+              ? `Import: ${det.importFilename}${det.createdAt ? ` (${String(det.createdAt).slice(0, 10)})` : ''}`
+              : (det?.importedFileId ? 'Inny import' : 'Operacja ręczna / produkcja')
+            return <tr key={`${g.documentNo}-${i}`}>
+              <td>{g.documentType || (g.operation === 'sprzedaz' ? 'WZ/FV' : 'PZ')}</td>
+              <td><b>{g.documentNo}</b></td>
+              <td>{g.issueDate || '—'}</td>
+              <td>{g.items?.length || 1}</td>
+              <td className="hint">{src}</td>
+            </tr>
+          })}</tbody>
+        </table></div>
+        {importDuplicates.length > 50 && <p className="hint">Pokazano 50 z {importDuplicates.length} duplikatów.</p>}
       </>}
     </section>
 

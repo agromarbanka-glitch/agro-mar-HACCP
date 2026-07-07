@@ -2,6 +2,8 @@
  * Zapis importu Excel do Supabase – batch + retry (mniej zapytań, odporność na NetworkError).
  */
 
+import { normalizeDocumentNo } from './excelImport.js'
+
 const OP_CHUNK = 40
 const ITEM_CHUNK = 80
 const NAME_CHUNK = 80
@@ -27,21 +29,70 @@ export async function withImportRetry(fn) {
   throw lastErr
 }
 
-export async function getExistingOperationKeys(client, groups) {
+export async function getExistingOperationsForImport(client, groups) {
   const keys = new Set()
-  const documentNos = [...new Set(groups.map(g => g.documentNo).filter(Boolean))]
+  const details = new Map()
+  let orphanCount = 0
+  const documentNos = [...new Set(groups.map(g => normalizeDocumentNo(g.documentNo)).filter(Boolean))]
 
   for (let i = 0; i < documentNos.length; i += 100) {
     const chunk = documentNos.slice(i, i + 100)
-    const { data, error } = await withImportRetry(() =>
-      client.from('operations').select('operation_type, document_no').in('document_no', chunk)
-    )
-    if (error) throw error
+    let data
+    let error
+    ;({ data, error } = await withImportRetry(() =>
+      client.from('operations')
+        .select('id, operation_type, document_no, imported_file_id, created_at, imported_files(filename, deleted_at, status)')
+        .in('document_no', chunk)
+    ))
+    if (error) {
+      ;({ data, error } = await withImportRetry(() =>
+        client.from('operations').select('id, operation_type, document_no, imported_file_id, created_at').in('document_no', chunk)
+      ))
+      if (error) throw error
+    }
     for (const op of data || []) {
-      keys.add(`${op.operation_type}|${op.document_no}`)
+      const imp = op.imported_files
+      // Operacja powiązana z usuniętym importem = osierocona, nie blokuje ponownego zapisu.
+      if (imp?.deleted_at) {
+        orphanCount += 1
+        continue
+      }
+      const key = operationImportKey({ operation: op.operation_type, documentNo: op.document_no })
+      keys.add(key)
+      if (!details.has(key)) {
+        details.set(key, {
+          documentNo: op.document_no,
+          operationType: op.operation_type,
+          importFilename: imp?.filename || null,
+          importDeleted: Boolean(imp?.deleted_at),
+          createdAt: op.created_at,
+          importedFileId: op.imported_file_id
+        })
+      }
     }
   }
+  return { keys, details, orphanCount }
+}
+
+/** @deprecated użyj getExistingOperationsForImport */
+export async function getExistingOperationKeys(client, groups) {
+  const { keys } = await getExistingOperationsForImport(client, groups)
   return keys
+}
+
+export function operationImportKey(group) {
+  return `${group.operation}|${normalizeDocumentNo(group.documentNo)}`
+}
+
+/** Dzieli grupy dokumentów na już w bazie (duplikaty) i nowe. */
+export function splitImportGroupsByExisting(groups, existingKeys) {
+  const duplicates = []
+  const fresh = []
+  for (const g of groups || []) {
+    if (existingKeys.has(operationImportKey(g))) duplicates.push(g)
+    else fresh.push(g)
+  }
+  return { duplicates, fresh }
 }
 
 async function insertInChunks(client, table, rows, select, chunkSize) {
@@ -174,7 +225,7 @@ export async function saveImportToSupabase(client, {
     client.from('imported_files').insert({
       filename: fileName || 'import.xlsx',
       rows_count: rowsCount,
-      status: duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
+      status: 'w_trakcie'
     }).select('id').single()
   )
   if (fileError) throw fileError
@@ -298,6 +349,11 @@ export async function saveImportToSupabase(client, {
       if (itemLotErr) throw itemLotErr
     }
   }
+
+  const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
+  await withImportRetry(() =>
+    client.from('imported_files').update({ status: finalStatus }).eq('id', imported.id)
+  )
 
   return {
     importedFileId: imported.id,

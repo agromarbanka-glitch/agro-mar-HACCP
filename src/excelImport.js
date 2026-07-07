@@ -17,6 +17,14 @@ function normalizeHeader(value) {
   return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+/** Ujednolicenie nr PZ/WZ do porównań (trim, bez spacji, slashe). */
+export function normalizeDocumentNo(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/\\/g, '/')
+}
+
 function pick(row, names) {
   const keys = Object.keys(row)
   for (const wanted of names) {
@@ -221,12 +229,12 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
   const mapped = rows
     .map((row, index) => {
       let documentType = String(pick(row, REQUIRED.documentType)).trim()
-      let documentNo = String(pick(row, REQUIRED.documentNo)).trim()
+      let documentNo = normalizeDocumentNo(pick(row, REQUIRED.documentNo))
       if (!documentNo) {
         for (const val of Object.values(row)) {
           const s = String(val || '').trim()
           if (/^(PZ|WZ|MM|RR|FV|FS)[\/\s-][\w/.-]+/i.test(s)) {
-            documentNo = s.match(/((?:PZ|WZ|MM|RR|FV|FS)[\/\s-][\w/.-]+)/i)?.[1] || s
+            documentNo = normalizeDocumentNo(s.match(/((?:PZ|WZ|MM|RR|FV|FS)[\/\s-][\w/.-]+)/i)?.[1] || s)
             break
           }
         }
