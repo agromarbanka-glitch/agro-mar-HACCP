@@ -41,7 +41,7 @@ export function canSeeHistory(profile) {
 
 export function canSeeTab(profile, tabKey) {
   if (isAdmin(profile)) return true
-  if (isMagazynier(profile)) return tabKey === 'kartoteki'
+  if (isMagazynier(profile)) return tabKey === 'kartoteki' || tabKey === 'archiwum-pdf'
   return false
 }
 

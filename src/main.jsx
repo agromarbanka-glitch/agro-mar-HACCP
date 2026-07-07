@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation } from './excelImport'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
@@ -50,6 +50,7 @@ import {
 import { R09TrendSection } from './R09TrendUI'
 import { LoginScreen } from './LoginScreen'
 import { HistorySection } from './HistorySection'
+import { PdfDocumentsSection } from './PdfDocumentsSection'
 import { UsersAdminSection } from './UsersAdminSection'
 import {
   getCurrentSession, loadAppProfile, signOut, isAdmin, isMagazynier, canDelete, confirmDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
@@ -6991,6 +6992,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     ['pz', 'PZ / FIFO', Database],
     ['magazyn', 'Magazyn', Warehouse],
     ['kartoteki', 'Dokumentacja HACCP', ClipboardList],
+    ['archiwum-pdf', 'Archiwum PDF', FolderOpen],
     ['historia', 'Historia', History],
     ['ustawienia', 'Ustawienia', Settings]
   ]
@@ -7805,6 +7807,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     {renderK03WzModal()}
     </>}
+
+    {activeTab === 'archiwum-pdf' && canSeeTab(authProfile, 'archiwum-pdf') && (
+      <PdfDocumentsSection
+        supabase={supabase}
+        employees={employees}
+        authProfile={authProfile}
+        authSession={authSession}
+        setMessage={setMessage}
+      />
+    )}
 
     {activeTab === 'historia' && isAdmin(authProfile) && (
       <HistorySection
