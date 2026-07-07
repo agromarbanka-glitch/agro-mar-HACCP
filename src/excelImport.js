@@ -224,9 +224,9 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
   const sheet = workbook.Sheets[sheetName]
   const headerRow = findHeaderRowIndex(sheet)
   const columnKeys = getSheetColumnKeys(sheet, headerRow)
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', range: headerRow })
+  const sheetRows = XLSX.utils.sheet_to_json(sheet, { defval: '', range: headerRow })
 
-  const mapped = rows
+  const mapped = sheetRows
     .map((row, index) => {
       let documentType = String(pick(row, REQUIRED.documentType)).trim()
       let documentNo = normalizeDocumentNo(pick(row, REQUIRED.documentNo))
@@ -261,8 +261,8 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
 
   const filled = forwardFillExcelRows(mapped)
   const skippedMmCount = skipMm ? filled.filter(row => isMmDocument(row.documentType, row.documentNo)).length : 0
-  const rows = skipMm ? filled.filter(row => !isMmDocument(row.documentType, row.documentNo)) : filled
-  return { rows, skippedMmCount }
+  const resultRows = skipMm ? filled.filter(row => !isMmDocument(row.documentType, row.documentNo)) : filled
+  return { rows: resultRows, skippedMmCount }
 }
 
 export function classifyOperation(documentType, documentNo) {

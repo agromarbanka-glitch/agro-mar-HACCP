@@ -35,40 +35,65 @@ export async function getExistingOperationsForImport(client, groups) {
   let orphanCount = 0
   const documentNos = [...new Set(groups.map(g => normalizeDocumentNo(g.documentNo)).filter(Boolean))]
 
+  /** Warianty nr dokumentu (ze spacją po prefiksie) – stare wpisy w bazie mogły mieć „PZ / …”. */
+  function documentNoQueryVariants(normalized) {
+    const out = new Set([normalized])
+    const m = String(normalized || '').match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
+    if (m) out.add(`${m[1]} ${m[2]}`)
+    return [...out]
+  }
+
+  function registerExistingOperation(op, importMeta) {
+    const imp = importMeta ?? op.imported_files
+    if (imp?.deleted_at) {
+      orphanCount += 1
+      return
+    }
+    const key = operationImportKey({ operation: op.operation_type, documentNo: op.document_no })
+    keys.add(key)
+    if (!details.has(key)) {
+      details.set(key, {
+        documentNo: op.document_no,
+        operationType: op.operation_type,
+        importFilename: imp?.filename || null,
+        importDeleted: Boolean(imp?.deleted_at),
+        createdAt: op.created_at,
+        importedFileId: op.imported_file_id
+      })
+    }
+  }
+
   for (let i = 0; i < documentNos.length; i += 100) {
     const chunk = documentNos.slice(i, i + 100)
+    const queryNos = [...new Set(chunk.flatMap(documentNoQueryVariants))]
     let data
     let error
     ;({ data, error } = await withImportRetry(() =>
       client.from('operations')
         .select('id, operation_type, document_no, imported_file_id, created_at, imported_files(filename, deleted_at, status)')
-        .in('document_no', chunk)
+        .in('document_no', queryNos)
     ))
     if (error) {
       ;({ data, error } = await withImportRetry(() =>
-        client.from('operations').select('id, operation_type, document_no, imported_file_id, created_at').in('document_no', chunk)
+        client.from('operations').select('id, operation_type, document_no, imported_file_id, created_at').in('document_no', queryNos)
       ))
       if (error) throw error
+      const fileIds = [...new Set((data || []).map(o => o.imported_file_id).filter(Boolean))]
+      const importMetaById = new Map()
+      if (fileIds.length) {
+        const { data: files, error: filesErr } = await withImportRetry(() =>
+          client.from('imported_files').select('id, filename, deleted_at, status').in('id', fileIds)
+        )
+        if (filesErr) throw filesErr
+        for (const f of files || []) importMetaById.set(f.id, f)
+      }
+      for (const op of data || []) {
+        registerExistingOperation(op, importMetaById.get(op.imported_file_id))
+      }
+      continue
     }
     for (const op of data || []) {
-      const imp = op.imported_files
-      // Operacja powiązana z usuniętym importem = osierocona, nie blokuje ponownego zapisu.
-      if (imp?.deleted_at) {
-        orphanCount += 1
-        continue
-      }
-      const key = operationImportKey({ operation: op.operation_type, documentNo: op.document_no })
-      keys.add(key)
-      if (!details.has(key)) {
-        details.set(key, {
-          documentNo: op.document_no,
-          operationType: op.operation_type,
-          importFilename: imp?.filename || null,
-          importDeleted: Boolean(imp?.deleted_at),
-          createdAt: op.created_at,
-          importedFileId: op.imported_file_id
-        })
-      }
+      registerExistingOperation(op)
     }
   }
   return { keys, details, orphanCount }
@@ -288,7 +313,7 @@ export async function saveImportToSupabase(client, {
     }
 
     for (const op of insertedOps) {
-      opKeyToId.set(`${op.operation_type}|${op.document_no}`, op.id)
+      opKeyToId.set(operationImportKey({ operation: op.operation_type, documentNo: op.document_no }), op.id)
       importedOperations += 1
     }
 
@@ -296,7 +321,7 @@ export async function saveImportToSupabase(client, {
     const itemMeta = []
 
     for (const group of chunk) {
-      const opId = opKeyToId.get(`${group.operation}|${group.documentNo}`)
+      const opId = opKeyToId.get(operationImportKey(group))
       if (!opId) continue
 
       for (const row of group.items) {
