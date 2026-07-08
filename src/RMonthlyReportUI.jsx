@@ -25,6 +25,7 @@ import {
   r00MakeEmployeeColumn,
   r00ResolveColumns,
   r00ClothingMap,
+  r00ColumnBulkClothing,
   R00_DEFAULT_GODZINA
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
@@ -489,6 +490,29 @@ export function RMonthlyReportPreview({
     await syncR00ColumnsToGroup(columns.filter(c => c.id !== colId))
   }
 
+  async function applyR00ColumnClothing(colId, clothingValue, colLabel) {
+    if (!supabase) return
+    const dayDocs = docs.filter(d => !d.data?.is_day_off && !isSundayDate(d.document_date))
+    if (!dayDocs.length) {
+      setMessage('R00: brak dni roboczych do uzupełnienia.')
+      return
+    }
+    const label = clothingValue === 'P' ? 'P' : '—'
+    try {
+      for (const doc of dayDocs) {
+        const clothing = { ...(doc.data?.clothing || {}), [colId]: clothingValue }
+        const payload = { data: { ...(doc.data || {}), clothing }, updated_at: new Date().toISOString() }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+        if (error) throw error
+        if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
+      }
+      if (!mergeHaccpDoc) await loadHaccpDocs()
+      setMessage(`R00: kolumna „${colLabel || 'pracownik'}” — wszędzie ${label} (${dayDocs.length} dni roboczych). Pojedyncze komórki możesz zmienić ręcznie.`)
+    } catch (err) {
+      setMessage(`R00: ${err.message}`)
+    }
+  }
+
   async function applyColumnMcd(colId, mcdValue, colLabel) {
     if (!supabase || !mcdValue) return
     const dayDocs = docs.filter(d => d.data?.cells && !d.data?.is_day_off)
@@ -921,7 +945,7 @@ export function RMonthlyReportPreview({
     const empCols = columns
     return <div className="monthly-paper r13-paper r00-paper">{toolbar}{head}
       <div className="no-print r00-employee-toolbar">
-        <p className="hint">Pracownicy u góry tabeli (jak we wzorze). Dni robocze: godz. {R00_DEFAULT_GODZINA}, odzież <b>P</b>. Niedziele puste.</p>
+        <p className="hint">Pracownicy u góry tabeli (jak we wzorze). Dni robocze: godz. {R00_DEFAULT_GODZINA}, odzież <b>P</b>. Niedziele puste. Nad każdym pracownikiem wybierz <b>P wszędzie</b> lub <b>— wszędzie</b>; możesz to zmienić w dowolnym momencie. Pojedyncze dni edytujesz ręcznie w tabeli.</p>
         <div className="r00-add-employee-row">
           <label>Z listy
             <select value={r00PickEmployee} onChange={e => { setR00PickEmployee(e.target.value); if (e.target.value) setNewColumnLabel('') }}>
@@ -943,10 +967,29 @@ export function RMonthlyReportPreview({
           <th colSpan={empCols.length}>Dane pracowników (imię i nazwisko)</th>
           <th rowSpan={2}>{cfg.signLabel}</th>
         </tr>
-        <tr>{empCols.map((col, i) => (
+        <tr>{empCols.map((col, i) => {
+          const bulk = r00ColumnBulkClothing(col.id, docs, empCols)
+          const bulkSelectValue = bulk === '__mixed__' ? '__mixed__' : (bulk === 'P' ? 'P' : 'dash')
+          return (
           <th key={col.id} className="r00-emp-head">
             <span className="print-only">{col.label || `Nr ${i + 1}`}</span>
             <span className="no-print r00-emp-head-edit">
+              <label className="r00-bulk-clothing">
+                <small>Odzież (cała kolumna)</small>
+                <select
+                  className="mini-select"
+                  value={bulkSelectValue}
+                  onChange={e => {
+                    const val = e.target.value
+                    if (val === '__mixed__') return
+                    applyR00ColumnClothing(col.id, val === 'dash' ? '' : val, col.label)
+                  }}
+                >
+                  {bulk === '__mixed__' && <option value="__mixed__">Mieszane…</option>}
+                  <option value="P">P — wszędzie</option>
+                  <option value="dash">— wszędzie</option>
+                </select>
+              </label>
               <small>Nr {i + 1}</small>
               <select className="mini-select" value="" onChange={e => { if (e.target.value) updateR00ColumnLabel(col.id, e.target.value) }}>
                 <option value="">Lista…</option>
@@ -958,7 +1001,7 @@ export function RMonthlyReportPreview({
               )}
             </span>
           </th>
-        ))}</tr>
+        )})}</tr>
         <tr>
           <th></th><th></th>
           {empCols.map(col => <th key={`pn-${col.id}`}><small>Stan odzieży (P/N)*</small></th>)}

@@ -69,6 +69,16 @@ export function r00ClothingMap(doc, columns, { sunday = false } = {}) {
   return out
 }
 
+/** Stan wypełnienia odzieży w kolumnie pracownika (dni robocze): 'P', '' lub '__mixed__'. */
+export function r00ColumnBulkClothing(colId, docs, columns) {
+  const workDays = (docs || []).filter(d => !d.data?.is_day_off && !isSundayDate(d.document_date))
+  if (!workDays.length) return ''
+  const values = workDays.map(d => r00ClothingMap(d, columns, { sunday: false })[colId] ?? '')
+  const unique = [...new Set(values)]
+  if (unique.length === 1) return unique[0]
+  return '__mixed__'
+}
+
 export function defaultR00DayData(columns, sunday) {
   const cols = (columns || defaultR00Columns(8)).map(c => ({ ...c }))
   return {
