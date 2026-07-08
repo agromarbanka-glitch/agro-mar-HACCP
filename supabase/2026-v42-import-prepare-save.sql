@@ -6,8 +6,14 @@
 
 BEGIN;
 
+DROP FUNCTION IF EXISTS public.prepare_import_excel_save(text);
+DROP FUNCTION IF EXISTS public.prepare_import_excel_save(text, uuid);
+
 -- Kasuje dane importu Excel (wymaga v40 – jeśli brak, uruchom najpierw v40).
-CREATE OR REPLACE FUNCTION public.prepare_import_excel_save(p_filename text DEFAULT NULL)
+CREATE OR REPLACE FUNCTION public.prepare_import_excel_save(
+  p_filename text DEFAULT NULL,
+  p_exclude_import_id uuid DEFAULT NULL
+)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -31,6 +37,7 @@ BEGIN
       WHERE f.deleted_at IS NULL
         AND f.status = 'w_trakcie'
         AND lower(trim(f.filename)) = lower(trim(p_filename))
+        AND (p_exclude_import_id IS NULL OR f.id <> p_exclude_import_id)
     LOOP
       v_purge := public.purge_import_excel_data(v_import.id);
       v_stale_count := v_stale_count + 1;
@@ -127,9 +134,9 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.prepare_import_excel_save(text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.prepare_import_excel_save(text) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.prepare_import_excel_save(text) TO anon;
+REVOKE ALL ON FUNCTION public.prepare_import_excel_save(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.prepare_import_excel_save(text, uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.prepare_import_excel_save(text, uuid) TO anon;
 
 REVOKE ALL ON FUNCTION public.delete_import_excel_admin(uuid, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.delete_import_excel_admin(uuid, text, text) TO authenticated;

@@ -211,15 +211,16 @@ export async function purgeImportDataClientSide(client, importedFileId) {
   return { operations: opIds.length, lots: lotIds.length }
 }
 
-async function purgeStaleInProgressImportsClient(client, filename) {
+async function purgeStaleInProgressImportsClient(client, filename, excludeImportId = null) {
   if (!filename) return { removed: 0 }
-  const { data: stale, error } = await withImportRetry(() =>
-    client.from('imported_files')
-      .select('id')
-      .is('deleted_at', null)
-      .eq('status', 'w_trakcie')
-      .ilike('filename', filename)
-  )
+  let query = client
+    .from('imported_files')
+    .select('id')
+    .is('deleted_at', null)
+    .eq('status', 'w_trakcie')
+    .ilike('filename', filename)
+  if (excludeImportId) query = query.neq('id', excludeImportId)
+  const { data: stale, error } = await withImportRetry(() => query)
   if (error) throw error
   let removed = 0
   for (const row of stale || []) {
@@ -230,21 +231,35 @@ async function purgeStaleInProgressImportsClient(client, filename) {
   return { removed }
 }
 
+async function purgeOrphanLotsRpc(client) {
+  const { data, error } = await withImportRetry(() => client.rpc('purge_orphan_import_lots'))
+  if (error) {
+    if (/function.*does not exist/i.test(String(error.message || ''))) return 0
+    throw error
+  }
+  return Number(data || 0)
+}
+
 /** Przed zapisem: usuwa pozostałości usuniętych importów i przerwane importy tego samego pliku. */
-export async function prepareImportExcelSave(client, filename) {
+export async function prepareImportExcelSave(client, filename, excludeImportId = null) {
   const { data, error } = await withImportRetry(() =>
-    client.rpc('prepare_import_excel_save', { p_filename: filename || null })
+    client.rpc('prepare_import_excel_save', {
+      p_filename: filename || null,
+      p_exclude_import_id: excludeImportId || null
+    })
   )
   if (!error) return data || {}
 
   if (!/function.*does not exist/i.test(String(error.message || ''))) throw error
 
   const cleanup = await cleanupOrphanedDeletedImports(client)
-  const stale = await purgeStaleInProgressImportsClient(client, filename)
+  const stale = await purgeStaleInProgressImportsClient(client, filename, excludeImportId)
+  const orphanLots = await purgeOrphanLotsRpc(client)
   return {
     needsMigration: true,
     deleted_imports_cleaned: cleanup?.imports_purged || 0,
     stale_in_progress_removed: stale.removed,
+    orphan_lots_removed: orphanLots,
     fallback: true
   }
 }
@@ -419,6 +434,21 @@ async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
   return total
 }
 
+async function filterIncomingWithExistingOps(client, incomingItems) {
+  const opIds = [...new Set(incomingItems.map(i => i.opId).filter(Boolean))]
+  if (!opIds.length) return []
+  const existing = new Set()
+  for (let i = 0; i < opIds.length; i += 100) {
+    const chunk = opIds.slice(i, i + 100)
+    const { data, error } = await withImportRetry(() =>
+      client.from('operations').select('id').in('id', chunk)
+    )
+    if (error) throw error
+    for (const row of data || []) existing.add(row.id)
+  }
+  return incomingItems.filter(i => existing.has(i.opId))
+}
+
 async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
   if (!incomingItems.length) return 0
 
@@ -580,14 +610,21 @@ export async function saveImportToSupabase(client, {
   }
 
   if (allIncomingItems.length) {
-    notify(`Tworzenie ${allIncomingItems.length} partii…`)
+    const validIncoming = await filterIncomingWithExistingOps(client, allIncomingItems)
+    if (validIncoming.length < allIncomingItems.length) {
+      throw new Error(
+        `Brak ${allIncomingItems.length - validIncoming.length} operacji przy tworzeniu partii (import mógł zostać przerwany). Kliknij „Zapisz import” ponownie.`
+      )
+    }
+    notify(`Tworzenie ${validIncoming.length} partii…`)
     try {
-      createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
+      createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
     } catch (lotErr) {
-      if (!/lots_lot_no_key|duplicate key.*lot/i.test(String(lotErr?.message || ''))) throw lotErr
-      notify('Pozostałości partii w bazie – automatyczne sprzątanie…')
-      await prepareImportExcelSave(client, fileName)
-      createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
+      const lotMsg = String(lotErr?.message || '')
+      if (!/lots_lot_no_key|duplicate key.*lot|lots_source_operation_id_fkey/i.test(lotMsg)) throw lotErr
+      notify('Pozostałości partii w bazie – czyszczenie osieroconych partii…')
+      await purgeOrphanLotsRpc(client)
+      createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
     }
   }
 
@@ -612,6 +649,12 @@ export function formatImportNetworkError(err) {
       'Błąd: numer partii już istnieje w bazie (pozostałość po wcześniejszym imporcie). ' +
       'Spróbuj ponownie – przed zapisem system automatycznie czyści pozostałości. ' +
       'Jeśli błąd się powtarza: usuń stary import z rejestru lub uruchom w Supabase SQL: 2026-v40 + 2026-v42.'
+    )
+  }
+  if (/lots_source_operation_id_fkey|foreign key.*operations/i.test(msg)) {
+    return (
+      'Błąd spójności danych (operacja nie istnieje przy tworzeniu partii). ' +
+      'Uruchom ponownie zapis – jeśli się powtarza: usuń przerwany import z rejestru (status „w_trakcie”) i spróbuj od nowa.'
     )
   }
   if (isTransientNetworkError(err)) {
