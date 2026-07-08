@@ -5,7 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
@@ -1080,8 +1080,12 @@ function App() {
   }
 
   function openK03WzModal(line, mode) {
-    const przerobDate = mode === 'przerob' ? new Date().toISOString().slice(0, 10) : ''
-    setK03WzModal({ line, mode, przerobDate, lotNo: '', rawStored: false, preview: null, loading: false, saving: false, error: '', confirmMismatch: false })
+    const wzDate = String(line.wz_date || '').slice(0, 10)
+    const przerobDate = mode === 'przerob' ? (wzDate || new Date().toISOString().slice(0, 10)) : ''
+    const lotNo = mode === 'przerob'
+      ? suggestK03LotNo(k03FormsRaw, line, przerobDate)
+      : ''
+    setK03WzModal({ line, mode, przerobDate, lotNo, rawStored: false, preview: null, loading: false, saving: false, error: '', confirmMismatch: false })
   }
 
   async function refreshK03WzPreview() {
@@ -1147,10 +1151,10 @@ function App() {
         <p><b>{line.product_name}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
         <div className="form-grid compact">
           {mode === 'przerob' && <>
-            <label>Data przerobu (wymagana)
+            <label>Data przerobu (domyślnie = data WZ)
               <input type="date" value={k03WzModal.przerobDate} onChange={e => setK03WzModal(m => ({ ...m, przerobDate: e.target.value, preview: null, confirmMismatch: false }))} />
             </label>
-            <label>Numer partii (opcjonalnie – auto jeśli puste)
+            <label>Numer partii wyrobu (proponowany – możesz zmienić)
               <input value={k03WzModal.lotNo} onChange={e => setK03WzModal(m => ({ ...m, lotNo: e.target.value }))} placeholder="np. T/001/2026" />
             </label>
             <p className="hint">FIFO dobiera tylko PZ z datą ≤ data przerobu. Późniejsze PZ nie są przypisywane.</p>

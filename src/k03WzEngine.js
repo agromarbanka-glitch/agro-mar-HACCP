@@ -211,6 +211,15 @@ function suggestLotNo(existingForms, productName, productId, productMap, referen
   return `${code}/${String(seq).padStart(3, '0')}/${year}`
 }
 
+/** Proponowany numer partii wyrobu gotowego dla K03 (przerób). */
+export function suggestK03LotNo(existingForms, line, referenceDate) {
+  const productMap = new Map()
+  if (line?.product_id) {
+    productMap.set(line.product_id, { name: line.product_name, product_group: line.product_group })
+  }
+  return suggestLotNo(existingForms, line?.product_name, line?.product_id, productMap, referenceDate)
+}
+
 function normalizeKey(value) {
   return String(value || '').trim().toLowerCase()
 }
