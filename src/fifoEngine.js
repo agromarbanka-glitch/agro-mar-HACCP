@@ -1,7 +1,7 @@
 /**
  * FIFO – przeliczanie przyrostowe (braki) i pełne z ochroną zamrożonych K03.
  */
-import { isSaleOperation } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup } from './k03Engine'
 
 function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
@@ -21,27 +21,8 @@ function isIncomingLotOperation(op) {
   return no.startsWith('PZ') || no.startsWith('MM')
 }
 
-function resolveProductGroup(product, productName = '') {
-  return product?.product_group || productGroupForName(product?.name || productName)
-}
-
-function productGroupForName(productName) {
-  const text = String(productName || '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/ł/g, 'l')
-  if (text.includes('malin')) return 'malina'
-  if (text.includes('wisn')) return 'wisnia'
-  if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
-  if (text.includes('porzeczka czerwona')) return 'porzeczka_czerwona'
-  if (text.includes('truskawk')) return 'truskawka'
-  if (text.includes('aronia')) return 'aronia'
-  if (text.includes('sliw')) return 'sliwka'
-  if (text.includes('obier')) return 'jab_obier'
-  if (text.includes('jabl')) return 'jab_przem'
-  return text.split(' ')[0] || 'inna'
+function resolveProductGroup(product, productName = '', lotGroup = '') {
+  return resolveFifoProductGroup(product, productName, lotGroup)
 }
 
 async function fetchInChunks(client, table, select, column, ids, chunkSize = 80) {
@@ -112,7 +93,7 @@ async function loadFifoBaseData(client) {
       operation_id: item.operation_id,
       product_id: item.product_id,
       product_name: product?.name || '',
-      sale_group: resolveProductGroup(product),
+      sale_group: resolveProductGroup(product, product?.name || ''),
       sale_date: op?.operation_date,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,
@@ -158,7 +139,8 @@ function candidateLots(lotState, productMap, saleGroup, cutoffDate, opMap) {
   const cutoff = String(cutoffDate || '9999-12-31').slice(0, 10)
   return Array.from(lotState.values())
     .filter(lot => {
-      const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+      const product = productMap.get(lot.product_id)
+      const group = resolveProductGroup(product, product?.name || '', lot.product_group)
       const receiptDate = lotReceiptDate(lot, opMap)
       return group === saleGroup &&
         Number(lot.remaining_qty || 0) > 0 &&
@@ -305,23 +287,41 @@ function summarizeGroupInventory(lotState, productMap, saleGroup, cutoff, opMap)
   let remainingAfterCutoff = 0
   let purchasedTotal = 0
   let purchasedWithinCutoff = 0
+  let lotsMissingDateKg = 0
+  let lotCount = 0
+  let lotCountWithinCutoff = 0
 
   for (const lot of lotState.values()) {
-    const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+    const product = productMap.get(lot.product_id)
+    const group = resolveProductGroup(product, product?.name || '', lot.product_group)
     if (group !== saleGroup) continue
+    lotCount += 1
     const initial = Number(lot.initial_qty || 0)
     const remaining = Number(lot.remaining_qty || 0)
     purchasedTotal += initial
     const receiptDate = lotReceiptDate(lot, opMap)
-    if (receiptDate && receiptDate <= cutoff) {
+    if (!receiptDate || receiptDate === '0000-01-01') {
+      lotsMissingDateKg += remaining
+      continue
+    }
+    if (receiptDate <= cutoff) {
       purchasedWithinCutoff += initial
       remainingWithinCutoff += remaining
-    } else if (receiptDate && receiptDate !== '0000-01-01') {
+      lotCountWithinCutoff += 1
+    } else {
       remainingAfterCutoff += remaining
     }
   }
 
-  return { remainingWithinCutoff, remainingAfterCutoff, purchasedTotal, purchasedWithinCutoff }
+  return {
+    remainingWithinCutoff,
+    remainingAfterCutoff,
+    purchasedTotal,
+    purchasedWithinCutoff,
+    lotsMissingDateKg,
+    lotCount,
+    lotCountWithinCutoff
+  }
 }
 
 function summarizeGroupSales(base, saleGroup, targetSaleKey) {
@@ -387,6 +387,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, sale.sale_group, cutoff, base.opMap)
   const salesSummary = summarizeGroupSales(base, sale.sale_group, saleKey)
   const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey)
+  const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, sale.sale_group, cutoff, base.opMap)
   const sim = simulateAllocation(sale, lotState, base.productMap, cutoff, base.opMap)
   const pzRows = await enrichAllocationRows(client, sim.allocationRows)
   const pzRowsValid = pzRows.filter(r => {
@@ -419,6 +420,10 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       soldBeforeTargetKg: salesSummary.soldBeforeTarget,
       remainingWithinCutoffKg: inventoryBefore.remainingWithinCutoff,
       remainingAfterCutoffKg: inventoryBefore.remainingAfterCutoff,
+      remainingWithinCutoffAfterReserveKg: inventoryAfterReserve.remainingWithinCutoff,
+      lotsMissingDateKg: inventoryBefore.lotsMissingDateKg,
+      lotCountInGroup: inventoryBefore.lotCount,
+      lotCountWithinCutoff: inventoryBefore.lotCountWithinCutoff,
       priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
       priorUnallocatedWzKg: priorReserve.priorUnallocatedQty
     }

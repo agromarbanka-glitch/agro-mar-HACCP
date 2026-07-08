@@ -220,8 +220,24 @@ export function productGroupForName(productName) {
   return text.split(' ')[0] || 'inna'
 }
 
-function resolveProductGroup(product, productName = '') {
-  return product?.product_group || productGroupForName(product?.name || productName)
+export const CANONICAL_PRODUCT_GROUPS = new Set([
+  'malina', 'truskawka', 'wisnia', 'porzeczka_czarna', 'porzeczka_czerwona',
+  'aronia', 'jab_obier', 'jab_przem', 'sliwka', 'inna'
+])
+
+/** Grupa FIFO/K03 – zawsze po nazwie produktu, nie po kodzie (T, M1…) w product_group. */
+export function resolveFifoProductGroup(product, productName = '', lotGroup = '') {
+  const byName = productGroupForName(product?.name || productName || '')
+  if (CANONICAL_PRODUCT_GROUPS.has(byName) && byName !== 'inna') return byName
+  const stored = String(product?.product_group || lotGroup || '').trim()
+  if (CANONICAL_PRODUCT_GROUPS.has(stored)) return stored
+  const byStored = productGroupForName(stored)
+  if (CANONICAL_PRODUCT_GROUPS.has(byStored) && byStored !== 'inna') return byStored
+  return byName || stored || 'inna'
+}
+
+function resolveProductGroup(product, productName = '', lotGroup = '') {
+  return resolveFifoProductGroup(product, productName, lotGroup)
 }
 
 export function isSaleOperation(op) {

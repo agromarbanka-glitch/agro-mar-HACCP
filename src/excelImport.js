@@ -208,6 +208,9 @@ function forwardFillExcelRows(rows) {
     } else if (last.issueDate) {
       // Puste komórki daty pod pierwszym wierszem dokumentu = ta sama data co wyżej (ten sam nr).
       issueDate = last.issueDate
+    } else if (looksLikeWarehouseDocumentNo(documentNo)) {
+      issueDate = inferDateFromDocumentNo(documentNo)
+      if (issueDate) last.issueDate = issueDate
     }
 
     let contractorName = String(row.contractorName || '').trim()
@@ -243,7 +246,27 @@ function parseExcelDate(value) {
   const text = String(value).trim()
   const parts = text.match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})$/)
   if (parts) return `${parts[3]}-${parts[2].padStart(2, '0')}-${parts[1].padStart(2, '0')}`
-  return text
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text
+  return ''
+}
+
+/** Miesiąc/rok z nr PZ/WZ (np. PZ/016/06/2026 → ostatni dzień 06/2026). */
+export function inferDateFromDocumentNo(documentNo) {
+  const norm = normalizeDocumentNo(documentNo)
+  const m = norm.match(/\/(\d{1,2})\/(\d{4})$/)
+  if (!m) return ''
+  const month = Number(m[1])
+  const year = Number(m[2])
+  if (month < 1 || month > 12 || year < 2000 || year > 2100) return ''
+  const lastDay = new Date(year, month, 0).getDate()
+  return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
+}
+
+/** Data dokumentu: Excel → nr PZ/WZ (bez dzisiejszej daty). */
+export function resolveDocumentIssueDate(issueDate, documentNo) {
+  const parsed = parseExcelDate(issueDate)
+  if (parsed) return parsed
+  return inferDateFromDocumentNo(documentNo)
 }
 
 function parseQty(value) {

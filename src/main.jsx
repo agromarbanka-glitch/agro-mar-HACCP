@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
-import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
+import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
+import { resolveFifoProductGroup } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
@@ -1185,6 +1186,17 @@ function App() {
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
         </div>
         {error && <p className="status danger">{error}</p>}
+        {preview?.diagnostics && (
+          <div className="hint fifo-diag-box">
+            <b>Diagnostyka FIFO ({preview.diagnostics.productGroup}):</b>{' '}
+            PZ łącznie {Number(preview.diagnostics.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg
+            ({preview.diagnostics.lotCountInGroup || 0} partii),
+            z datą ≤ {preview.cutoffDate}: {Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
+            ({preview.diagnostics.lotCountWithinCutoff || 0} partii),
+            wolne do cutoff: {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg,
+            po rezerwie wcześniejszych WZ: {Number(preview.diagnostics.remainingWithinCutoffAfterReserveKg || 0).toLocaleString('pl-PL')} kg.
+          </div>
+        )}
         {mismatch && preview && <p className="status danger">
           Brak wystarczającego surowca: WZ {Number(preview.saleQty || 0).toLocaleString('pl-PL')} kg, przypisano PZ {rawTotal.toLocaleString('pl-PL')} kg
           {Number(preview.shortage || 0) > 0 ? ` – brakuje ${Number(preview.shortage).toLocaleString('pl-PL')} kg` : ''}.
@@ -5806,16 +5818,19 @@ function App() {
     if (!row.documentNo || !row.productName || !Number(row.qty)) continue
     const docNo = normalizeDocumentNo(row.documentNo)
     const key = `${row.operation}|${docNo}`
+    const rowDate = resolveDocumentIssueDate(row.issueDate, docNo)
     if (!groups.has(key)) {
       groups.set(key, {
         operation: row.operation,
         documentNo: docNo,
-        issueDate: row.issueDate || new Date().toISOString().slice(0, 10),
+        issueDate: rowDate,
         invoiceNo: row.invoiceNo || null,
         contractorName: row.contractorName || null,
         notes: row.notes || null,
         items: []
       })
+    } else if (rowDate && !groups.get(key).issueDate) {
+      groups.get(key).issueDate = rowDate
     }
     groups.get(key).items.push(row)
   }
@@ -5850,8 +5865,8 @@ async function createIncomingLot(productId, operationId, operationDate, qty, pro
   return lot.id
 }
 
-function resolveProductGroup(product, productName = '') {
-  return product?.product_group || productGroupForName(product?.name || productName)
+function resolveProductGroup(product, productName = '', lotGroup = '') {
+  return resolveFifoProductGroup(product, productName, lotGroup)
 }
 
 async function fetchSupabaseInChunks(table, select, column, ids, chunkSize = 80) {
@@ -5936,7 +5951,7 @@ async function recalculateFifoClientSide() {
     saleLines.push({
       operation_id: item.operation_id,
       product_id: item.product_id,
-      sale_group: resolveProductGroup(product),
+      sale_group: resolveProductGroup(product, product?.name || ''),
       sale_date: op?.operation_date,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,
@@ -5969,7 +5984,7 @@ async function recalculateFifoClientSide() {
 
     const candidateLots = Array.from(lotState.values())
       .filter(lot => {
-        const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+        const group = resolveProductGroup(productMap.get(lot.product_id), productMap.get(lot.product_id)?.name || '', lot.product_group)
         const receiptDate = String(opMap.get(lot.source_operation_id)?.operation_date || lot.production_date || '').slice(0, 10)
         return group === sale.sale_group &&
           Number(lot.remaining_qty || 0) > 0 &&
