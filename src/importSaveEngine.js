@@ -240,6 +240,28 @@ async function purgeOrphanLotsRpc(client) {
   return Number(data || 0)
 }
 
+async function purgeDeletedImportLotsClient(client) {
+  const { data: deletedFiles, error: dfErr } = await withImportRetry(() =>
+    client.from('imported_files').select('id').not('deleted_at', 'is', null)
+  )
+  if (dfErr) throw dfErr
+  let lots = 0
+  for (const f of deletedFiles || []) {
+    const r = await purgeImportDataClientSide(client, f.id)
+    lots += r.lots || 0
+  }
+  return lots
+}
+
+export async function runFullImportLotCleanup(client, filename, excludeImportId = null) {
+  const prep = await prepareImportExcelSave(client, filename, excludeImportId)
+  let extraLots = await purgeOrphanLotsRpc(client)
+  try {
+    extraLots += await purgeDeletedImportLotsClient(client)
+  } catch (_) { /* brak uprawnień / stara baza */ }
+  return { ...prep, orphan_lots_removed: (prep?.orphan_lots_removed || 0) + extraLots }
+}
+
 /** Przed zapisem: usuwa pozostałości usuniętych importów i przerwane importy tego samego pliku. */
 export async function prepareImportExcelSave(client, filename, excludeImportId = null) {
   const { data, error } = await withImportRetry(() =>
@@ -622,8 +644,8 @@ export async function saveImportToSupabase(client, {
     } catch (lotErr) {
       const lotMsg = String(lotErr?.message || '')
       if (!/lots_lot_no_key|duplicate key.*lot|lots_source_operation_id_fkey/i.test(lotMsg)) throw lotErr
-      notify('Pozostałości partii w bazie – czyszczenie osieroconych partii…')
-      await purgeOrphanLotsRpc(client)
+      notify('Pozostałości partii w bazie – pełne sprzątanie…')
+      await runFullImportLotCleanup(client, fileName, imported.id)
       createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
     }
   }

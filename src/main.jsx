@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -7091,7 +7091,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     try {
       const groups = groupImportRows(filteredRows)
       setImportProgress('Przygotowanie bazy (sprzątanie pozostałości)…')
-      const prep = await prepareImportExcelSave(supabase, fileName)
+      const prep = await runFullImportLotCleanup(supabase, fileName)
       const prepMsg = formatPrepareImportResult(prep)
       if (prepMsg) setMessage(prepMsg)
 
