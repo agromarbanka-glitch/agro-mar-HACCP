@@ -2,7 +2,8 @@ import * as XLSX from 'xlsx'
 
 const REQUIRED = {
   documentType: ['Rodzaj', 'Typ', 'Dokument', 'Rodzaj dokumentu'],
-  documentNo: ['Nr', 'Numer', 'Nr dokumentu', 'Nr faktury', 'Numer faktury', 'Nr Faktury', 'Numer dokumentu'],
+  // „Nr” w eksporcie Subiekta to często lp. wiersza (488) – prawdziwy PZ/WZ jest w osobnej kolumnie.
+  documentNo: ['Nr dokumentu', 'Numer dokumentu', 'Nr faktury / PZ', 'Nr faktury / WZ', 'Nr faktury', 'Numer faktury', 'Nr Faktury', 'Numer faktury', 'Nr', 'Numer'],
   issueDate: ['Data wystawienia', 'Data wystaw', 'Data wysta', 'Data', 'Data dokumentu', 'Data wystawienia dokumentu'],
   productName: ['Produkt/usługa', 'Produkt/us', 'Produkt', 'Towar', 'Nazwa produktu', 'Asortyment', 'Surowiec', 'Nazwa towaru', 'Materiał'],
   // Przy PZ/MM dostawcą NIE jest AGRO-MAR z kolumny „Odbiorca”.
@@ -23,6 +24,38 @@ export function normalizeDocumentNo(value) {
     .trim()
     .replace(/\s+/g, '')
     .replace(/\\/g, '/')
+}
+
+const DOC_NO_PATTERN = /((?:PZ|WZ|MM|RR|FV|FS)[\/\s_-][\w/.-]+)/i
+
+/** Prawdziwy numer magazynowy PZ/WZ/MM – nie lp. wiersza (488) ani sama data. */
+export function looksLikeWarehouseDocumentNo(value) {
+  return DOC_NO_PATTERN.test(String(value || '').trim())
+}
+
+/** Szuka PZ/WZ/MM w komórkach wiersza; PZ/WZ ważniejsze od RR (RR bywa tylko odniesieniem faktury). */
+export function findDocumentNoInRow(row) {
+  const candidates = []
+  for (const val of Object.values(row || {})) {
+    const s = String(val || '').trim()
+    if (!s) continue
+    const m = s.match(DOC_NO_PATTERN)
+    if (m) candidates.push(normalizeDocumentNo(m[1]))
+  }
+  for (const prefix of ['PZ', 'WZ', 'MM', 'FV', 'FS', 'RR']) {
+    const found = candidates.find(c => c.toUpperCase().startsWith(prefix))
+    if (found) return found
+  }
+  return candidates[0] || ''
+}
+
+/** Kolumna „Nr” często zwraca lp. (488) – wtedy szukamy PZ/WZ w całym wierszu. */
+export function resolveDocumentNo(row, pickedFromColumn = '') {
+  const picked = normalizeDocumentNo(pickedFromColumn)
+  if (looksLikeWarehouseDocumentNo(picked)) return picked
+  const scanned = findDocumentNoInRow(row)
+  if (scanned) return scanned
+  return picked
 }
 
 function pick(row, names) {
@@ -146,7 +179,22 @@ function forwardFillExcelRows(rows) {
 
   for (const row of rows) {
     const documentType = inferDocumentType(row.documentType, row.documentNo)
-    const documentNo = String(row.documentNo || '').trim() || last.documentNo
+    let documentNo = String(row.documentNo || '').trim()
+    if (!looksLikeWarehouseDocumentNo(documentNo)) {
+      const scanned = findDocumentNoInRow(row)
+      if (looksLikeWarehouseDocumentNo(scanned)) {
+        const lastInbound = last.documentNo && /^(PZ|MM)/i.test(last.documentNo)
+        // RR w wierszu pod PZ to zwykle powiązana faktura RR, nie osobny dokument.
+        if (scanned.toUpperCase().startsWith('RR/') && lastInbound) {
+          documentNo = last.documentNo
+        } else {
+          documentNo = scanned
+        }
+      }
+    }
+    if (!looksLikeWarehouseDocumentNo(documentNo) && last.documentNo) {
+      documentNo = last.documentNo
+    }
 
     let issueDate = String(row.issueDate || '').trim()
     if (issueDate) {
@@ -165,7 +213,7 @@ function forwardFillExcelRows(rows) {
     const nip = row.nip || last.nip
     if (row.nip) last.nip = row.nip
     if (documentType) last.documentType = documentType
-    if (row.documentNo) last.documentNo = row.documentNo
+    if (looksLikeWarehouseDocumentNo(documentNo)) last.documentNo = documentNo
 
     out.push({
       ...row,
@@ -229,16 +277,7 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
   const mapped = sheetRows
     .map((row, index) => {
       let documentType = String(pick(row, REQUIRED.documentType)).trim()
-      let documentNo = normalizeDocumentNo(pick(row, REQUIRED.documentNo))
-      if (!documentNo) {
-        for (const val of Object.values(row)) {
-          const s = String(val || '').trim()
-          if (/^(PZ|WZ|MM|RR|FV|FS)[\/\s-][\w/.-]+/i.test(s)) {
-            documentNo = normalizeDocumentNo(s.match(/((?:PZ|WZ|MM|RR|FV|FS)[\/\s-][\w/.-]+)/i)?.[1] || s)
-            break
-          }
-        }
-      }
+      let documentNo = resolveDocumentNo(row, pick(row, REQUIRED.documentNo))
       documentType = inferDocumentType(documentType, documentNo)
       const productName = String(pick(row, REQUIRED.productName)).trim()
       const qty = pickLineQty(row, columnKeys)
@@ -266,9 +305,10 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
 }
 
 export function classifyOperation(documentType, documentNo) {
+  const type = String(documentType || '').trim().toUpperCase()
   const text = `${documentType} ${documentNo}`.toUpperCase()
   if (isMmDocument(documentType, documentNo)) return 'pominiete_mm'
-  if (text.includes('PZ')) return 'przyjecie'
-  if (text.includes('WZ') || text.includes('FV') || text.includes('FS') || text.includes('RR')) return 'sprzedaz'
+  if (type === 'PZ' || text.includes('PZ')) return 'przyjecie'
+  if (type === 'WZ' || type === 'FV' || type === 'FS' || text.includes('WZ') || text.includes('FV') || text.includes('FS') || text.includes('RR')) return 'sprzedaz'
   return 'przyjecie'
 }
