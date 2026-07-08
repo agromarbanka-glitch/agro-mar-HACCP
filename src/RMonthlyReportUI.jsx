@@ -27,6 +27,7 @@ import {
   r00ClothingMap,
   r00ColumnBulkClothing,
   buildR00K01Context,
+  resolveRMonthlyGroupDeleteDocs,
   R00_DEFAULT_GODZINA
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
@@ -49,6 +50,40 @@ function defaultNewRow(cfg) {
     else row[f.key] = ''
   }
   return row
+}
+
+async function deleteRMonthlyMonthGroup({
+  code, group, haccpDocs, supabase, allowDelete, onAuditDelete,
+  mergeHaccpDocsBatch, loadHaccpDocs, setMessage, setSelectedHaccpDoc
+}) {
+  if (!supabase || !group?.period) return
+  if (!allowDelete) {
+    setMessage('Tylko administrator może usuwać kartoteki.')
+    return
+  }
+  const docsToDelete = resolveRMonthlyGroupDeleteDocs(code, haccpDocs, group)
+  if (!docsToDelete.length) {
+    setMessage(`${code}: brak wpisów do usunięcia. Odśwież listę i spróbuj ponownie.`)
+    return
+  }
+  const label = group.displayLabel || group.period
+  if (!confirmDelete(`Całą kartotekę ${code} za ${label} (${docsToDelete.length} wpisów).\n\nWpis trafi do historii.`)) return
+  try {
+    if (onAuditDelete) await onAuditDelete(docsToDelete, `${code} ${group.period}`)
+    else {
+      for (const doc of docsToDelete) {
+        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        if (error) throw error
+      }
+    }
+    const removedIds = docsToDelete.map(d => d.id)
+    if (mergeHaccpDocsBatch) mergeHaccpDocsBatch([], removedIds)
+    setSelectedHaccpDoc?.(null)
+    setMessage(`${code}: usunięto kartotekę (${docsToDelete.length} wpisów).`)
+    loadHaccpDocs({ force: true }).catch(() => {})
+  } catch (err) {
+    setMessage(`${code}: ${err.message}`)
+  }
 }
 
 export function RMonthlyReportSection({
@@ -163,23 +198,10 @@ export function RMonthlyReportSection({
   }
 
   async function deleteMonth(group) {
-    if (!supabase || !group?.docs?.length) return
-    if (!allowDelete) { setMessage('Tylko administrator może usuwać kartoteki.'); return }
-    if (!confirmDelete(`Całą kartotekę ${code} za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii.`)) return
-    try {
-      if (onAuditDelete) await onAuditDelete(group.docs, `${code} ${group.period}`)
-      else {
-        for (const doc of group.docs) {
-          const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-          if (error) throw error
-        }
-      }
-      await loadHaccpDocs()
-      setSelectedHaccpDoc?.(null)
-      setMessage(`${code}: usunięto kartotekę.`)
-    } catch (err) {
-      setMessage(`${code}: ${err.message}`)
-    }
+    await deleteRMonthlyMonthGroup({
+      code, group, haccpDocs, supabase, allowDelete, onAuditDelete,
+      mergeHaccpDocsBatch, loadHaccpDocs, setMessage, setSelectedHaccpDoc
+    })
   }
 
   async function addRegisterRow(group) {
@@ -425,8 +447,8 @@ async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage
 }
 
 export function RMonthlyReportPreview({
-  group, supabase, employees, haccpDocs, loadHaccpDocs, mergeHaccpDoc, setMessage, defaultEmployee,
-  allowDelete = false, onAuditDelete
+  group, supabase, employees, haccpDocs, loadHaccpDocs, mergeHaccpDoc, mergeHaccpDocsBatch, setMessage, defaultEmployee,
+  allowDelete = false, onAuditDelete, setSelectedHaccpDoc
 }) {
   const code = group.type
   const cfg = getRMonthlyConfig(code) || group.config
@@ -559,21 +581,10 @@ export function RMonthlyReportPreview({
   }
 
   async function deleteMonth() {
-    if (!supabase || !group?.docs?.length) return
-    if (!allowDelete) { setMessage('Tylko administrator może usuwać kartoteki.'); return }
-    if (!confirmDelete(`Kartotekę ${code} za ${group.period} (${group.docs.length} wpisów).`)) return
-    try {
-      if (onAuditDelete) await onAuditDelete(group.docs, `${code} ${group.period}`)
-      else {
-        for (const doc of group.docs) {
-          await supabase.from('haccp_documents').delete().eq('id', doc.id)
-        }
-      }
-      await loadHaccpDocs()
-      setMessage(`${code}: usunięto.`)
-    } catch (err) {
-      setMessage(`${code}: ${err.message}`)
-    }
+    await deleteRMonthlyMonthGroup({
+      code, group, haccpDocs, supabase, allowDelete, onAuditDelete,
+      mergeHaccpDocsBatch, loadHaccpDocs, setMessage, setSelectedHaccpDoc
+    })
   }
 
   async function addMissingDay(date) {

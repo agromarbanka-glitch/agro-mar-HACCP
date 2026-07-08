@@ -44,7 +44,7 @@ import {
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   partyToW06NewRow, W06_PARTY_LABELS
 } from './w06Engine'
-import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows } from './rMonthlyEngine'
+import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import {
@@ -288,6 +288,7 @@ function App() {
   const [importProgress, setImportProgress] = useState('')
   const loadedForUserRef = useRef(null)
   const haccpLoadInFlightRef = useRef(null)
+  const haccpLoadGenerationRef = useRef(0)
   const importCheckCacheRef = useRef(null)
   const userRole = authProfile?.role || 'magazynier'
   const [productionInputLotId, setProductionInputLotId] = useState('')
@@ -1543,17 +1544,7 @@ function App() {
   }
 
   async function deleteR13Month(group) {
-    if (!supabase || !group?.docs?.length) return
-    if (!ensureCanDelete()) return
-    if (!confirmDelete(`Całą kartotekę R13 za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii – administrator może przywrócić.`)) return
-    try {
-      await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R13 ${group.period}`)
-      await loadHaccpDocs()
-      setSelectedHaccpDoc(null)
-      setMessage(`R13: usunięto kartotekę za ${group.period} (zapis w historii).`)
-    } catch (err) {
-      setMessage(`R13: ${err.message}`)
-    }
+    await deleteMonthHubGroup(group, 'R13')
   }
 
   async function saveR13DocumentDate(doc, newDate) {
@@ -1742,18 +1733,39 @@ function App() {
     }
   }
 
-  async function deleteR01Month(group) {
-    if (!supabase || !group?.docs?.length) return
+  function resolveMonthHubGroupDocs(group, allDocs) {
+    if (!group?.type || !group?.period) return group?.docs || []
+    if (isRMonthlyReport(group.type)) return resolveRMonthlyGroupDeleteDocs(group.type, allDocs, group)
+    return (allDocs || []).filter(d => {
+      if (d.document_type !== group.type) return false
+      const period = d.data?.month_key || String(d.document_date || '').slice(0, 7)
+      return period === group.period
+    })
+  }
+
+  async function deleteMonthHubGroup(group, codeLabel) {
+    if (!supabase || !group?.period) return
     if (!ensureCanDelete()) return
-    if (!confirmDelete(`Całą kartotekę R01 za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii.`)) return
-    try {
-      await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R01 ${group.period}`)
-      await loadHaccpDocs()
-      setSelectedHaccpDoc(null)
-      setMessage(`R01: usunięto kartotekę za ${group.period} (zapis w historii).`)
-    } catch (err) {
-      setMessage(`R01: ${err.message}`)
+    const docsToDelete = resolveMonthHubGroupDocs(group, haccpDocs)
+    if (!docsToDelete.length) {
+      setMessage(`${codeLabel}: brak wpisów do usunięcia. Odśwież listę i spróbuj ponownie.`)
+      return
     }
+    if (!confirmDelete(`Całą kartotekę ${codeLabel} za ${group.period} (${docsToDelete.length} wpisów).\n\nWpis trafi do historii.`)) return
+    try {
+      await auditDeleteHaccpDocuments(supabase, docsToDelete, getAuditActor(), `${codeLabel} ${group.period}`)
+      const removedIds = docsToDelete.map(d => d.id)
+      mergeHaccpDocsBatch([], removedIds)
+      setSelectedHaccpDoc(null)
+      setMessage(`${codeLabel}: usunięto kartotekę za ${group.period} (${docsToDelete.length} wpisów, zapis w historii).`)
+      loadHaccpDocs({ force: true }).catch(() => {})
+    } catch (err) {
+      setMessage(`${codeLabel}: ${err.message}`)
+    }
+  }
+
+  async function deleteR01Month(group) {
+    await deleteMonthHubGroup(group, 'R01')
   }
 
   async function saveR01DocumentDate(doc, newDate) {
@@ -1992,17 +2004,7 @@ function App() {
   }
 
   async function deleteR02Month(group) {
-    if (!supabase || !group?.docs?.length) return
-    if (!ensureCanDelete()) return
-    if (!confirmDelete(`Całą kartotekę R02 za ${group.period} (${group.docs.length} wpisów).\n\nWpis trafi do historii.`)) return
-    try {
-      await auditDeleteHaccpDocuments(supabase, group.docs, getAuditActor(), `R02 ${group.period}`)
-      await loadHaccpDocs()
-      setSelectedHaccpDoc(null)
-      setMessage(`R02: usunięto kartotekę za ${group.period} (zapis w historii).`)
-    } catch (err) {
-      setMessage(`R02: ${err.message}`)
-    }
+    await deleteMonthHubGroup(group, 'R02')
   }
 
   async function saveR02DocumentDate(doc, newDate) {
@@ -3345,11 +3347,13 @@ function App() {
         haccpDocs={haccpDocs}
         loadHaccpDocs={loadHaccpDocs}
         mergeHaccpDoc={mergeHaccpDoc}
+        mergeHaccpDocsBatch={mergeHaccpDocsBatch}
         setMessage={setMessage}
         defaultEmployee=""
         allowDelete={isAdmin(authProfile)}
+        setSelectedHaccpDoc={setSelectedHaccpDoc}
         onAuditDelete={async (docs, reason) => {
-          if (!ensureCanDelete()) return
+          if (!ensureCanDelete()) throw new Error('Tylko administrator może usuwać wpisy.')
           await auditDeleteHaccpDocuments(supabase, docs, getAuditActor(), reason)
         }}
       />
@@ -4971,7 +4975,7 @@ function App() {
               exportHaccpGroupExcel={exportHaccpGroupExcel}
               allowDelete={isAdmin(authProfile)}
               onAuditDelete={async (docs, reason) => {
-                if (!ensureCanDelete()) return
+                if (!ensureCanDelete()) throw new Error('Tylko administrator może usuwać wpisy.')
                 await auditDeleteHaccpDocuments(supabase, docs, getAuditActor(), reason)
               }}
               kartotekaLocalPrints={kartotekaLocalPrints}
@@ -5403,11 +5407,21 @@ function App() {
         {isAdmin(authProfile) && liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && String(liveGroup.type || '').startsWith('K') && <button className="secondary danger" onClick={() => deleteKartotekaGroup(liveGroup)} disabled={haccpBusy}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
-          if (!supabase || !ensureCanDelete() || !confirmDelete(`Kartotekę ${liveGroup.type} za ${liveGroup.period}.`)) return
-          await auditDeleteHaccpDocuments(supabase, liveGroup.docs || [], getAuditActor(), `${liveGroup.type} ${liveGroup.period}`)
-          await loadHaccpDocs()
-          setSelectedHaccpDoc(null)
-          setMessage(`${liveGroup.type}: usunięto kartotekę (zapis w historii).`)
+          const docsToDelete = resolveRMonthlyGroupDeleteDocs(liveGroup.type, haccpDocs, liveGroup)
+          if (!docsToDelete.length) {
+            setMessage(`${liveGroup.type}: brak wpisów do usunięcia. Odśwież listę i spróbuj ponownie.`)
+            return
+          }
+          if (!supabase || !ensureCanDelete() || !confirmDelete(`Kartotekę ${liveGroup.type} za ${liveGroup.displayLabel || liveGroup.period} (${docsToDelete.length} wpisów).`)) return
+          try {
+            await auditDeleteHaccpDocuments(supabase, docsToDelete, getAuditActor(), `${liveGroup.type} ${liveGroup.period}`)
+            mergeHaccpDocsBatch([], docsToDelete.map(d => d.id))
+            setSelectedHaccpDoc(null)
+            setMessage(`${liveGroup.type}: usunięto kartotekę (zapis w historii).`)
+            loadHaccpDocs({ force: true }).catch(() => {})
+          } catch (err) {
+            setMessage(`${liveGroup.type}: ${err.message}`)
+          }
         }}><Trash2 size={16}/> Usuń kartotekę</button>}
         <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
     }
@@ -5535,10 +5549,11 @@ function App() {
     setHaccpBusy(true)
     try {
       await auditDeleteHaccpDocuments(supabase, deletable, getAuditActor(), `${group.type} ${label || group.period || ''}`.trim())
-      setHaccpDocs(prev => prev.filter(d => !deletable.some(x => x.id === d.id)))
+      mergeHaccpDocsBatch([], deletable.map(d => d.id))
       if (group.type === 'K03') await loadK03TraceData()
       setSelectedHaccpDoc(null)
       setMessage(`${group.type}: usunięto kartotekę (${deletable.length} wpisów) – zapis w Historii.`)
+      loadHaccpDocs({ force: true }).catch(() => {})
     } catch (err) {
       setMessage(`${group.type}: ${err.message}`)
     } finally {
@@ -7097,21 +7112,25 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function loadHaccpDocs(options = {}) {
     if (!supabase) return
-    if (haccpLoadInFlightRef.current) return haccpLoadInFlightRef.current
-    haccpLoadInFlightRef.current = (async () => {
+    const generation = ++haccpLoadGenerationRef.current
+    if (haccpLoadInFlightRef.current && !options.force) return haccpLoadInFlightRef.current
+    const run = (async () => {
       try {
         if (options.syncK01) {
           const k01Added = await syncAutoK01Documents()
-          if (k01Added > 0) {
+          if (k01Added > 0 && generation === haccpLoadGenerationRef.current) {
             setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
           }
         }
         const data = await fetchAllHaccpDocuments(supabase)
+        if (generation !== haccpLoadGenerationRef.current) return data
         setHaccpDocs(data)
         if (data.length >= HACCP_DOCS_LOAD_MAX) {
           setMessage(`Wczytano ${data.length.toLocaleString('pl-PL')} kartotek (górny limit). Użyj filtra dat w panelu bocznym, aby zawęzić widok.`)
         }
+        return data
       } catch (err) {
+        if (generation !== haccpLoadGenerationRef.current) throw err
         setHaccpDocs([])
         const msg = String(err?.message || err)
         if (/permission denied|row-level security|42501/i.test(msg)) {
@@ -7119,11 +7138,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         } else {
           setMessage(`Błąd wczytywania kartotek: ${msg}`)
         }
+        throw err
       } finally {
-        haccpLoadInFlightRef.current = null
+        if (generation === haccpLoadGenerationRef.current) {
+          haccpLoadInFlightRef.current = null
+        }
       }
     })()
-    return haccpLoadInFlightRef.current
+    haccpLoadInFlightRef.current = run
+    return run
   }
 
   function mergeHaccpDoc(id, patch) {

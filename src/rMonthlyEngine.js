@@ -372,6 +372,30 @@ export function buildR04ControlPayload(yearMonth, controlDate, stations, signedB
   }
 }
 
+/** Wszystkie wpisy kartoteki miesięcznej do usunięcia (z pełnej listy, nie tylko z filtrowanego widoku). */
+export function resolveRMonthlyGroupDeleteDocs(code, allDocs, group) {
+  if (!group?.period || !code) return []
+  const cfg = getRMonthlyConfig(code)
+  const targetPeriod = String(group.period)
+  return (allDocs || []).filter(d => {
+    if (d.document_type !== code) return false
+    if (code === 'R03') {
+      const docPeriod = d.data?.month_key || String(d.document_date || '').slice(0, 7)
+      if (docPeriod !== targetPeriod) return false
+      const docReg = r03RegisterKeyFromDoc(d)
+      const groupReg = group.registerKey || r03RegisterKeyFromDoc(group.docs?.[0])
+      return docReg === groupReg
+    }
+    let period = d.data?.month_key || String(d.document_date || '').slice(0, 7)
+    if (cfg?.periodMode === 'quarter' && d.data?.quarter_key) period = d.data.quarter_key
+    else if (cfg?.periodMode === 'quarter') {
+      const [y, m] = period.split('-').map(Number)
+      period = `${y}-Q${Math.ceil((m || 1) / 3)}`
+    }
+    return period === targetPeriod
+  })
+}
+
 export function buildRMonthlyPeriodGroups(code, docs) {
   const cfg = getRMonthlyConfig(code)
   if (!cfg) return []
