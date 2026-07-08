@@ -63,7 +63,7 @@ async function loadFifoBaseData(client) {
     client.from('products').select('id, name, code, product_group'),
     client.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
     client.from('operations').select('id, operation_type, operation_date, document_no, created_at'),
-    client.from('operation_items').select('id, operation_id, product_id, qty, direction').eq('direction', 'rozchod'),
+    client.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name').eq('direction', 'rozchod'),
     client.from('fifo_allocations').select('id, operation_id, source_lot_id, product_id, qty')
   ])
   if (productsErr) throw productsErr
@@ -87,13 +87,14 @@ async function loadFifoBaseData(client) {
     const qty = Math.abs(Number(item.qty || 0))
     if (qty <= 0) continue
     const product = productMap.get(item.product_id)
+    const rawName = String(item.raw_product_name || product?.name || '').trim()
     const key = saleLineKey(item.operation_id, item.product_id)
     const current = saleGroups.get(key) || {
       key,
       operation_id: item.operation_id,
       product_id: item.product_id,
-      product_name: product?.name || '',
-      sale_group: resolveProductGroup(product, product?.name || ''),
+      product_name: rawName || product?.name || '',
+      sale_group: resolveProductGroup(product, rawName),
       sale_date: op?.operation_date,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,

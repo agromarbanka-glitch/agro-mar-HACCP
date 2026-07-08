@@ -225,14 +225,23 @@ export const CANONICAL_PRODUCT_GROUPS = new Set([
   'aronia', 'jab_obier', 'jab_przem', 'sliwka', 'inna'
 ])
 
-/** Grupa FIFO/K03 – zawsze po nazwie produktu, nie po kodzie (T, M1…) w product_group. */
+function looksLikeIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim())
+}
+
+/** Grupa FIFO/K03 – zawsze po nazwie produktu, nie po kodzie (T, M1…) ani dacie w product_group. */
 export function resolveFifoProductGroup(product, productName = '', lotGroup = '') {
-  const byName = productGroupForName(product?.name || productName || '')
+  const name = String(product?.name || productName || '').trim()
+  const byName = productGroupForName(name)
   if (CANONICAL_PRODUCT_GROUPS.has(byName) && byName !== 'inna') return byName
-  const stored = String(product?.product_group || lotGroup || '').trim()
+
+  let stored = String(product?.product_group || lotGroup || '').trim()
+  if (looksLikeIsoDate(stored)) stored = ''
   if (CANONICAL_PRODUCT_GROUPS.has(stored)) return stored
+
   const byStored = productGroupForName(stored)
   if (CANONICAL_PRODUCT_GROUPS.has(byStored) && byStored !== 'inna') return byStored
+
   return byName || stored || 'inna'
 }
 

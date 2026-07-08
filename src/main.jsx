@@ -1188,7 +1188,7 @@ function App() {
         {error && <p className="status danger">{error}</p>}
         {preview?.diagnostics && (
           <div className="hint fifo-diag-box">
-            <b>Diagnostyka FIFO ({preview.diagnostics.productGroup}):</b>{' '}
+            <b>Diagnostyka FIFO · grupa {preview.diagnostics.productGroup} · cutoff {preview.cutoffDate}:</b>{' '}
             PZ łącznie {Number(preview.diagnostics.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg
             ({preview.diagnostics.lotCountInGroup || 0} partii),
             z datą ≤ {preview.cutoffDate}: {Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
@@ -5894,7 +5894,7 @@ async function recalculateFifoClientSide() {
     supabase.from('products').select('id, name, code, product_group'),
     supabase.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
     supabase.from('operations').select('id, operation_type, operation_date, document_no, created_at'),
-    supabase.from('operation_items').select('id, operation_id, product_id, qty, direction').eq('direction', 'rozchod')
+    supabase.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name').eq('direction', 'rozchod')
   ])
   if (productsErr) throw productsErr
   if (lotsErr) throw lotsErr
@@ -5948,10 +5948,11 @@ async function recalculateFifoClientSide() {
     const qty = Math.abs(Number(item.qty || 0))
     if (qty <= 0) continue
     const product = productMap.get(item.product_id)
+    const rawName = String(item.raw_product_name || product?.name || '').trim()
     saleLines.push({
       operation_id: item.operation_id,
       product_id: item.product_id,
-      sale_group: resolveProductGroup(product, product?.name || ''),
+      sale_group: resolveProductGroup(product, rawName),
       sale_date: op?.operation_date,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,
