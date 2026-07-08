@@ -7,8 +7,27 @@ import { normalizeDocumentNo } from './excelImport.js'
 const OP_CHUNK = 40
 const ITEM_CHUNK = 80
 const NAME_CHUNK = 80
+const LOT_CONCURRENCY = 12
+const ITEM_LOT_UPDATE_CHUNK = 40
 const RETRY_ATTEMPTS = 4
 const RETRY_BASE_MS = 700
+
+async function runWithConcurrency(tasks, concurrency, onTick) {
+  if (!tasks.length) return []
+  const results = new Array(tasks.length)
+  let next = 0
+  let done = 0
+  async function worker() {
+    while (next < tasks.length) {
+      const index = next++
+      results[index] = await tasks[index]()
+      done += 1
+      onTick?.(done, tasks.length)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker))
+  return results
+}
 
 function isTransientNetworkError(err) {
   const msg = String(err?.message || err || '')
@@ -150,37 +169,52 @@ async function ensureProductIds(client, productNames, deps) {
   const existing = await fetchNamesInChunks(client, 'products', 'name', unique)
   for (const p of existing) map.set(normalizeText(p.name), p.id)
 
-  for (const name of unique) {
-    const key = normalizeText(name)
-    if (map.has(key)) continue
+  const missing = unique.filter(name => !map.has(normalizeText(name)))
+  if (!missing.length) return map
 
+  const { data: catalog, error: catalogErr } = await withImportRetry(() =>
+    client.from('products').select('id, name, code')
+  )
+  if (catalogErr) throw catalogErr
+
+  const codesInUse = new Set((catalog || []).map(p => p.code))
+  const toInsert = []
+
+  for (const name of missing) {
+    const key = normalizeText(name)
     let code = baseCodeForProduct(name)
     let suffix = 2
-    while (true) {
-      const { data: byCode, error: codeErr } = await withImportRetry(() =>
-        client.from('products').select('id, name').eq('code', code).maybeSingle()
-      )
-      if (codeErr) throw codeErr
-      if (!byCode) break
-      if (normalizeText(byCode.name) === key) {
-        map.set(key, byCode.id)
+    while (codesInUse.has(code)) {
+      const owner = (catalog || []).find(p => p.code === code)
+      if (owner && normalizeText(owner.name) === key) {
+        map.set(key, owner.id)
         break
       }
       code = `${baseCodeForProduct(name)}${suffix}`
       suffix += 1
     }
     if (map.has(key)) continue
+    codesInUse.add(code)
+    toInsert.push({
+      name,
+      code,
+      product_type: 'surowiec_lub_produkt',
+      product_group: productGroupForName(name),
+      _key: key
+    })
+  }
 
-    const { data: inserted, error: insertErr } = await withImportRetry(() =>
-      client.from('products').insert({
-        name,
-        code,
-        product_type: 'surowiec_lub_produkt',
-        product_group: productGroupForName(name)
-      }).select('id').single()
+  if (toInsert.length) {
+    const inserted = await insertInChunks(
+      client,
+      'products',
+      toInsert.map(({ _key, ...row }) => row),
+      'id, name',
+      50
     )
-    if (insertErr) throw insertErr
-    map.set(key, inserted.id)
+    for (let i = 0; i < inserted.length; i += 1) {
+      map.set(toInsert[i]._key, inserted[i].id)
+    }
   }
   return map
 }
@@ -230,6 +264,41 @@ async function createIncomingLot(client, { productId, operationId, operationDate
   )
   if (lotErr) throw lotErr
   return lot.id
+}
+
+async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
+  if (!incomingItems.length) return 0
+
+  let createdLots = 0
+  notify(`Tworzenie partii 0 / ${incomingItems.length}…`)
+
+  const lotIds = await runWithConcurrency(
+    incomingItems.map(meta => () => createIncomingLot(client, {
+      productId: meta.productId,
+      operationId: meta.opId,
+      operationDate: meta.group.issueDate,
+      qty: meta.itemQty,
+      productName: meta.row.productName,
+      deps
+    })),
+    LOT_CONCURRENCY,
+    (done, total) => {
+      if (done === total || done % 25 === 0) notify(`Tworzenie partii ${done} / ${total}…`)
+    }
+  )
+
+  createdLots = lotIds.length
+
+  for (let i = 0; i < incomingItems.length; i += ITEM_LOT_UPDATE_CHUNK) {
+    const slice = incomingItems.slice(i, i + ITEM_LOT_UPDATE_CHUNK)
+    await Promise.all(slice.map((meta, j) =>
+      withImportRetry(() =>
+        client.from('operation_items').update({ lot_id: lotIds[i + j] }).eq('id', meta.itemId)
+      )
+    ))
+  }
+
+  return createdLots
 }
 
 /**
@@ -347,6 +416,7 @@ export async function saveImportToSupabase(client, {
     notify(`Zapis pozycji (${itemRows.length} w tej partii)…`)
     const insertedItems = await insertInChunks(client, 'operation_items', itemRows, 'id', ITEM_CHUNK)
 
+    const incomingItems = []
     for (let j = 0; j < insertedItems.length; j += 1) {
       const item = insertedItems[j]
       const meta = itemMeta[j]
@@ -358,20 +428,11 @@ export async function saveImportToSupabase(client, {
         continue
       }
 
-      const lotId = await createIncomingLot(client, {
-        productId: meta.productId,
-        operationId: meta.opId,
-        operationDate: meta.group.issueDate,
-        qty: meta.itemQty,
-        productName: meta.row.productName,
-        deps
-      })
-      createdLots += 1
+      incomingItems.push({ ...meta, itemId: item.id })
+    }
 
-      const { error: itemLotErr } = await withImportRetry(() =>
-        client.from('operation_items').update({ lot_id: lotId }).eq('id', item.id)
-      )
-      if (itemLotErr) throw itemLotErr
+    if (incomingItems.length) {
+      createdLots += await attachLotsToIncomingItems(client, incomingItems, deps, notify)
     }
   }
 

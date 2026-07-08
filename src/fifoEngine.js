@@ -206,6 +206,8 @@ async function allocateSale(client, sale, lotState, productMap, opMap) {
   let allocationCount = 0
   const cutoff = String(sale.sale_date || '9999-12-31').slice(0, 10)
   const lots = candidateLots(lotState, productMap, sale.sale_group, cutoff, opMap)
+  const touchedLots = new Map()
+  const allocRows = []
 
   for (const lot of lots) {
     if (remaining <= 0) break
@@ -217,19 +219,25 @@ async function allocateSale(client, sale, lotState, productMap, opMap) {
     lot.remaining_qty = newRemaining
     lot.status = newRemaining <= 0.0005 ? 'zuzyta' : 'aktywna'
     lotState.set(lot.id, lot)
-    await persistLot(client, lot)
-
-    const { error: allocErr } = await client.from('fifo_allocations').insert({
+    touchedLots.set(lot.id, lot)
+    allocRows.push({
       operation_id: sale.operation_id,
       source_lot_id: lot.id,
       product_id: sale.product_id,
       qty: take
     })
-    if (allocErr) throw allocErr
 
     allocationCount += 1
     remaining -= take
     allocated += take
+  }
+
+  if (touchedLots.size) {
+    await Promise.all([...touchedLots.values()].map(lot => persistLot(client, lot)))
+  }
+  if (allocRows.length) {
+    const { error: allocErr } = await client.from('fifo_allocations').insert(allocRows)
+    if (allocErr) throw allocErr
   }
 
   return {
@@ -505,9 +513,11 @@ export async function recalculateFifoIncremental(client, options = {}) {
     if (existing.length) {
       restoreAllocationsToLots(existing, lotState)
       await deleteAllocations(client, existing.map(a => a.id))
-      for (const lot of lotState.values()) {
-        await persistLot(client, lot)
-      }
+      const restoredLotIds = [...new Set(existing.map(a => a.source_lot_id).filter(Boolean))]
+      await Promise.all(restoredLotIds.map(lotId => {
+        const lot = lotState.get(lotId)
+        return lot ? persistLot(client, lot) : Promise.resolve()
+      }))
     }
 
     const result = await allocateSale(client, sale, lotState, productMap, opMap)

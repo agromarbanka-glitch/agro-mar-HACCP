@@ -6896,9 +6896,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (!pending.length) return 0
 
     let inserted = 0
-    for (const doc of pending) {
-      const { error } = await supabase.from('haccp_documents').insert(buildK01InsertPayload(doc))
-      if (!error) inserted += 1
+    const payloads = pending.map(doc => buildK01InsertPayload(doc))
+    for (let i = 0; i < payloads.length; i += 50) {
+      const chunk = payloads.slice(i, i + 50)
+      const { error } = await supabase.from('haccp_documents').insert(chunk)
+      if (!error) inserted += chunk.length
     }
     return inserted
   }
