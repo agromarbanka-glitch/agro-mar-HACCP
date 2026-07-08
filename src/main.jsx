@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3 } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
@@ -418,6 +419,12 @@ function App() {
   const [pzEditDates, setPzEditDates] = useState({})
   const [pzSearch, setPzSearch] = useState('')
   const [pzStatusFilter, setPzStatusFilter] = useState('all')
+  const [stanyAsOfDate, setStanyAsOfDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [stanyRows, setStanyRows] = useState([])
+  const [stanyLoading, setStanyLoading] = useState(false)
+  const [stanySearch, setStanySearch] = useState('')
+  const [stanyGroupFilter, setStanyGroupFilter] = useState('all')
+  const [stanyDetailRow, setStanyDetailRow] = useState(null)
   const [fifoKartotekiDirty, setFifoKartotekiDirty] = useState(false)
   const [k03BulkMonth, setK03BulkMonth] = useState(new Date().toISOString().slice(0, 7))
   const docsFiltersHydrated = useRef(false)
@@ -447,6 +454,20 @@ function App() {
       return normalizeText(`${r.lot_no} ${r.document_no} ${r.product_name} ${r.product_group} ${r.supplier_name}`).includes(q)
     }).slice(0, 1000)
   }, [pzRows, pzSearch, pzStatusFilter])
+
+  const visibleStanyRows = useMemo(() => {
+    const q = normalizeText(stanySearch)
+    return (stanyRows || []).filter(r => {
+      if (stanyGroupFilter !== 'all' && r.product_group !== stanyGroupFilter) return false
+      if (!q) return true
+      return normalizeText(`${r.product_name} ${r.product_group}`).includes(q)
+    })
+  }, [stanyRows, stanySearch, stanyGroupFilter])
+
+  const stanyGroupOptions = useMemo(() => {
+    const set = new Set((stanyRows || []).map(r => r.product_group).filter(Boolean))
+    return Array.from(set).sort()
+  }, [stanyRows])
 
   const HACCPCARDS = [
     ['K01', 'K01 – Przyjęcie surowca (CP1)', 'Dostawy PZ/MM, ocena surowca i pojazdu'],
@@ -5552,6 +5573,12 @@ function App() {
   }, [activeTab, docsFilter])
 
   useEffect(() => {
+    if (activeTab === 'stany' && supabase && authReady && (authProfile || skipAuth)) {
+      loadStanyData()
+    }
+  }, [activeTab, stanyAsOfDate, authReady, authProfile?.auth_user_id, skipAuth])
+
+  useEffect(() => {
     if (!isSupabaseConfigured) return
     if (!authReady) return
     if (!authProfile && !skipAuth) return
@@ -6847,6 +6874,22 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   }
 
 
+  async function loadStanyData() {
+    if (!supabase) return
+    setStanyLoading(true)
+    try {
+      const result = await computeUnassignedPzStock(supabase, stanyAsOfDate)
+      setStanyRows(result.rows || [])
+      if (activeTab === 'stany') setMessage(result.message || '')
+    } catch (err) {
+      console.error('Stany load error', err)
+      setMessage(`Błąd wczytywania stanów: ${err?.message || String(err)}`)
+      setStanyRows([])
+    } finally {
+      setStanyLoading(false)
+    }
+  }
+
   async function loadPzManagementData() {
     if (!supabase) return
     try {
@@ -7131,6 +7174,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     ['dashboard', 'Start', LayoutDashboard],
     ['importy', 'Importy Excel', Upload],
     ['pz', 'PZ / FIFO', Database],
+    ['stany', 'Stany', BarChart3],
     ['magazyn', 'Magazyn', Warehouse],
     ['kartoteki', 'Dokumentacja HACCP', ClipboardList],
     ['archiwum-pdf', 'Archiwum PDF', FolderOpen],
@@ -7427,6 +7471,69 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </section>
     <section className="card"><div className="section-title"><ArrowRightLeft/><div><h2>Historia zmian PZ/FIFO</h2><p>Każda zmiana daty PZ jest zapisana. Możesz cofnąć wybraną zmianę jednym przyciskiem.</p></div></div>{pzHistoryRows.length === 0 && <p className="hint">Brak historii albo nie uruchomiono jeszcze SQL v31.</p>}{pzHistoryRows.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Data zmiany</th><th>PZ</th><th>Stara data</th><th>Nowa data</th><th>Akcja</th><th>Powód</th><th>Cofnij</th></tr></thead><tbody>{pzHistoryRows.map(h => <tr key={h.id}><td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td><td><b>{h.document_no || '-'}</b></td><td>{h.old_date || '-'}</td><td>{h.new_date || '-'}</td><td>{h.action_type || 'change_date'}</td><td>{h.change_reason || '-'}</td><td><button className="mini secondary" onClick={() => undoPzChange(h)}>Cofnij</button></td></tr>)}</tbody></table></div>}</section>
     <section className="card"><div className="section-title"><Database/><div><h2>Historia przeliczeń FIFO</h2><p>Pełne przeliczenia i operacje admina (wymaga SQL v34).</p></div></div>{fifoChangeLog.length === 0 && <p className="hint">Brak wpisów – uruchom migrację <b>2026-v34-fifo-incremental-k03-freeze.sql</b> w Supabase.</p>}{fifoChangeLog.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Data</th><th>Typ</th><th>WZ</th><th>Powód</th><th>Szczegóły</th></tr></thead><tbody>{fifoChangeLog.map(h => <tr key={h.id}><td>{h.created_at ? new Date(h.created_at).toLocaleString('pl-PL') : '-'}</td><td>{h.change_type || '-'}</td><td>{h.wz_no || h.k03_key || '-'}</td><td>{h.change_reason || '-'}</td><td className="hint">{h.after_data ? JSON.stringify(h.after_data).slice(0, 120) : '-'}</td></tr>)}</tbody></table></div>}</section>
+    </>}
+
+
+    {activeTab === 'stany' && canSeeTab(authProfile, 'stany') && <>
+    <section className="card">
+      <div className="section-title"><BarChart3/><div><h2>Stany – PZ nieprzypisane do WZ</h2><p>Stan na koniec wybranego dnia: ile surowca z PZ (data przyjęcia ≤ dzień) nie zostało jeszcze rozliczone na WZ z tego samego okresu (symulacja FIFO). Wersja silnika: {STOCK_STATES_VERSION}.</p></div></div>
+      <div className="form-grid compact">
+        <label>Stan na dzień
+          <input type="date" value={stanyAsOfDate} onChange={e => setStanyAsOfDate(e.target.value)} />
+        </label>
+        <label>Szukaj asortymentu
+          <input value={stanySearch} onChange={e => setStanySearch(e.target.value)} placeholder="np. malina, truskawka" />
+        </label>
+        <label>Grupa
+          <select value={stanyGroupFilter} onChange={e => setStanyGroupFilter(e.target.value)}>
+            <option value="all">Wszystkie grupy</option>
+            {stanyGroupOptions.map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </label>
+      </div>
+      <div className="actions">
+        <button className="secondary" onClick={loadStanyData} disabled={stanyLoading}><RefreshCcw size={16}/> {stanyLoading ? 'Liczenie…' : 'Odśwież stany'}</button>
+      </div>
+      <div className="summary">
+        <span>Asortymentów: <b>{visibleStanyRows.length}</b></span>
+        <span>Nieprzypisane łącznie: <b>{visibleStanyRows.reduce((s, r) => s + Number(r.unassigned_kg || 0), 0).toLocaleString('pl-PL')} kg</b></span>
+        <span>Partie PZ: <b>{visibleStanyRows.reduce((s, r) => s + (r.pz_lines?.length || 0), 0)}</b></span>
+      </div>
+      {stanyLoading && <p className="hint">Przeliczanie stanów na dzień {stanyAsOfDate}…</p>}
+      {!stanyLoading && visibleStanyRows.length === 0 && <p className="hint">Brak nieprzypisanego surowca na {stanyAsOfDate} (albo brak PZ do tej daty).</p>}
+      {visibleStanyRows.length > 0 && <div className="table-wrap small"><table>
+        <thead><tr><th>Asortyment</th><th>Grupa</th><th>Nieprzypisane kg</th><th>Partie PZ</th><th>Podejrzyj</th></tr></thead>
+        <tbody>{visibleStanyRows.map(row => <tr key={row.product_id || row.product_name}>
+          <td><b>{row.product_name}</b></td>
+          <td>{row.product_group}</td>
+          <td><b>{Number(row.unassigned_kg || 0).toLocaleString('pl-PL')}</b></td>
+          <td>{row.pz_lines?.length || 0}</td>
+          <td className="row-actions">
+            <button type="button" className="mini secondary stany-preview-btn" title="Pokaż PZ" onClick={() => setStanyDetailRow(row)}>
+              <Eye size={16}/>
+            </button>
+          </td>
+        </tr>)}</tbody>
+      </table></div>}
+    </section>
+    {stanyDetailRow && <div className="modal-backdrop" onClick={() => setStanyDetailRow(null)}>
+      <div className="haccp-modal stany-detail-modal" onClick={e => e.stopPropagation()}>
+        <h3>{stanyDetailRow.product_name}</h3>
+        <p className="hint">Nieprzypisane na <b>{stanyAsOfDate}</b>: <b>{Number(stanyDetailRow.unassigned_kg || 0).toLocaleString('pl-PL')} kg</b> · grupa {stanyDetailRow.product_group}</p>
+        <div className="table-wrap small"><table>
+          <thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Dostawca</th><th>Nieprzypisane kg</th><th>PZ łącznie kg</th></tr></thead>
+          <tbody>{(stanyDetailRow.pz_lines || []).map(line => <tr key={line.lot_id}>
+            <td>{line.pz_date ? String(line.pz_date).slice(0, 10).split('-').reverse().join('.') : '—'}</td>
+            <td><b>{line.pz_no || '—'}</b></td>
+            <td>{line.lot_no}</td>
+            <td>{line.supplier || '—'}</td>
+            <td><b>{Number(line.qty || 0).toLocaleString('pl-PL')}</b></td>
+            <td>{Number(line.initial_qty || 0).toLocaleString('pl-PL')}</td>
+          </tr>)}</tbody>
+        </table></div>
+        <div className="actions"><button className="secondary" onClick={() => setStanyDetailRow(null)}>Zamknij</button></div>
+      </div>
+    </div>}
     </>}
 
 

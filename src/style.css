@@ -207,6 +207,9 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .pz-status-czesciowo { background: #fef3c7; color: #92400e; }
 .pz-status-wykorzystana { background: #dcfce7; color: #166534; }
 
+.stany-preview-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; padding: 6px 10px; }
+.stany-detail-modal { max-width: 820px; max-height: 85vh; overflow: auto; }
+
 .k03-status-box { margin: 12px 0; padding: 14px 16px; border-radius: 14px; background: #eef6ef; border: 1px solid #c8dcc9; }
 .k03-status-box strong { display: block; margin-bottom: 6px; color: #1d4d28; }
 .k03-status-box p { margin: 4px 0; }
