@@ -183,6 +183,26 @@ function restoreAllocationsToLots(allocations, lotState) {
   }
 }
 
+function deductAllocationsFromLots(allocations, lotState) {
+  for (const alloc of allocations || []) {
+    const lot = lotState.get(alloc.source_lot_id)
+    if (!lot) continue
+    lot.remaining_qty = Math.max(0, Number(lot.remaining_qty || 0) - Number(alloc.qty || 0))
+    lotState.set(lot.id, lot)
+  }
+}
+
+/** Przy podglądzie K03 – pełne stany PZ od zera (initial_qty), nie z remaining_qty po częściowym FIFO. */
+function resetIncomingLotsToInitial(lotState, opMap) {
+  for (const lot of lotState.values()) {
+    const op = opMap.get(lot.source_operation_id)
+    if (!isIncomingLotOperation(op)) continue
+    lot.remaining_qty = Number(lot.initial_qty || 0)
+    lot.status = lot.remaining_qty > 0.0005 ? 'aktywna' : lot.status
+    lotState.set(lot.id, lot)
+  }
+}
+
 async function allocateSale(client, sale, lotState, productMap, opMap) {
   let remaining = Number(sale.sale_qty || 0)
   let allocated = 0
@@ -271,6 +291,11 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey) {
     const existing = base.allocationsBySaleKey.get(sale.key) || []
     const saleQty = Number(sale.sale_qty || 0)
     const allocatedQty = existing.reduce((s, a) => s + Number(a.qty || 0), 0)
+
+    if (existing.length && allocatedQty > 0.001) {
+      deductAllocationsFromLots(existing, lotState)
+    }
+
     const missing = saleQty - allocatedQty
     if (missing <= 0.001) continue
 
@@ -381,8 +406,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   }
 
   const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
-  const existing = base.allocationsBySaleKey.get(saleKey) || []
-  if (existing.length) restoreAllocationsToLots(existing, lotState)
+  resetIncomingLotsToInitial(lotState, base.opMap)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, sale.sale_group, cutoff, base.opMap)
@@ -426,7 +450,8 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       lotCountInGroup: inventoryBefore.lotCount,
       lotCountWithinCutoff: inventoryBefore.lotCountWithinCutoff,
       priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
-      priorUnallocatedWzKg: priorReserve.priorUnallocatedQty
+      priorUnallocatedWzKg: priorReserve.priorUnallocatedQty,
+      targetSaleQty: Number(sale.sale_qty || 0)
     }
   }
 }

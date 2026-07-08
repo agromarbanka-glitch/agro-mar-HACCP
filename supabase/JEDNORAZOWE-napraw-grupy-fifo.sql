@@ -95,3 +95,12 @@ WHERE lower(p.name) LIKE '%truskawk%'
 
 -- Jeśli pz_truskawka_do_30_06 = 0 a pz_truskawka_po_30_06 > 0:
 -- w aplikacji Magazyn → PZ/FIFO popraw daty PZ (faktyczna data przyjęcia ≤ data WZ).
+
+-- Sprzedaż truskawki do 30.06 (czy mieści się w 156 t PZ):
+SELECT 'sprzedaz_truskawka_do_30_06' AS test, COALESCE(SUM(ABS(oi.qty)), 0)::bigint AS kg
+FROM public.operation_items oi
+JOIN public.operations o ON o.id = oi.operation_id
+JOIN public.products p ON p.id = oi.product_id
+WHERE oi.direction = 'rozchod'
+  AND lower(p.name) LIKE '%truskawk%'
+  AND o.operation_date <= DATE '2026-06-30';

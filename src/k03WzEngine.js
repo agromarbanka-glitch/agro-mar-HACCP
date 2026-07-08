@@ -344,6 +344,12 @@ function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
   if ((diag.priorUnallocatedWzCount || 0) > 0) {
     note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je najpierw (kolejność FIFO).`
   }
+  const soldBefore = Number(diag.soldBeforeTargetKg || 0)
+  const pzCutoff = Number(diag.purchasedWithinCutoffKg || 0)
+  const targetQty = Number(diag.targetSaleQty || 0)
+  if (soldBefore > 0 && pzCutoff > 0 && soldBefore + targetQty > pzCutoff + 0.5) {
+    note += ` Do ${cutoffDate} wcześniejsza sprzedaż tej grupy: ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg, a PZ ≤ ${cutoffDate} to ${pzCutoff.toLocaleString('pl-PL')} kg.`
+  }
   if (Number(diag.remainingWithinCutoffAfterReserveKg || 0) <= 0.5 &&
       Number(diag.purchasedWithinCutoffKg || 0) > 0 &&
       (diag.priorUnallocatedWzCount || 0) > 0) {
