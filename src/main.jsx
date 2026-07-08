@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -281,10 +281,12 @@ function App() {
   const [authReady, setAuthReady] = useState(skipAuth)
   const [haccpBusy, setHaccpBusy] = useState(false)
   const [importDeleting, setImportDeleting] = useState(false)
+  const [importCleaning, setImportCleaning] = useState(false)
   const [importSaving, setImportSaving] = useState(false)
   const [importProgress, setImportProgress] = useState('')
   const loadedForUserRef = useRef(null)
   const haccpLoadInFlightRef = useRef(null)
+  const importCheckCacheRef = useRef(null)
   const userRole = authProfile?.role || 'magazynier'
   const [productionInputLotId, setProductionInputLotId] = useState('')
   const [productionInputQty, setProductionInputQty] = useState('')
@@ -5736,6 +5738,7 @@ function App() {
     setImportDuplicates([])
     setImportDuplicateDetails(new Map())
     setImportOrphanCount(0)
+    importCheckCacheRef.current = null
     try {
       const { rows: parsed, skippedMmCount } = await readAgromarExcel(file)
       setRows(parsed)
@@ -5744,13 +5747,16 @@ function App() {
         loadMsg += ` Pominięto ${skippedMmCount} wierszy MM (przesunięcia magazynowe).`
       }
       if (supabase) {
-        const classified = parsed.map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) }))
+        const classified = parsed
+          .map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) }))
+          .filter(r => r.operation !== 'pominiete_mm')
         const groups = groupImportRows(classified)
         const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
         const { duplicates } = splitImportGroupsByExisting(groups, keys)
         setImportDuplicates(duplicates)
         setImportDuplicateDetails(details)
         setImportOrphanCount(orphanCount)
+        importCheckCacheRef.current = { fileName: file.name, groupsCount: groups.length, keys, details, orphanCount }
         if (orphanCount > 0) {
           loadMsg += ` Wykryto ${orphanCount} operacji z usuniętych importów – zostaną wyczyszczone przed zapisem.`
         }
@@ -5761,11 +5767,14 @@ function App() {
           }).join(', ')
           loadMsg += ` W bazie jest już ${duplicates.length} aktywnych dokumentów – przy zapisie zostaną pominięte. Np.: ${examples}${duplicates.length > 5 ? '…' : ''}.`
         }
-        const suggestions = await suggestFrozenK03UnfreezeAfterImport(supabase, groups)
-        setK03UnfreezeSuggestions(suggestions)
-        if (suggestions.length) {
-          loadMsg += ` Możliwe konflikty z ${suggestions.length} zamrożonymi K03 – sprawdź baner przed zapisem.`
-        }
+        void suggestFrozenK03UnfreezeAfterImport(supabase, groups)
+          .then(suggestions => {
+            setK03UnfreezeSuggestions(suggestions)
+            if (suggestions.length) {
+              setMessage(prev => `${prev}${prev ? ' ' : ''}Możliwe konflikty z ${suggestions.length} zamrożonymi K03 – sprawdź baner przed zapisem.`)
+            }
+          })
+          .catch(() => {})
       }
       setMessage(loadMsg)
     } catch (err) {
@@ -6575,6 +6584,33 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  async function runImportDataCleanup() {
+    if (!supabase) return
+    if (!isAdmin(authProfile)) {
+      setMessage('Tylko administrator może czyścić pozostałości importów.')
+      return
+    }
+    if (!window.confirm('Usunąć z bazy operacje, partie i FIFO powiązane z importami oznaczonymi jako USUNIĘTE?\n\nTo naprawia sytuację, gdy po „Usuń import” dane nadal blokują ponowny zapis.')) return
+    setImportCleaning(true)
+    try {
+      const cleanup = await cleanupOrphanedDeletedImports(supabase)
+      const msg = formatCleanupResult(cleanup)
+      setMessage(msg)
+      if (cleanup?.needsMigration) return
+      await Promise.all([
+        loadImports(),
+        loadFifoData(),
+        loadHaccpDocs(),
+        loadK03TraceData(),
+        loadPzManagementData()
+      ])
+    } catch (err) {
+      setMessage(`Błąd sprzątania: ${err?.message || err}. Uruchom w Supabase: JEDNORAZOWE-wyczysc-osierocone-importy.sql`)
+    } finally {
+      setImportCleaning(false)
+    }
+  }
+
   async function deleteImportedFile(fileId, fileNameForConfirm) {
     if (!supabase) return
     if (!ensureCanDelete()) return
@@ -6603,8 +6639,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setFileName('')
       try {
         const cleanup = await cleanupOrphanedDeletedImports(supabase)
-        if (cleanup?.imports_purged > 0) {
-          setMessage(`Import usunięty. Dodatkowo wyczyszczono ${cleanup.imports_purged} osieroconych import(ów): ${cleanup.operations_removed || 0} operacji, ${cleanup.lots_removed || 0} partii.`)
+        if (cleanup?.needsMigration) {
+          setMessage(`${formatCleanupResult(cleanup)} Import usunięty z listy — dane w bazie mogą wymagać ręcznego SQL.`)
+        } else if ((cleanup?.imports_purged || 0) > 0 || (cleanup?.lots_removed || 0) > 0) {
+          setMessage(`Import usunięty. ${formatCleanupResult(cleanup)}`)
         }
       } catch (_) { /* v40 migration may not be deployed yet */ }
       await loadImports()
@@ -7041,15 +7079,37 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     try {
       const groups = groupImportRows(filteredRows)
-      setImportProgress('Sprzątanie po usuniętych importach…')
-      try {
-        const cleanup = await cleanupOrphanedDeletedImports(supabase)
-        if (cleanup?.imports_purged > 0) {
-          setMessage(`Wyczyszczono pozostałości ${cleanup.imports_purged} usuniętego importu (${cleanup.operations_removed || 0} operacji, ${cleanup.lots_removed || 0} partii). Trwa zapis…`)
+      let keys
+      let details
+      let orphanCount
+      const cache = importCheckCacheRef.current
+      const cacheHit = cache && cache.fileName === fileName && cache.groupsCount === groups.length
+
+      if (cacheHit) {
+        keys = cache.keys
+        details = cache.details
+        orphanCount = cache.orphanCount
+        setImportProgress('Przygotowanie zapisu (duplikaty z wczytania)…')
+      } else {
+        setImportProgress('Sprawdzanie duplikatów…')
+        ;({ keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups))
+      }
+
+      if (orphanCount > 0) {
+        setImportProgress('Sprzątanie po usuniętych importach…')
+        try {
+          const cleanup = await cleanupOrphanedDeletedImports(supabase)
+          if (cleanup?.needsMigration) {
+            setMessage('Uwaga: brak migracji v40 – osierocone wpisy mogą pozostać. Uruchom migrację w Supabase. Trwa zapis…')
+          } else if ((cleanup?.imports_purged || 0) > 0 || (cleanup?.lots_removed || 0) > 0) {
+            setMessage(`${formatCleanupResult(cleanup)} Trwa zapis…`)
+            ;({ keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups))
+          }
+        } catch (cleanErr) {
+          setMessage(`Sprzątanie nie powiodło się: ${cleanErr?.message || cleanErr}. Kontynuuję zapis – uruchom JEDNORAZOWE-wyczysc-osierocone-importy.sql w Supabase.`)
         }
-      } catch (_) { /* v40 migration may not be deployed yet */ }
-      setImportProgress('Sprawdzanie duplikatów…')
-      const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
+      }
+
       const { duplicates, fresh: groupsToImport } = splitImportGroupsByExisting(groups, keys)
       setImportDuplicates(duplicates)
       setImportDuplicateDetails(details)
@@ -7067,53 +7127,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         onProgress: setImportProgress
       })
 
-      setFifoRecalculating(true)
-      let fifoAllocations = 0
-      let shortageCount = 0
-      let shortageKg = 0
-      let fifoWarning = ''
-      try {
-        setImportProgress('Przeliczanie FIFO…')
-        const snaps = supabase ? await loadK03Snapshots(supabase) : []
-        const frozenKeys = frozenKeysFromSnapshots(snaps)
-        const fifoResult = await recalculateFifoIncremental(supabase, { frozenKeys })
-        if (fifoResult.ok) {
-          fifoAllocations = fifoResult.allocationCount ?? rozchodItems
-          shortageCount = (fifoResult.shortages || []).length
-          shortageKg = (fifoResult.shortages || []).reduce((sum, s) => sum + Number(s.shortage || 0), 0)
-        }
-      } catch (fifoErr) {
-        fifoWarning = ` FIFO: ${fifoErr?.message || fifoErr}.`
-      } finally {
-        setFifoRecalculating(false)
-      }
+      const importMsgBase =
+        `Import zapisany. Dokumentów: ${importedOperations}, pozycji: ${importedItems}, partii: ${createdLots}. Pominięto duplikatów: ${duplicateCount}.` +
+        (orphanCount ? ` Wyczyszczono osierocone wpisy z usuniętych importów.` : '') +
+        (duplicateCount ? ` Przykłady pominiętych: ${duplicates.slice(0, 5).map(d => d.documentNo).join(', ')}${duplicateCount > 5 ? '…' : ''}.` : '')
 
-      const importMsg =
-        `Import zakończony. Zaimportowano dokumentów: ${importedOperations}, pozycji: ${importedItems}, utworzono partii: ${createdLots}, rozliczeń FIFO: ${fifoAllocations}. Pominięto duplikatów: ${duplicateCount}.` +
-        (orphanCount ? ` Zignorowano ${orphanCount} osieroconych operacji (usunięte importy).` : '') +
-        (duplicateCount ? ` Przykłady pominiętych: ${duplicates.slice(0, 5).map(d => d.documentNo).join(', ')}${duplicateCount > 5 ? '…' : ''}.` : '') +
-        (shortageCount ? ` Uwaga: brakło towaru FIFO w ${shortageCount} pozycjach, razem ${shortageKg.toLocaleString('pl-PL')} kg.` : '') +
-        fifoWarning
+      const importMsg = `${importMsgBase} Wejdź w PZ/FIFO → „Uzupełnij braki FIFO”, aby rozliczyć wydania.`
 
-      setImportProgress('Odświeżanie widoków…')
-      const suggestions = supabase ? await suggestFrozenK03UnfreezeAfterImport(supabase, groups).catch(() => []) : []
-      setK03UnfreezeSuggestions(suggestions)
-
-      setMessage(
-        importMsg +
-        (suggestions.length ? ` Sprawdź ${suggestions.length} zamrożonych K03 do ewentualnego odmrożenia (baner poniżej).` : '')
-      )
-      await Promise.all([
-        loadFifoData(),
-        loadK03TraceData(),
-        loadImports(),
-        loadHaccpDocs(),
-        loadK03SnapshotsOnly(),
-        loadFifoChangeLog()
-      ])
+      setMessage(importMsg)
+      setImportProgress('')
+      importCheckCacheRef.current = null
+      await loadImports()
     } catch (err) {
       setMessage(formatImportNetworkError(err))
-    } finally {
       setImportSaving(false)
       setImportProgress('')
     }
@@ -7213,7 +7239,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Pobieramy tylko potrzebne pola: nr dokumentu/PZ, data wystawienia, ilość i produkt.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button></div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}</div>
 
       {rows.length > 0 && <>
         <div className="summary">
@@ -7239,7 +7265,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button></div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>

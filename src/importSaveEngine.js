@@ -4,13 +4,14 @@
 
 import { normalizeDocumentNo } from './excelImport.js'
 
-const OP_CHUNK = 40
-const ITEM_CHUNK = 80
-const NAME_CHUNK = 80
-const LOT_CONCURRENCY = 12
-const ITEM_LOT_UPDATE_CHUNK = 40
-const RETRY_ATTEMPTS = 4
-const RETRY_BASE_MS = 700
+const OP_CHUNK = 100
+const ITEM_CHUNK = 150
+const NAME_CHUNK = 100
+const LOT_RPC_CHUNK = 500
+const LOT_CONCURRENCY = 24
+const ITEM_LOT_UPDATE_CHUNK = 80
+const RETRY_ATTEMPTS = 3
+const RETRY_BASE_MS = 400
 
 async function runWithConcurrency(tasks, concurrency, onTick) {
   if (!tasks.length) return []
@@ -82,8 +83,8 @@ export async function getExistingOperationsForImport(client, groups) {
     }
   }
 
-  for (let i = 0; i < documentNos.length; i += 100) {
-    const chunk = documentNos.slice(i, i + 100)
+  for (let i = 0; i < documentNos.length; i += 200) {
+    const chunk = documentNos.slice(i, i + 200)
     const queryNos = [...new Set(chunk.flatMap(documentNoQueryVariants))]
     let data
     let error
@@ -150,11 +151,11 @@ async function insertInChunks(client, table, rows, select, chunkSize) {
   return out
 }
 
-async function fetchNamesInChunks(client, table, column, names) {
+async function fetchNamesInChunks(client, table, column, names, selectCols = '*') {
   const out = []
   for (let i = 0; i < names.length; i += NAME_CHUNK) {
     const chunk = names.slice(i, i + NAME_CHUNK)
-    const { data, error } = await withImportRetry(() => client.from(table).select('*').in(column, chunk))
+    const { data, error } = await withImportRetry(() => client.from(table).select(selectCols).in(column, chunk))
     if (error) throw error
     out.push(...(data || []))
   }
@@ -166,7 +167,7 @@ async function ensureProductIds(client, productNames, deps) {
   const { normalizeText, baseCodeForProduct, productGroupForName } = deps
   const map = new Map()
 
-  const existing = await fetchNamesInChunks(client, 'products', 'name', unique)
+  const existing = await fetchNamesInChunks(client, 'products', 'name', unique, 'id, name, code')
   for (const p of existing) map.set(normalizeText(p.name), p.id)
 
   const missing = unique.filter(name => !map.has(normalizeText(name)))
@@ -224,16 +225,14 @@ async function ensureContractorIds(client, contractorNames) {
   const map = new Map()
   if (!unique.length) return map
 
-  const existing = await fetchNamesInChunks(client, 'contractors', 'name', unique)
+  const existing = await fetchNamesInChunks(client, 'contractors', 'name', unique, 'id, name')
   for (const c of existing) map.set(c.name, c.id)
 
-  for (const name of unique) {
-    if (map.has(name)) continue
-    const { data: inserted, error } = await withImportRetry(() =>
-      client.from('contractors').insert({ name, contractor_type: 'oba' }).select('id').single()
-    )
-    if (error) throw error
-    map.set(name, inserted.id)
+  const missing = unique.filter(name => !map.has(name))
+  if (missing.length) {
+    const rows = missing.map(name => ({ name, contractor_type: 'oba' }))
+    const inserted = await insertInChunks(client, 'contractors', rows, 'id, name', 50)
+    for (const c of inserted) map.set(c.name, c.id)
   }
   return map
 }
@@ -266,12 +265,43 @@ async function createIncomingLot(client, { productId, operationId, operationDate
   return lot.id
 }
 
+async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
+  let total = 0
+  const chunkCount = Math.ceil(incomingItems.length / LOT_RPC_CHUNK)
+  for (let i = 0; i < incomingItems.length; i += LOT_RPC_CHUNK) {
+    const slice = incomingItems.slice(i, i + LOT_RPC_CHUNK)
+    if (chunkCount === 1) {
+      notify(`Tworzenie ${incomingItems.length} partii…`)
+    } else {
+      notify(`Tworzenie partii ${Math.min(i + slice.length, incomingItems.length)} / ${incomingItems.length}…`)
+    }
+    const payload = slice.map(meta => ({
+      item_id: meta.itemId,
+      product_id: meta.productId,
+      operation_id: meta.opId,
+      operation_date: meta.group.issueDate,
+      qty: meta.itemQty,
+      product_group: deps.productGroupForName(meta.row.productName)
+    }))
+    const { data, error } = await withImportRetry(() =>
+      client.rpc('create_incoming_lots_batch', { p_items: payload })
+    )
+    if (error) throw error
+    total += Number(data || 0)
+  }
+  return total
+}
+
 async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
   if (!incomingItems.length) return 0
 
-  let createdLots = 0
-  notify(`Tworzenie partii 0 / ${incomingItems.length}…`)
+  try {
+    return await createIncomingLotsBatchRpc(client, incomingItems, deps, notify)
+  } catch (err) {
+    if (!/function.*does not exist|create_incoming_lots_batch/i.test(String(err?.message || ''))) throw err
+  }
 
+  notify(`Tworzenie partii 0 / ${incomingItems.length}… (tryb równoległy)`)
   const lotIds = await runWithConcurrency(
     incomingItems.map(meta => () => createIncomingLot(client, {
       productId: meta.productId,
@@ -287,8 +317,6 @@ async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
     }
   )
 
-  createdLots = lotIds.length
-
   for (let i = 0; i < incomingItems.length; i += ITEM_LOT_UPDATE_CHUNK) {
     const slice = incomingItems.slice(i, i + ITEM_LOT_UPDATE_CHUNK)
     await Promise.all(slice.map((meta, j) =>
@@ -298,7 +326,7 @@ async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
     ))
   }
 
-  return createdLots
+  return lotIds.length
 }
 
 /**
@@ -342,98 +370,91 @@ export async function saveImportToSupabase(client, {
   let createdLots = 0
   let rozchodItems = 0
 
-  const opKeyToId = new Map()
+  notify(`Zapis ${groupsToImport.length} dokumentów…`)
+  const allOpRows = groupsToImport.map(group => ({
+    operation_type: group.operation,
+    operation_date: group.issueDate,
+    document_no: group.documentNo,
+    invoice_no: group.invoiceNo,
+    contractor_id: group.contractorName ? contractorMap.get(group.contractorName) : null,
+    imported_file_id: imported.id,
+    notes: group.notes || null
+  }))
 
-  for (let i = 0; i < groupsToImport.length; i += OP_CHUNK) {
-    const chunk = groupsToImport.slice(i, i + OP_CHUNK)
-    notify(`Zapis dokumentów ${Math.min(i + OP_CHUNK, groupsToImport.length)} / ${groupsToImport.length}…`)
-
-    const opRows = chunk.map(group => ({
-      operation_type: group.operation,
-      operation_date: group.issueDate,
-      document_no: group.documentNo,
-      invoice_no: group.invoiceNo,
-      contractor_id: group.contractorName ? contractorMap.get(group.contractorName) : null,
-      imported_file_id: imported.id,
-      notes: group.notes || null
-    }))
-
-    let insertedOps
-    try {
-      insertedOps = await insertInChunks(client, 'operations', opRows, 'id, operation_type, document_no', OP_CHUNK)
-    } catch (err) {
-      if (!String(err?.message || '').includes('duplicate')) throw err
-      insertedOps = []
-      for (const row of opRows) {
-        try {
-          const { data: one, error: oneErr } = await withImportRetry(() =>
-            client.from('operations').insert(row).select('id, operation_type, document_no').single()
-          )
-          if (oneErr) {
-            if (String(oneErr.message || '').includes('duplicate')) continue
-            throw oneErr
-          }
-          insertedOps.push(one)
-        } catch (inner) {
-          if (String(inner?.message || '').includes('duplicate')) continue
-          throw inner
+  let insertedOps
+  try {
+    insertedOps = await insertInChunks(client, 'operations', allOpRows, 'id, operation_type, document_no', OP_CHUNK)
+  } catch (err) {
+    if (!String(err?.message || '').includes('duplicate')) throw err
+    insertedOps = []
+    for (const row of allOpRows) {
+      try {
+        const { data: one, error: oneErr } = await withImportRetry(() =>
+          client.from('operations').insert(row).select('id, operation_type, document_no').single()
+        )
+        if (oneErr) {
+          if (String(oneErr.message || '').includes('duplicate')) continue
+          throw oneErr
         }
+        insertedOps.push(one)
+      } catch (inner) {
+        if (String(inner?.message || '').includes('duplicate')) continue
+        throw inner
       }
     }
+  }
 
-    for (const op of insertedOps) {
-      opKeyToId.set(operationImportKey({ operation: op.operation_type, documentNo: op.document_no }), op.id)
-      importedOperations += 1
+  const opKeyToId = new Map()
+  for (const op of insertedOps) {
+    opKeyToId.set(operationImportKey({ operation: op.operation_type, documentNo: op.document_no }), op.id)
+    importedOperations += 1
+  }
+
+  notify('Zapis pozycji…')
+  const allItemRows = []
+  const allItemMeta = []
+
+  for (const group of groupsToImport) {
+    const opId = opKeyToId.get(operationImportKey(group))
+    if (!opId) continue
+
+    for (const row of group.items) {
+      const productId = productMap.get(deps.normalizeText(row.productName || 'Produkt do dopasowania'))
+      const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
+      const itemQty = Math.abs(Number(row.qty) || 0)
+      if (itemQty <= 0 || !productId) continue
+
+      allItemRows.push({
+        operation_id: opId,
+        product_id: productId,
+        qty: itemQty,
+        unit: 'kg',
+        direction,
+        raw_product_name: row.productName
+      })
+      allItemMeta.push({ direction, group, row, productId, itemQty, opId })
     }
+  }
 
-    const itemRows = []
-    const itemMeta = []
-
-    for (const group of chunk) {
-      const opId = opKeyToId.get(operationImportKey(group))
-      if (!opId) continue
-
-      for (const row of group.items) {
-        const productId = productMap.get(deps.normalizeText(row.productName || 'Produkt do dopasowania'))
-        const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
-        const itemQty = Math.abs(Number(row.qty) || 0)
-        if (itemQty <= 0 || !productId) continue
-
-        itemRows.push({
-          operation_id: opId,
-          product_id: productId,
-          qty: itemQty,
-          unit: 'kg',
-          direction,
-          raw_product_name: row.productName
-        })
-        itemMeta.push({ direction, group, row, productId, itemQty, opId })
-      }
-    }
-
-    if (!itemRows.length) continue
-
-    notify(`Zapis pozycji (${itemRows.length} w tej partii)…`)
-    const insertedItems = await insertInChunks(client, 'operation_items', itemRows, 'id', ITEM_CHUNK)
-
-    const incomingItems = []
+  const allIncomingItems = []
+  if (allItemRows.length) {
+    const insertedItems = await insertInChunks(client, 'operation_items', allItemRows, 'id', ITEM_CHUNK)
     for (let j = 0; j < insertedItems.length; j += 1) {
       const item = insertedItems[j]
-      const meta = itemMeta[j]
+      const meta = allItemMeta[j]
       if (!item?.id || !meta) continue
       importedItems += 1
-
       if (meta.direction === 'rozchod') {
         rozchodItems += 1
         continue
       }
-
-      incomingItems.push({ ...meta, itemId: item.id })
+      allIncomingItems.push({ ...meta, itemId: item.id })
     }
+  }
 
-    if (incomingItems.length) {
-      createdLots += await attachLotsToIncomingItems(client, incomingItems, deps, notify)
-    }
+  if (allIncomingItems.length) {
+    notify(`Tworzenie ${allIncomingItems.length} partii…`)
+    createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
   }
 
   const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
@@ -455,8 +476,7 @@ export function formatImportNetworkError(err) {
   if (/lots_lot_no_key|duplicate key.*lot/i.test(msg)) {
     return (
       'Błąd: numer partii już istnieje w bazie (pozostałość po wcześniejszym imporcie). ' +
-      'Uruchom w Supabase SQL: 2026-v40-import-delete-full-purge.sql, potem w aplikacji: Importy → Odśwież i spróbuj ponownie. ' +
-      'Usunięty import musi kasować wszystkie partie – po migracji v40 będzie to naprawione automatycznie.'
+      'Kliknij „Wyczyść pozostałości usuniętych importów” (admin) lub uruchom w Supabase SQL: JEDNORAZOWE-wyczysc-osierocone-importy.sql, potem Ctrl+F5 i spróbuj ponownie.'
     )
   }
   if (isTransientNetworkError(err)) {
@@ -475,9 +495,22 @@ export async function cleanupOrphanedDeletedImports(client) {
   )
   if (error) {
     if (/function.*does not exist/i.test(String(error.message || ''))) {
-      return { imports_purged: 0, skipped: true }
+      return { imports_purged: 0, skipped: true, needsMigration: true }
     }
     throw error
   }
   return data || { imports_purged: 0 }
+}
+
+export function formatCleanupResult(cleanup) {
+  if (cleanup?.needsMigration || cleanup?.skipped) {
+    return 'Brak funkcji sprzątania w bazie. Uruchom w Supabase SQL: supabase/JEDNORAZOWE-wyczysc-osierocone-importy.sql (oraz 2026-v40-import-delete-full-purge.sql).'
+  }
+  const ops = cleanup?.operations_removed ?? 0
+  const lots = cleanup?.lots_removed ?? 0
+  const imports = cleanup?.imports_purged ?? 0
+  if (!imports && !lots && !ops) {
+    return 'Sprzątanie: nie znaleziono pozostałości po usuniętych importach (partie mogą pochodzić z aktywnego importu — sprawdź Rejestr importów).'
+  }
+  return `Wyczyszczono: ${imports} import(ów), ${ops} operacji, ${lots} partii.`
 }

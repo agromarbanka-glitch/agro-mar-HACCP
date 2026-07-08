@@ -105,6 +105,54 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.purge_orphan_import_lots()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_lot_ids uuid[];
+  v_count integer := 0;
+BEGIN
+  SELECT COALESCE(array_agg(DISTINCT lot_id), ARRAY[]::uuid[]) INTO v_lot_ids
+  FROM (
+    SELECT l.id AS lot_id
+    FROM public.lots l
+    WHERE l.source_operation_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM public.operations o WHERE o.id = l.source_operation_id)
+    UNION
+    SELECT l.id
+    FROM public.lots l
+    JOIN public.operations o ON o.id = l.source_operation_id
+    JOIN public.imported_files f ON f.id = o.imported_file_id
+    WHERE f.deleted_at IS NOT NULL
+  ) q;
+
+  IF COALESCE(array_length(v_lot_ids, 1), 0) = 0 THEN
+    RETURN 0;
+  END IF;
+
+  SELECT COUNT(*) INTO v_count FROM public.lots WHERE id = ANY(v_lot_ids);
+
+  DELETE FROM public.haccp_document_history
+  WHERE document_id IN (SELECT id FROM public.haccp_documents WHERE lot_id = ANY(v_lot_ids));
+
+  DELETE FROM public.haccp_documents WHERE lot_id = ANY(v_lot_ids);
+
+  DELETE FROM public.fifo_allocations
+  WHERE source_lot_id = ANY(v_lot_ids) OR output_lot_id = ANY(v_lot_ids);
+
+  DELETE FROM public.pz_fifo_change_log WHERE lot_id = ANY(v_lot_ids);
+  UPDATE public.operation_items SET lot_id = NULL WHERE lot_id = ANY(v_lot_ids);
+  DELETE FROM public.lot_location_history WHERE lot_id = ANY(v_lot_ids);
+  DELETE FROM public.lot_change_history WHERE lot_id = ANY(v_lot_ids);
+  DELETE FROM public.lots WHERE id = ANY(v_lot_ids);
+
+  RETURN v_count;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.cleanup_orphaned_deleted_import_data()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -117,6 +165,7 @@ DECLARE
   v_total_ops integer := 0;
   v_total_lots integer := 0;
   v_imports integer := 0;
+  v_orphan_lots integer := 0;
 BEGIN
   FOR v_import IN
     SELECT f.id
@@ -132,10 +181,14 @@ BEGIN
     v_total_lots := v_total_lots + COALESCE((v_result->>'lots')::integer, 0);
   END LOOP;
 
+  v_orphan_lots := public.purge_orphan_import_lots();
+  v_total_lots := v_total_lots + COALESCE(v_orphan_lots, 0);
+
   RETURN jsonb_build_object(
     'imports_purged', v_imports,
     'operations_removed', v_total_ops,
-    'lots_removed', v_total_lots
+    'lots_removed', v_total_lots,
+    'orphan_lots_removed', v_orphan_lots
   );
 END;
 $$;
@@ -202,6 +255,8 @@ REVOKE ALL ON FUNCTION public.purge_import_excel_data(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.cleanup_orphaned_deleted_import_data() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.delete_import_excel_admin(uuid, text, text) FROM PUBLIC;
 
+GRANT EXECUTE ON FUNCTION public.purge_orphan_import_lots() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.purge_orphan_import_lots() TO anon;
 GRANT EXECUTE ON FUNCTION public.purge_import_excel_data(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.cleanup_orphaned_deleted_import_data() TO authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_import_excel_admin(uuid, text, text) TO authenticated;
