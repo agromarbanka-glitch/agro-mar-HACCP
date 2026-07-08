@@ -20,7 +20,7 @@ export const R_MONTHLY_CONFIGS = {
     })),
     columnLabel: 'Pracownicy',
     addColumnLabel: 'Dodaj pracownika',
-    createHint: 'Cały miesiąc – pracownicy jako kolumny u góry (jak we wzorze Word), dni robocze z godz. 8:00 i P odzieży, niedziele puste (czerwone).',
+    createHint: 'Cały miesiąc – pracownicy jako kolumny u góry (jak we wzorze Word). Opcja „Z K01” dodaje pracowników z kartoteki przyjęć i ustawia P w dniach, gdy przyjmowali surowiec.',
     signLabel: 'Podpis kontrolującego'
   },
   R03: {

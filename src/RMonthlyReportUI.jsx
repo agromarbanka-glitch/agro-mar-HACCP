@@ -26,6 +26,7 @@ import {
   r00ResolveColumns,
   r00ClothingMap,
   r00ColumnBulkClothing,
+  buildR00K01Context,
   R00_DEFAULT_GODZINA
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
@@ -67,6 +68,7 @@ export function RMonthlyReportSection({
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
   const [newVehicleReg, setNewVehicleReg] = useState('')
   const [r00PickEmployee, setR00PickEmployee] = useState('')
+  const [r00FillFromK01, setR00FillFromK01] = useState(true)
 
   if (!cfg) return null
 
@@ -116,8 +118,9 @@ export function RMonthlyReportSection({
       }
       const r03Options = isR03MultiVehicle
         ? { vehicleRegNo: String(newVehicleReg || '').trim(), registerKey: makeR03RegisterKey(newVehicleReg) }
-        : {}
+        : (code === 'R00' && r00FillFromK01 ? { fillFromK01: true } : {})
       const r03Columns = isR03MultiVehicle ? [buildR03VehicleColumn(newVehicleReg)] : columnDefs
+      const r00K01Ctx = code === 'R00' && r00FillFromK01 ? buildR00K01Context(haccpDocs, newMonth) : null
       const payloads = buildRMonthlyMonthPayloads(code, newMonth, defaultEmployee, r03Columns, haccpDocs, r03Options)
       const skipDupCheck = ['single-month', 'register-rows', 'quarter-trend', 'station-matrix', 'r04-control'].includes(cfg.layout) || isR03MultiVehicle
       const registerKey = r03Options.registerKey
@@ -142,7 +145,16 @@ export function RMonthlyReportSection({
         await loadHaccpDocs()
       }
       if (isR03MultiVehicle) setNewVehicleReg('')
-      setMessage(`${code}: utworzono kartotekę (${rows.length} wpisów)${isR03MultiVehicle ? ` – ${r03Options.vehicleRegNo}, kierowca: ${defaultEmployee}` : defaultEmployee ? `, podpis: ${defaultEmployee}` : ''}.`)
+      if (code === 'R00' && r00K01Ctx?.columns?.length) setColumnDefs(r00K01Ctx.columns.map(c => ({ ...c })))
+      let extra = ''
+      if (code === 'R00' && r00FillFromK01) {
+        if (r00K01Ctx?.employeeCount) {
+          extra = ` — z K01: ${r00K01Ctx.employeeCount} pracowników, P w ${r00K01Ctx.receiptDays} dniach przyjęć (${r00K01Ctx.k01Count} wpisów K01).`
+        } else {
+          extra = ' — brak podpisów przyjmujących w K01 za ten miesiąc (utworzono domyślny układ).'
+        }
+      }
+      setMessage(`${code}: utworzono kartotekę (${rows.length} wpisów)${isR03MultiVehicle ? ` – ${r03Options.vehicleRegNo}, kierowca: ${defaultEmployee}` : defaultEmployee ? `, podpis: ${defaultEmployee}` : ''}${extra}.`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
     } finally {
@@ -272,7 +284,7 @@ export function RMonthlyReportSection({
             <input value={newColumnLabel} onChange={e => { setNewColumnLabel(e.target.value); setR00PickEmployee('') }} placeholder="Imię i nazwisko" />
           </label>
           <button type="button" className="secondary" onClick={addDefaultColumn}>Dodaj pracownika</button>
-          <p className="hint">Domyślnie 8 kolumn; możesz dodać dowolnie wiele. Dni robocze: godz. {R00_DEFAULT_GODZINA}, odzież P.</p>
+          <p className="hint">Domyślnie 8 kolumn; możesz dodać dowolnie wiele. Dni robocze: godz. {R00_DEFAULT_GODZINA}. Przy tworzeniu kartoteki zaznacz „Z K01”, aby dodać pracowników z przyjęć i ustawić P w dniach przyjęcia surowca.</p>
         </div>
       ) : code === 'R08' ? (
         <div className="r13-add-column-row">
@@ -352,6 +364,12 @@ export function RMonthlyReportSection({
             {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
           </select>
         </label>
+        {code === 'R00' && (
+          <label className="r00-k01-fill-toggle">
+            <input type="checkbox" checked={r00FillFromK01} onChange={e => setR00FillFromK01(e.target.checked)} />
+            Uzupełnij pracowników i dni przyjęć z K01
+          </label>
+        )}
         <button onClick={createMonth} disabled={creating}>{creating ? 'Tworzenie…' : isR03MultiVehicle ? 'Utwórz kartotekę samochodu' : 'Utwórz kartotekę'}</button>
       </div>
       <p className="hint">Silnik kartotek: {R_MONTHLY_ENGINE_VERSION}</p>

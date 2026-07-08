@@ -3,6 +3,7 @@
  */
 import { normalizePn } from './haccpFormsEngine'
 import { calendarDaysInMonth, isSundayDate } from './r13Engine'
+import { k01DocsByDay } from './k02Engine'
 import {
   buildR11MonthPayloads, buildR11SingleDayPayload, buildR11PrintHtml, buildR11ExcelRows,
   r11ColumnsFromDocs
@@ -84,6 +85,69 @@ export function defaultR00DayData(columns, sunday) {
   return {
     godzina: sunday ? '' : R00_DEFAULT_GODZINA,
     clothing: Object.fromEntries(cols.map(c => [c.id, sunday ? '' : 'P'])),
+    columns: cols
+  }
+}
+
+/** Podpis przyjmującego z kartoteki K01. */
+export function k01SignatoryName(doc) {
+  return String(doc?.signed_by_operator || doc?.data?.podpis_przyjmujacego || '').trim()
+}
+
+/**
+ * Przygotowanie kolumn i odzieży R00 na podstawie K01 w danym miesiącu.
+ * P tylko w dniach, gdy pracownik widnieje jako przyjmujący surowiec.
+ */
+export function buildR00K01Context(k01Docs, yearMonth) {
+  const monthK01 = (k01Docs || []).filter(d =>
+    d.document_type === 'K01' && String(d.document_date || '').slice(0, 7) === yearMonth
+  )
+  const byDay = k01DocsByDay(monthK01)
+  const nameToColId = new Map()
+  const columns = []
+  const sorted = [...monthK01].sort((a, b) =>
+    String(a.document_date || '').localeCompare(String(b.document_date || ''))
+    || k01SignatoryName(a).localeCompare(k01SignatoryName(b), 'pl')
+  )
+  for (const doc of sorted) {
+    const name = k01SignatoryName(doc)
+    if (!name) continue
+    const key = name.toLowerCase()
+    if (!nameToColId.has(key)) {
+      const col = r00MakeEmployeeColumn(name, columns)
+      nameToColId.set(key, col.id)
+      columns.push(col)
+    }
+  }
+  const clothingByDay = new Map()
+  for (const [day, docs] of byDay.entries()) {
+    const dayClothing = {}
+    for (const d of docs) {
+      const name = k01SignatoryName(d)
+      const colId = nameToColId.get(name.toLowerCase())
+      if (colId) dayClothing[colId] = 'P'
+    }
+    clothingByDay.set(day, dayClothing)
+  }
+  return {
+    columns,
+    clothingByDay,
+    k01Count: monthK01.length,
+    employeeCount: columns.length,
+    receiptDays: clothingByDay.size
+  }
+}
+
+export function defaultR00DayDataFromK01(columns, sunday, date, clothingByDay) {
+  const cols = (columns || []).map(c => ({ ...c }))
+  const dayClothing = clothingByDay?.get?.(date) || {}
+  const clothing = Object.fromEntries(cols.map(c => {
+    if (sunday) return [c.id, '']
+    return [c.id, dayClothing[c.id] === 'P' ? 'P' : '']
+  }))
+  return {
+    godzina: sunday ? '' : R00_DEFAULT_GODZINA,
+    clothing,
     columns: cols
   }
 }
@@ -537,6 +601,10 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
   }
 
   let cols = (columnDefs || []).map(c => ({ ...c }))
+  const r00K01Ctx = (cfg.layout === 'daily-employees' && options.fillFromK01)
+    ? buildR00K01Context(allDocs, yearMonth)
+    : null
+  if (r00K01Ctx?.columns?.length) cols = r00K01Ctx.columns.map(c => ({ ...c }))
   if (!cols.length && cfg.layout === 'daily-employees') cols = defaultR00Columns(8)
   if (cfg.layout === 'daily-employees') saveRMonthlyColumns(code, cols)
   return calendarDaysInMonth(yearMonth).map((day, i) => {
@@ -550,7 +618,9 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
     }
     let data = { ...base }
     if (cfg.layout === 'daily-employees') {
-      data = { ...base, ...defaultR00DayData(cols, sunday) }
+      data = r00K01Ctx?.columns?.length
+        ? { ...base, ...defaultR00DayDataFromK01(cols, sunday, day.date, r00K01Ctx.clothingByDay), auto_source: 'k01' }
+        : { ...base, ...defaultR00DayData(cols, sunday) }
     } else if (cfg.layout === 'grid-mcd-agent') {
       data = { ...base, cells: defaultDayCells(cols, sunday, cfg.layout) }
     } else if (cfg.layout === 'daily-calibration') {

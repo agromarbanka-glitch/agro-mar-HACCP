@@ -636,6 +636,8 @@ button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); 
 .r00-bulk-clothing { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
 .r00-bulk-clothing small { font-size: 10px; color: #64748b; }
 .r00-bulk-clothing .mini-select { width: 100%; font-size: 11px; font-weight: 600; }
+.r00-k01-fill-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; align-self: flex-end; margin-bottom: 4px; }
+.r00-k01-fill-toggle input { width: auto; }
 .kartoteka-print-badge {
   display: inline-block;
   width: 9px;
