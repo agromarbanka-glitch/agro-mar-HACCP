@@ -452,6 +452,13 @@ export async function saveImportToSupabase(client, {
 
 export function formatImportNetworkError(err) {
   const msg = String(err?.message || err || '')
+  if (/lots_lot_no_key|duplicate key.*lot/i.test(msg)) {
+    return (
+      'Błąd: numer partii już istnieje w bazie (pozostałość po wcześniejszym imporcie). ' +
+      'Uruchom w Supabase SQL: 2026-v40-import-delete-full-purge.sql, potem w aplikacji: Importy → Odśwież i spróbuj ponownie. ' +
+      'Usunięty import musi kasować wszystkie partie – po migracji v40 będzie to naprawione automatycznie.'
+    )
+  }
   if (isTransientNetworkError(err)) {
     return (
       'Błąd połączenia z Supabase (NetworkError). Sprawdź internet i czy projekt Supabase nie jest wstrzymany. ' +
@@ -459,4 +466,18 @@ export function formatImportNetworkError(err) {
     )
   }
   return `Błąd zapisu do Supabase: ${msg}`
+}
+
+/** Usuwa operacje/partie/FIFO powiązane z importami oznaczonymi jako usunięte. */
+export async function cleanupOrphanedDeletedImports(client) {
+  const { data, error } = await withImportRetry(() =>
+    client.rpc('cleanup_orphaned_deleted_import_data')
+  )
+  if (error) {
+    if (/function.*does not exist/i.test(String(error.message || ''))) {
+      return { imports_purged: 0, skipped: true }
+    }
+    throw error
+  }
+  return data || { imports_purged: 0 }
 }

@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -5752,7 +5752,7 @@ function App() {
         setImportDuplicateDetails(details)
         setImportOrphanCount(orphanCount)
         if (orphanCount > 0) {
-          loadMsg += ` Znaleziono ${orphanCount} osieroconych operacji z usuniętych importów – nie blokują ponownego zapisu.`
+          loadMsg += ` Wykryto ${orphanCount} operacji z usuniętych importów – zostaną wyczyszczone przed zapisem.`
         }
         if (duplicates.length) {
           const examples = duplicates.slice(0, 5).map(d => {
@@ -6601,6 +6601,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setImportPreview([])
       setRows([])
       setFileName('')
+      try {
+        const cleanup = await cleanupOrphanedDeletedImports(supabase)
+        if (cleanup?.imports_purged > 0) {
+          setMessage(`Import usunięty. Dodatkowo wyczyszczono ${cleanup.imports_purged} osieroconych import(ów): ${cleanup.operations_removed || 0} operacji, ${cleanup.lots_removed || 0} partii.`)
+        }
+      } catch (_) { /* v40 migration may not be deployed yet */ }
       await loadImports()
       await loadFifoData()
       await loadHaccpDocs()
@@ -7035,6 +7041,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     try {
       const groups = groupImportRows(filteredRows)
+      setImportProgress('Sprzątanie po usuniętych importach…')
+      try {
+        const cleanup = await cleanupOrphanedDeletedImports(supabase)
+        if (cleanup?.imports_purged > 0) {
+          setMessage(`Wyczyszczono pozostałości ${cleanup.imports_purged} usuniętego importu (${cleanup.operations_removed || 0} operacji, ${cleanup.lots_removed || 0} partii). Trwa zapis…`)
+        }
+      } catch (_) { /* v40 migration may not be deployed yet */ }
       setImportProgress('Sprawdzanie duplikatów…')
       const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
       const { duplicates, fresh: groupsToImport } = splitImportGroupsByExisting(groups, keys)
@@ -7244,7 +7257,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {importDuplicates.length > 0 && <>
         <h3>Duplikaty w bazie ({importDuplicates.length} dokumentów)</h3>
         <p className="hint">Te numery PZ/WZ są już w aktywnych operacjach magazynowych. Przy zapisie zostaną pominięte. Jeśli usunąłeś importy, a lista nadal się pokazuje – odśwież stronę i wgraj plik ponownie.</p>
-        {importOrphanCount > 0 && <p className="hint">Osierocone operacje z usuniętych importów ({importOrphanCount}) nie blokują zapisu.</p>}
+        {importOrphanCount > 0 && <p className="hint">Wykryto {importOrphanCount} operacji z usuniętych importów – przy zapisie zostaną automatycznie wyczyszczone (migracja v40).</p>}
         <div className="table-wrap small"><table>
           <thead><tr><th>Typ</th><th>Nr dokumentu</th><th>Data w pliku</th><th>Pozycji</th><th>Źródło w bazie</th></tr></thead>
           <tbody>{importDuplicates.slice(0, 50).map((g, i) => {
