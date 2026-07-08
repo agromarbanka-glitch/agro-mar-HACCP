@@ -82,4 +82,4 @@ OR EXISTS (
 );
 
 -- Potem w aplikacji: Ctrl+F5 → wgraj lipiec → Zapisz import.
--- Zalecane: uruchom też cały plik 2026-v40-import-delete-full-purge.sql (naprawia usuwanie na przyszłość).
+-- Zalecane: uruchom też 2026-v40-import-delete-full-purge.sql i 2026-v42-import-prepare-save.sql (naprawia usuwanie na przyszłość).

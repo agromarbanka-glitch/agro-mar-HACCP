@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo } from './excelImport'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -6627,33 +6627,44 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
     setImportDeleting(true)
     try {
-      const { error } = await supabase.rpc('delete_import_excel_admin', {
+      let purgeResult = null
+      const { data, error } = await supabase.rpc('delete_import_excel_admin', {
         p_imported_file_id: fileId,
         p_reason: String(reason).trim(),
         p_user_role: isAdmin(authProfile) ? 'admin' : (authProfile?.role || 'magazynier')
       })
-      if (error) throw error
-      setMessage('Import usunięty. Powiązane operacje, partie i FIFO zostały wyczyszczone.')
+      if (error) {
+        if (/function.*does not exist/i.test(String(error.message || ''))) {
+          purgeResult = await purgeImportDataClientSide(supabase, fileId)
+          const { error: markErr } = await supabase.from('imported_files').update({
+            deleted_at: new Date().toISOString(),
+            deleted_by_role: isAdmin(authProfile) ? 'admin' : (authProfile?.role || 'magazynier'),
+            delete_reason: String(reason).trim(),
+            status: 'usuniety'
+          }).eq('id', fileId)
+          if (markErr) throw markErr
+        } else {
+          throw error
+        }
+      } else {
+        purgeResult = data
+      }
+
+      const ops = purgeResult?.operations ?? '?'
+      const lots = (purgeResult?.lots ?? 0) + (purgeResult?.orphan_lots ?? 0)
+      setMessage(`Import usunięty. Skasowano ${ops} operacji i ${lots} partii. Możesz wgrać ten sam plik od nowa.`)
       setImportPreview([])
       setRows([])
       setFileName('')
+      importCheckCacheRef.current = null
       try {
-        const cleanup = await cleanupOrphanedDeletedImports(supabase)
-        if (cleanup?.needsMigration) {
-          setMessage(`${formatCleanupResult(cleanup)} Import usunięty z listy — dane w bazie mogą wymagać ręcznego SQL.`)
-        } else if ((cleanup?.imports_purged || 0) > 0 || (cleanup?.lots_removed || 0) > 0) {
-          setMessage(`Import usunięty. ${formatCleanupResult(cleanup)}`)
-        }
+        await cleanupOrphanedDeletedImports(supabase)
       } catch (_) { /* v40 migration may not be deployed yet */ }
       await loadImports()
-      await loadFifoData()
-      await loadHaccpDocs()
-      await loadK03TraceData()
-      await loadPzManagementData()
     } catch (err) {
       const msg = String(err?.message || err)
       if (/permission denied|42501|function.*does not exist/i.test(msg)) {
-        setMessage(`Błąd usuwania importu: ${msg}. Uruchom w Supabase SQL: 2026-v37-fix-delete-import.sql`)
+        setMessage(`Błąd usuwania importu: ${msg}. Uruchom w Supabase SQL: 2026-v40-import-delete-full-purge.sql i 2026-v42-import-prepare-save.sql`)
       } else {
         setMessage(`Błąd usuwania importu: ${msg}`)
       }
@@ -7079,11 +7090,22 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     try {
       const groups = groupImportRows(filteredRows)
+      setImportProgress('Przygotowanie bazy (sprzątanie pozostałości)…')
+      const prep = await prepareImportExcelSave(supabase, fileName)
+      const prepMsg = formatPrepareImportResult(prep)
+      if (prepMsg) setMessage(prepMsg)
+
+      const prepChanged =
+        (prep?.stale_in_progress_removed || 0) > 0 ||
+        (prep?.deleted_imports_cleaned || 0) > 0 ||
+        (prep?.orphan_lots_removed || 0) > 0 ||
+        (prep?.deleted_lots_cleaned || 0) > 0
+
       let keys
       let details
       let orphanCount
       const cache = importCheckCacheRef.current
-      const cacheHit = cache && cache.fileName === fileName && cache.groupsCount === groups.length
+      const cacheHit = !prepChanged && cache && cache.fileName === fileName && cache.groupsCount === groups.length
 
       if (cacheHit) {
         keys = cache.keys
@@ -7093,21 +7115,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       } else {
         setImportProgress('Sprawdzanie duplikatów…')
         ;({ keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups))
-      }
-
-      if (orphanCount > 0) {
-        setImportProgress('Sprzątanie po usuniętych importach…')
-        try {
-          const cleanup = await cleanupOrphanedDeletedImports(supabase)
-          if (cleanup?.needsMigration) {
-            setMessage('Uwaga: brak migracji v40 – osierocone wpisy mogą pozostać. Uruchom migrację w Supabase. Trwa zapis…')
-          } else if ((cleanup?.imports_purged || 0) > 0 || (cleanup?.lots_removed || 0) > 0) {
-            setMessage(`${formatCleanupResult(cleanup)} Trwa zapis…`)
-            ;({ keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups))
-          }
-        } catch (cleanErr) {
-          setMessage(`Sprzątanie nie powiodło się: ${cleanErr?.message || cleanErr}. Kontynuuję zapis – uruchom JEDNORAZOWE-wyczysc-osierocone-importy.sql w Supabase.`)
-        }
       }
 
       const { duplicates, fresh: groupsToImport } = splitImportGroupsByExisting(groups, keys)

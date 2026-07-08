@@ -140,6 +140,133 @@ export function splitImportGroupsByExisting(groups, existingKeys) {
   return { duplicates, fresh }
 }
 
+async function deleteRowsInChunks(client, table, column, ids, chunkSize = 80) {
+  const unique = [...new Set((ids || []).filter(Boolean))]
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize)
+    const { error } = await withImportRetry(() => client.from(table).delete().in(column, chunk))
+    if (error) throw error
+  }
+}
+
+/** Kasuje operacje, partie i FIFO jednego importu (gdy brak migracji v40/v42 w Supabase). */
+export async function purgeImportDataClientSide(client, importedFileId) {
+  const { data: ops, error: opsErr } = await withImportRetry(() =>
+    client.from('operations').select('id, document_no').eq('imported_file_id', importedFileId)
+  )
+  if (opsErr) throw opsErr
+  const opIds = (ops || []).map(o => o.id)
+  if (!opIds.length) return { operations: 0, lots: 0 }
+
+  const [{ data: lotsBySource }, { data: items }] = await Promise.all([
+    withImportRetry(() => client.from('lots').select('id').in('source_operation_id', opIds)),
+    withImportRetry(() => client.from('operation_items').select('lot_id').in('operation_id', opIds))
+  ])
+  const lotIds = [...new Set([
+    ...(lotsBySource || []).map(l => l.id),
+    ...(items || []).map(i => i.lot_id).filter(Boolean)
+  ])]
+
+  const wzNos = [...new Set((ops || []).map(o => o.document_no).filter(Boolean))]
+
+  const { data: haccpByOp } = await withImportRetry(() =>
+    client.from('haccp_documents').select('id').in('operation_id', opIds)
+  )
+  const { data: haccpByLot } = lotIds.length
+    ? await withImportRetry(() => client.from('haccp_documents').select('id').in('lot_id', lotIds))
+    : { data: [] }
+  const haccpIds = [...new Set([...(haccpByOp || []).map(d => d.id), ...(haccpByLot || []).map(d => d.id)])]
+  if (haccpIds.length) {
+    await deleteRowsInChunks(client, 'haccp_document_history', 'document_id', haccpIds)
+    await deleteRowsInChunks(client, 'haccp_documents', 'id', haccpIds)
+  }
+
+  if (wzNos.length) {
+    for (let i = 0; i < wzNos.length; i += 50) {
+      const chunk = wzNos.slice(i, i + 50)
+      await withImportRetry(() => client.from('fifo_allocation_change_log').delete().in('wz_no', chunk))
+    }
+  }
+
+  await deleteRowsInChunks(client, 'fifo_allocations', 'operation_id', opIds)
+  if (lotIds.length) {
+    for (const lotId of lotIds) {
+      await withImportRetry(() => client.from('fifo_allocations').delete().or(`source_lot_id.eq.${lotId},output_lot_id.eq.${lotId}`))
+    }
+    await deleteRowsInChunks(client, 'pz_fifo_change_log', 'lot_id', lotIds)
+    for (let i = 0; i < lotIds.length; i += 80) {
+      const chunk = lotIds.slice(i, i + 80)
+      await withImportRetry(() => client.from('operation_items').update({ lot_id: null }).in('lot_id', chunk))
+    }
+  }
+
+  await deleteRowsInChunks(client, 'operation_items', 'operation_id', opIds)
+  if (lotIds.length) {
+    await deleteRowsInChunks(client, 'lot_location_history', 'lot_id', lotIds)
+    await deleteRowsInChunks(client, 'lot_change_history', 'lot_id', lotIds)
+    await deleteRowsInChunks(client, 'lots', 'id', lotIds)
+  }
+  await deleteRowsInChunks(client, 'operations', 'id', opIds)
+
+  return { operations: opIds.length, lots: lotIds.length }
+}
+
+async function purgeStaleInProgressImportsClient(client, filename) {
+  if (!filename) return { removed: 0 }
+  const { data: stale, error } = await withImportRetry(() =>
+    client.from('imported_files')
+      .select('id')
+      .is('deleted_at', null)
+      .eq('status', 'w_trakcie')
+      .ilike('filename', filename)
+  )
+  if (error) throw error
+  let removed = 0
+  for (const row of stale || []) {
+    await purgeImportDataClientSide(client, row.id)
+    await withImportRetry(() => client.from('imported_files').delete().eq('id', row.id))
+    removed += 1
+  }
+  return { removed }
+}
+
+/** Przed zapisem: usuwa pozostałości usuniętych importów i przerwane importy tego samego pliku. */
+export async function prepareImportExcelSave(client, filename) {
+  const { data, error } = await withImportRetry(() =>
+    client.rpc('prepare_import_excel_save', { p_filename: filename || null })
+  )
+  if (!error) return data || {}
+
+  if (!/function.*does not exist/i.test(String(error.message || ''))) throw error
+
+  const cleanup = await cleanupOrphanedDeletedImports(client)
+  const stale = await purgeStaleInProgressImportsClient(client, filename)
+  return {
+    needsMigration: true,
+    deleted_imports_cleaned: cleanup?.imports_purged || 0,
+    stale_in_progress_removed: stale.removed,
+    fallback: true
+  }
+}
+
+export function formatPrepareImportResult(prep) {
+  if (!prep) return ''
+  const parts = []
+  if ((prep.deleted_imports_cleaned || 0) > 0 || (prep.deleted_lots_cleaned || 0) > 0) {
+    parts.push(`wyczyszczono pozostałości ${prep.deleted_imports_cleaned || 0} usuniętych importów`)
+  }
+  if ((prep.stale_in_progress_removed || 0) > 0) {
+    parts.push(`usunięto ${prep.stale_in_progress_removed} przerwanych importów (${prep.stale_lots_removed || '?'} partii)`)
+  }
+  if ((prep.orphan_lots_removed || 0) > 0) {
+    parts.push(`usunięto ${prep.orphan_lots_removed} osieroconych partii`)
+  }
+  if (prep.needsMigration && prep.fallback) {
+    parts.push('użyto trybu awaryjnego (uruchom migrację v40+v42 w Supabase)')
+  }
+  return parts.length ? `${parts.join(', ')}.` : ''
+}
+
 async function insertInChunks(client, table, rows, select, chunkSize) {
   const out = []
   for (let i = 0; i < rows.length; i += chunkSize) {
@@ -454,7 +581,14 @@ export async function saveImportToSupabase(client, {
 
   if (allIncomingItems.length) {
     notify(`Tworzenie ${allIncomingItems.length} partii…`)
-    createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
+    try {
+      createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
+    } catch (lotErr) {
+      if (!/lots_lot_no_key|duplicate key.*lot/i.test(String(lotErr?.message || ''))) throw lotErr
+      notify('Pozostałości partii w bazie – automatyczne sprzątanie…')
+      await prepareImportExcelSave(client, fileName)
+      createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
+    }
   }
 
   const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
@@ -476,7 +610,8 @@ export function formatImportNetworkError(err) {
   if (/lots_lot_no_key|duplicate key.*lot/i.test(msg)) {
     return (
       'Błąd: numer partii już istnieje w bazie (pozostałość po wcześniejszym imporcie). ' +
-      'Kliknij „Wyczyść pozostałości usuniętych importów” (admin) lub uruchom w Supabase SQL: JEDNORAZOWE-wyczysc-osierocone-importy.sql, potem Ctrl+F5 i spróbuj ponownie.'
+      'Spróbuj ponownie – przed zapisem system automatycznie czyści pozostałości. ' +
+      'Jeśli błąd się powtarza: usuń stary import z rejestru lub uruchom w Supabase SQL: 2026-v40 + 2026-v42.'
     )
   }
   if (isTransientNetworkError(err)) {
