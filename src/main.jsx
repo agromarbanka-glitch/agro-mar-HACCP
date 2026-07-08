@@ -6960,6 +6960,38 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     return inserted
   }
 
+  async function syncAutoK01ForImportFile(importedFileId) {
+    if (!supabase || !importedFileId) return syncAutoK01Documents()
+    const { data: ops, error: opsErr } = await supabase
+      .from('operations')
+      .select('id')
+      .eq('imported_file_id', importedFileId)
+    if (opsErr) throw opsErr
+    const opIds = (ops || []).map(o => o.id)
+    if (!opIds.length) return 0
+
+    const lotsRaw = await fetchSupabaseInChunks(
+      'lots',
+      'id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, storage_chamber_id',
+      'source_operation_id',
+      opIds
+    )
+    const productIds = Array.from(new Set(lotsRaw.map(l => l.product_id).filter(Boolean)))
+    const chamberIds = Array.from(new Set(lotsRaw.map(l => l.storage_chamber_id).filter(Boolean)))
+    const [productsRaw, chambersRaw] = await Promise.all([
+      productIds.length ? fetchSupabaseInChunks('products', 'id, name, product_group', 'id', productIds) : Promise.resolve([]),
+      chamberIds.length ? fetchSupabaseInChunks('storage_chambers', 'id, code', 'id', chamberIds) : Promise.resolve([])
+    ])
+    const productMap = new Map((productsRaw || []).map(p => [p.id, p]))
+    const chamberMap = new Map((chambersRaw || []).map(c => [c.id, c]))
+    const lots = lotsRaw.map(l => ({
+      ...l,
+      products: productMap.get(l.product_id) || null,
+      chamber: chamberMap.get(l.storage_chamber_id) || null
+    }))
+    return syncAutoK01Documents(lots)
+  }
+
   async function syncAutoK07Documents(lotsData, operations, allocations, currentDocs) {
     if (!supabase) return 0
     const trace = { lots: lotsData, operations, allocations }
@@ -7125,7 +7157,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       const duplicateCount = duplicates.length
 
       const importDeps = { normalizeText, productGroupForName, baseCodeForProduct }
-      const { importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
+      const { importedFileId, importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
         groupsToImport,
         rowsCount: rows.length,
         fileName,
@@ -7139,14 +7171,28 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         (orphanCount ? ` Wyczyszczono osierocone wpisy z usuniętych importów.` : '') +
         (duplicateCount ? ` Przykłady pominiętych: ${duplicates.slice(0, 5).map(d => d.documentNo).join(', ')}${duplicateCount > 5 ? '…' : ''}.` : '')
 
-      const importMsg = `${importMsgBase} Wejdź w PZ/FIFO → „Uzupełnij braki FIFO”, aby rozliczyć wydania.`
-
-      setMessage(importMsg)
-      setImportProgress('')
+      setMessage(`${importMsgBase} Trwa tworzenie kart K01…`)
       importCheckCacheRef.current = null
       await loadImports()
+
+      void (async () => {
+        let k01Msg = ''
+        try {
+          const k01Added = await syncAutoK01ForImportFile(importedFileId)
+          if (k01Added > 0) {
+            k01Msg = ` Utworzono ${k01Added} kart K01 (lipiec – sprawdź Dokumentacja HACCP → K01).`
+            await loadHaccpDocs()
+          } else {
+            k01Msg = ' K01: wszystkie karty już istnieją lub brak nowych partii PZ.'
+          }
+        } catch (k01Err) {
+          k01Msg = ` K01: błąd synchronizacji (${k01Err?.message || k01Err}) – wejdź w Kartoteki → Odśwież.`
+        }
+        setMessage(`${importMsgBase}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
+      })()
     } catch (err) {
       setMessage(formatImportNetworkError(err))
+    } finally {
       setImportSaving(false)
       setImportProgress('')
     }
