@@ -1138,9 +1138,17 @@ function App() {
     }
   }
 
+  function clampPrzerobDateToWz(przerobDate, wzDate) {
+    const p = String(przerobDate || '').slice(0, 10)
+    const w = String(wzDate || '').slice(0, 10)
+    if (!p || !w) return p
+    return p > w ? w : p
+  }
+
   function renderK03WzModal() {
     if (!k03WzModal) return null
     const { line, mode, preview, loading, saving, error, confirmMismatch } = k03WzModal
+    const wzDate = String(line.wz_date || '').slice(0, 10)
     const title = mode === 'przerob' ? 'Dodaj przerób → K03' : 'Brak przerobu → K03'
     const rawTotal = preview?.pzRows?.reduce((s, r) => s + Number(r.qty || 0), 0) || 0
     const mismatch = preview && (Math.abs(rawTotal - Number(preview.saleQty || 0)) >= 0.001 || Number(preview.shortage || 0) > 0)
@@ -1151,13 +1159,13 @@ function App() {
         <p><b>{line.product_name}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
         <div className="form-grid compact">
           {mode === 'przerob' && <>
-            <label>Data przerobu (domyślnie = data WZ)
-              <input type="date" value={k03WzModal.przerobDate} onChange={e => setK03WzModal(m => ({ ...m, przerobDate: e.target.value, preview: null, confirmMismatch: false }))} />
+            <label>Data przerobu (max = data WZ {wzDate || '—'})
+              <input type="date" max={wzDate || undefined} value={k03WzModal.przerobDate} onChange={e => setK03WzModal(m => ({ ...m, przerobDate: clampPrzerobDateToWz(e.target.value, wzDate), preview: null, confirmMismatch: false }))} />
             </label>
             <label>Numer partii wyrobu (proponowany – możesz zmienić)
               <input value={k03WzModal.lotNo} onChange={e => setK03WzModal(m => ({ ...m, lotNo: e.target.value }))} placeholder="np. T/001/2026" />
             </label>
-            <p className="hint">FIFO dobiera tylko PZ z datą ≤ data przerobu. Późniejsze PZ nie są przypisywane.</p>
+            <p className="hint">Przerób musi być w dniu WZ lub wcześniej. FIFO dobiera PZ z datą ≤ data przerobu. Jeśli brakuje surowca, a w magazynie widać PZ z późniejszą datą – popraw datę przyjęcia w Magazyn → PZ/FIFO (nie datę przerobu).</p>
           </>}
           {mode === 'bez_przerobu' && <>
             <label>Czy surowiec był magazynowany (K02)?
@@ -1181,6 +1189,12 @@ function App() {
           Brak wystarczającego surowca: WZ {Number(preview.saleQty || 0).toLocaleString('pl-PL')} kg, przypisano PZ {rawTotal.toLocaleString('pl-PL')} kg
           {Number(preview.shortage || 0) > 0 ? ` – brakuje ${Number(preview.shortage).toLocaleString('pl-PL')} kg` : ''}.
           {Number(preview.excludedFuturePzQty || 0) > 0 ? ` PZ z późniejszą datą (${Number(preview.excludedFuturePzQty).toLocaleString('pl-PL')} kg) pominięto.` : ''}
+          {Number(preview.diagnostics?.remainingAfterCutoffKg || 0) > 0.5 && (
+            <> W magazynie jest jeszcze {Number(preview.diagnostics.remainingAfterCutoffKg).toLocaleString('pl-PL')} kg z PZ po dacie {preview.cutoffDate} – popraw datę PZ w zakładce PZ/FIFO, jeśli towar był wcześniej na magazynie.</>
+          )}
+          {(preview.diagnostics?.priorUnallocatedWzCount || 0) > 0 && (
+            <> {preview.diagnostics.priorUnallocatedWzCount} wcześniejszych WZ bez K03 ({Number(preview.diagnostics.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) – rozlicz je wcześniej.</>
+          )}
         </p>}
         {preview?.pzRows?.length > 0 && <div className="table-wrap small"><table>
           <thead><tr><th>PZ</th><th>Data</th><th>Dostawca</th><th>Ilość kg</th></tr></thead>

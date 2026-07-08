@@ -273,6 +273,73 @@ function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap) {
   }
 }
 
+/** Rezerwuje FIFO dla wcześniejszych WZ bez pełnego rozliczenia (kolejność chronologiczna). */
+function reservePriorUnallocatedSales(base, lotState, targetSaleKey) {
+  const targetIdx = base.sortedSales.findIndex(s => s.key === targetSaleKey)
+  if (targetIdx <= 0) return { priorUnallocatedQty: 0, priorUnallocatedCount: 0 }
+
+  let priorUnallocatedQty = 0
+  let priorUnallocatedCount = 0
+
+  for (let i = 0; i < targetIdx; i += 1) {
+    const sale = base.sortedSales[i]
+    if (sale.sale_group !== base.sortedSales[targetIdx]?.sale_group) continue
+
+    const existing = base.allocationsBySaleKey.get(sale.key) || []
+    const saleQty = Number(sale.sale_qty || 0)
+    const allocatedQty = existing.reduce((s, a) => s + Number(a.qty || 0), 0)
+    const missing = saleQty - allocatedQty
+    if (missing <= 0.001) continue
+
+    priorUnallocatedQty += missing
+    priorUnallocatedCount += 1
+    const cutoff = String(sale.sale_date || '9999-12-31').slice(0, 10)
+    simulateAllocation({ ...sale, sale_qty: missing }, lotState, base.productMap, cutoff, base.opMap)
+  }
+
+  return { priorUnallocatedQty, priorUnallocatedCount }
+}
+
+function summarizeGroupInventory(lotState, productMap, saleGroup, cutoff, opMap) {
+  let remainingWithinCutoff = 0
+  let remainingAfterCutoff = 0
+  let purchasedTotal = 0
+  let purchasedWithinCutoff = 0
+
+  for (const lot of lotState.values()) {
+    const group = lot.product_group || resolveProductGroup(productMap.get(lot.product_id))
+    if (group !== saleGroup) continue
+    const initial = Number(lot.initial_qty || 0)
+    const remaining = Number(lot.remaining_qty || 0)
+    purchasedTotal += initial
+    const receiptDate = lotReceiptDate(lot, opMap)
+    if (receiptDate && receiptDate <= cutoff) {
+      purchasedWithinCutoff += initial
+      remainingWithinCutoff += remaining
+    } else if (receiptDate && receiptDate !== '0000-01-01') {
+      remainingAfterCutoff += remaining
+    }
+  }
+
+  return { remainingWithinCutoff, remainingAfterCutoff, purchasedTotal, purchasedWithinCutoff }
+}
+
+function summarizeGroupSales(base, saleGroup, targetSaleKey) {
+  let soldTotal = 0
+  let soldBeforeTarget = 0
+  const targetIdx = base.sortedSales.findIndex(s => s.key === targetSaleKey)
+
+  for (let i = 0; i < base.sortedSales.length; i += 1) {
+    const sale = base.sortedSales[i]
+    if (sale.sale_group !== saleGroup) continue
+    const qty = Number(sale.sale_qty || 0)
+    soldTotal += qty
+    if (targetIdx >= 0 && i < targetIdx) soldBeforeTarget += qty
+  }
+
+  return { soldTotal, soldBeforeTarget }
+}
+
 async function enrichAllocationRows(client, allocationRows) {
   if (!allocationRows.length) return []
   const lotIds = Array.from(new Set(allocationRows.map(a => a.source_lot_id).filter(Boolean)))
@@ -317,6 +384,9 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   if (existing.length) restoreAllocationsToLots(existing, lotState)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
+  const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, sale.sale_group, cutoff, base.opMap)
+  const salesSummary = summarizeGroupSales(base, sale.sale_group, saleKey)
+  const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey)
   const sim = simulateAllocation(sale, lotState, base.productMap, cutoff, base.opMap)
   const pzRows = await enrichAllocationRows(client, sim.allocationRows)
   const pzRowsValid = pzRows.filter(r => {
@@ -340,7 +410,18 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     shortage,
     pzRows: pzRowsValid,
     cutoffDate: cutoff,
-    excludedFuturePzQty
+    excludedFuturePzQty,
+    diagnostics: {
+      productGroup: sale.sale_group,
+      purchasedTotalKg: inventoryBefore.purchasedTotal,
+      purchasedWithinCutoffKg: inventoryBefore.purchasedWithinCutoff,
+      soldTotalKg: salesSummary.soldTotal,
+      soldBeforeTargetKg: salesSummary.soldBeforeTarget,
+      remainingWithinCutoffKg: inventoryBefore.remainingWithinCutoff,
+      remainingAfterCutoffKg: inventoryBefore.remainingAfterCutoff,
+      priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
+      priorUnallocatedWzKg: priorReserve.priorUnallocatedQty
+    }
   }
 }
 
@@ -364,6 +445,8 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
       await persistLot(client, lot)
     }
   }
+
+  reservePriorUnallocatedSales(base, base.lotState, saleKey)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const saleForAlloc = { ...sale, sale_date: cutoff }

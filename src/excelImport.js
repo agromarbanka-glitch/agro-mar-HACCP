@@ -196,11 +196,17 @@ function forwardFillExcelRows(rows) {
       documentNo = last.documentNo
     }
 
+    const prevDocumentNo = last.documentNo
+    if (looksLikeWarehouseDocumentNo(documentNo) && prevDocumentNo && documentNo !== prevDocumentNo) {
+      // Nie kopiuj daty z poprzedniego dokumentu (np. WZ → PZ) – tylko w obrębie tego samego nr.
+      last.issueDate = ''
+    }
+
     let issueDate = String(row.issueDate || '').trim()
     if (issueDate) {
       last.issueDate = issueDate
     } else if (last.issueDate) {
-      // Puste komórki daty pod pierwszym wierszem PZ = ta sama data co wyżej.
+      // Puste komórki daty pod pierwszym wierszem dokumentu = ta sama data co wyżej (ten sam nr).
       issueDate = last.issueDate
     }
 

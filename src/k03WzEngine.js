@@ -312,6 +312,21 @@ export async function loadWzQueue(client) {
   }
 }
 
+function validatePrzerobDate(mode, przerobDate, wzDate) {
+  if (mode !== 'przerob') return null
+  if (!przerobDate) return 'Podaj datę przerobu.'
+  if (wzDate && przerobDate > wzDate) {
+    return `Data przerobu (${przerobDate}) nie może być późniejsza niż data WZ (${wzDate}) – towar wyjechał najpóźniej w dniu sprzedaży.`
+  }
+  return null
+}
+
+function formatPostCutoffStockHint(remainingKg, cutoffDate, wzDate) {
+  if (Number(remainingKg || 0) <= 0.5) return ''
+  const wzNote = wzDate && cutoffDate !== wzDate ? ` (data WZ: ${wzDate})` : ''
+  return ` W magazynie jest ${Number(remainingKg).toLocaleString('pl-PL')} kg PZ z datą po ${cutoffDate}${wzNote} – nie wchodzą do tego WZ. Jeśli towar był na magazynie wcześniej, popraw datę przyjęcia w zakładce PZ/FIFO (nie datę przerobu).`
+}
+
 /** Podgląd FIFO przed zatwierdzeniem K03. */
 export async function previewK03Workflow(client, line, options = {}) {
   const mode = options.mode || 'przerob'
@@ -319,9 +334,8 @@ export async function previewK03Workflow(client, line, options = {}) {
   const przerobDate = String(options.przerobDate || '').slice(0, 10)
   const cutoffDate = mode === 'przerob' ? przerobDate : wzDate
 
-  if (mode === 'przerob' && !przerobDate) {
-    return { ok: false, error: 'Podaj datę przerobu.' }
-  }
+  const dateErr = validatePrzerobDate(mode, przerobDate, wzDate)
+  if (dateErr) return { ok: false, error: dateErr }
 
   return previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate)
 }
@@ -337,7 +351,8 @@ export async function generateK03Workflow(client, line, options = {}) {
   const k03Key = line.formId || `K03-${line.key}`
 
   if (line.frozen) throw new Error('K03 jest zamrożony – najpierw odmroź kartotekę.')
-  if (mode === 'przerob' && !przerobDate) throw new Error('Podaj datę przerobu.')
+  const dateErr = validatePrzerobDate(mode, przerobDate, wzDate)
+  if (dateErr) throw new Error(dateErr)
 
   const preview = await previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate)
   if (!preview.ok) throw new Error(preview.error || 'Błąd podglądu FIFO.')
@@ -351,11 +366,25 @@ export async function generateK03Workflow(client, line, options = {}) {
     const futureNote = Number(preview.excludedFuturePzQty || 0) > 0
       ? ` PZ z datą późniejszą niż ${cutoffDate} (${Number(preview.excludedFuturePzQty).toLocaleString('pl-PL')} kg) nie są przypisywane.`
       : ''
+    const diag = preview.diagnostics || {}
+    let diagNote = ''
+    if (Number(diag.remainingAfterCutoffKg || 0) > 0.5) {
+      diagNote += formatPostCutoffStockHint(diag.remainingAfterCutoffKg, cutoffDate, wzDate)
+    }
+    if ((diag.priorUnallocatedWzCount || 0) > 0) {
+      diagNote += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je najpierw (kolejność FIFO).`
+    }
+    if (Number(diag.purchasedTotalKg || 0) > 0 && Number(diag.soldTotalKg || 0) > 0) {
+      const delta = Math.round((Number(diag.purchasedTotalKg) - Number(diag.soldTotalKg)) * 1000) / 1000
+      if (Math.abs(delta) >= 1) {
+        diagNote += ` Bilans grupy: zakup ${Number(diag.purchasedTotalKg).toLocaleString('pl-PL')} kg vs sprzedaż ${Number(diag.soldTotalKg).toLocaleString('pl-PL')} kg (różnica ${delta > 0 ? '+' : ''}${delta.toLocaleString('pl-PL')} kg).`
+      }
+    }
     return {
       ok: false,
       needConfirm: true,
       preview,
-      message: `Brak wystarczającego surowca na dzień ${cutoffDate}: WZ ${saleQty.toLocaleString('pl-PL')} kg, przypisano PZ ${rawTotal.toLocaleString('pl-PL')} kg${shortage > 0 ? `, brakuje ${shortage.toLocaleString('pl-PL')} kg` : ''}.${futureNote}`
+      message: `Brak wystarczającego surowca na dzień ${cutoffDate}: WZ ${saleQty.toLocaleString('pl-PL')} kg, przypisano PZ ${rawTotal.toLocaleString('pl-PL')} kg${shortage > 0 ? `, brakuje ${shortage.toLocaleString('pl-PL')} kg` : ''}.${futureNote}${diagNote}`
     }
   }
 
