@@ -55,6 +55,9 @@ END;
 $$;
 
 -- Po każdym usunięciu importu: dodatkowe sprzątanie osieroconych partii
+-- (DROP wymagany: stara wersja zwracała void, nowa zwraca jsonb)
+DROP FUNCTION IF EXISTS public.delete_import_excel_admin(uuid, text, text);
+
 CREATE OR REPLACE FUNCTION public.delete_import_excel_admin(
   p_imported_file_id uuid,
   p_reason text,
