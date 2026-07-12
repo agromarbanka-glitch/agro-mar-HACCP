@@ -408,6 +408,8 @@ export function normalizeFifoProductKey(productName = '', product = null) {
   if (/porzeczka\s+(czerwona|kolorowa)\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
   if (/porzeczka\s+(czerwona|kolorowa)/.test(text)) return 'porzeczka czerwona'
 
+  if (/wisnia\s+(swieza\s*)?pw\b/.test(text)) return 'wisnia pw'
+  if (/wisnia\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'wisnia i') return 'wisnia klasa i'
   if (/wisn/.test(text)) return 'wisnia'
   if (/aronia/.test(text)) return 'aronia'
   if (/sliw/.test(text)) return 'sliwka'
@@ -415,6 +417,114 @@ export function normalizeFifoProductKey(productName = '', product = null) {
   if (/jabl/.test(text)) return 'jablko przemyslowe'
 
   return text.split(' ')[0] || 'inna'
+}
+
+/** Drzewo filtrów klas w panelu K03 (grupa → wariant). */
+export const K03_CLASS_FILTER_TREE = [
+  {
+    id: 'malina',
+    label: 'Malina',
+    variants: [
+      { id: 'malina pw', label: 'Świeża PW (Mpw)' },
+      { id: 'malina klasa i', label: 'Klasa I (M1)' },
+      { id: 'malina extra', label: 'Extra (Mex)' },
+      { id: 'malina pulpa', label: 'Pulpa (Mpulpa)' }
+    ]
+  },
+  {
+    id: 'truskawka',
+    label: 'Truskawka',
+    variants: [
+      { id: 'truskawka', label: 'Truskawka (T)' },
+      { id: 'truskawka z szypulka', label: 'Z szypułką (Tsz)' }
+    ]
+  },
+  {
+    id: 'wisnia',
+    label: 'Wiśnia',
+    variants: [
+      { id: 'wisnia pw', label: 'PW' },
+      { id: 'wisnia klasa i', label: 'Klasa I' },
+      { id: 'wisnia', label: 'Wiśnia (ogólna)' }
+    ]
+  },
+  {
+    id: 'porzeczka_czarna',
+    label: 'Porzeczka czarna',
+    variants: [
+      { id: 'porzeczka czarna', label: 'Porzeczka czarna' },
+      { id: 'porzeczka czarna pulpa', label: 'Pulpa' }
+    ]
+  },
+  {
+    id: 'porzeczka_czerwona',
+    label: 'Porzeczka czerwona',
+    variants: [
+      { id: 'porzeczka czerwona', label: 'Czerwona / kolorowa' },
+      { id: 'porzeczka czerwona pulpa', label: 'Pulpa' }
+    ]
+  },
+  {
+    id: 'aronia',
+    label: 'Aronia',
+    variants: [{ id: 'aronia', label: 'Aronia' }]
+  },
+  {
+    id: 'sliwka',
+    label: 'Śliwka',
+    variants: [{ id: 'sliwka', label: 'Śliwka' }]
+  },
+  {
+    id: 'jab_obier',
+    label: 'Jabłko obierka',
+    variants: [{ id: 'jablko obierka', label: 'Na obierkę' }]
+  },
+  {
+    id: 'jab_przem',
+    label: 'Jabłko przemysłowe',
+    variants: [{ id: 'jablko przemyslowe', label: 'Przemysłowe' }]
+  }
+]
+
+const K03_KNOWN_VARIANT_IDS = new Set(
+  K03_CLASS_FILTER_TREE.flatMap(f => (f.variants || []).map(v => v.id))
+)
+
+export function normalizeK03ClassFilterValue(filter = 'all') {
+  const raw = String(filter || 'all').trim()
+  if (!raw || raw === 'all') return 'all'
+  if (raw.startsWith('group:') || raw.startsWith('variant:')) return raw
+  return `group:${raw}`
+}
+
+export function matchesK03ClassFilter(productName, productGroup = '', filter = 'all') {
+  const normalized = normalizeK03ClassFilterValue(filter)
+  if (normalized === 'all') return true
+
+  const group = productGroup || productGroupForName(productName)
+  const variant = normalizeFifoProductKey(productName)
+
+  if (normalized.startsWith('group:')) {
+    return group === normalized.slice(6)
+  }
+
+  if (normalized.startsWith('variant:')) {
+    return variant === normalized.slice(8)
+  }
+
+  return false
+}
+
+export function collectExtraK03Variants(items = []) {
+  const extras = new Map()
+  for (const item of items || []) {
+    const name = item?.product_name || ''
+    if (!name) continue
+    const variant = normalizeFifoProductKey(name)
+    if (K03_KNOWN_VARIANT_IDS.has(variant)) continue
+    if (!extras.has(variant)) extras.set(variant, name)
+  }
+  return [...extras.entries()].map(([id, label]) => ({ id, label }))
 }
 
 export function buildFifoMatchSpecFromSourceKeys(variantKey, sourceKeys) {

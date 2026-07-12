@@ -5,7 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -116,19 +116,6 @@ const DOCS = [
   ['Specyfikacje', 'S01-S09', 'Specyfikacje produktów i opakowań']
 ]
 
-
-const K03_ASSORTMENT_TABS = [
-  ['all', 'Wszystkie'],
-  ['malina', 'Malina'],
-  ['truskawka', 'Truskawka'],
-  ['wisnia', 'Wiśnia'],
-  ['porzeczka_czarna', 'Porzeczka czarna'],
-  ['porzeczka_czerwona', 'Porzeczka czerwona'],
-  ['aronia', 'Aronia'],
-  ['jab_obier', 'Jabłko obierka'],
-  ['jab_przem', 'Jabłko przemysłowe'],
-  ['sliwka', 'Śliwka']
-]
 
 const CHAMBERS = [
   ['CP2-1', 'Komora CP2-1', 'CP2', 'Surowce'],
@@ -743,7 +730,7 @@ function App() {
     setDocsWorkflowFilter(snap.docsWorkflowFilter || 'all')
     setHaccpSearch(snap.haccpSearch || '')
     setHaccpStatusFilter(snap.haccpStatusFilter || 'all')
-    setK03AssortmentFilter(snap.k03AssortmentFilter || 'all')
+    setK03AssortmentFilter(normalizeK03ClassFilterValue(snap.k03AssortmentFilter || 'all'))
   }
 
   function persistDocsFilters(code, snap) {
@@ -892,11 +879,32 @@ function App() {
         </label>
       </div>
 
-      {isK03 && <div className="docs-sidebar-block">
-        <h4>Asortyment</h4>
-        <label>Grupa
-          <select value={k03AssortmentFilter} onChange={e => setK03AssortmentFilter(e.target.value)}>
-            {K03_ASSORTMENT_TABS.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
+      {isK03 && <div className="docs-sidebar-block docs-sidebar-class-filter">
+        <h4>Klasa / asortyment</h4>
+        <label>Wybierz klasę owocu
+          <select className="k03-class-filter-select" value={k03AssortmentFilter} onChange={e => setK03AssortmentFilter(normalizeK03ClassFilterValue(e.target.value))}>
+            <option value="all">Wszystkie klasy ({k03ClassCounts.get('all') || 0})</option>
+            {K03_CLASS_FILTER_TREE.map(family => (
+              <optgroup key={family.id} label={family.label}>
+                <option value={`group:${family.id}`}>
+                  Cała {family.label} ({k03ClassCounts.get(`group:${family.id}`) || 0})
+                </option>
+                {(family.variants || []).map(variant => (
+                  <option key={variant.id} value={`variant:${variant.id}`}>
+                    {variant.label} ({k03ClassCounts.get(`variant:${variant.id}`) || 0})
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+            {k03ExtraVariants.length > 0 && (
+              <optgroup label="Inne w danych">
+                {k03ExtraVariants.map(variant => (
+                  <option key={variant.id} value={`variant:${variant.id}`}>
+                    {variant.label} ({k03ClassCounts.get(`variant:${variant.id}`) || 0})
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </label>
         <label>Podpis zbiorczy
@@ -964,12 +972,7 @@ function App() {
   const filteredWzQueueLines = useMemo(() => {
     return (wzQueueLines || []).filter(line => {
       if (!matchesDocsDateRange(line.wz_date)) return false
-      if (k03AssortmentFilter !== 'all') {
-        const group = line.product_group || ''
-        if (k03AssortmentFilter === 'jab_przem' && group !== 'jab_przem') return false
-        if (k03AssortmentFilter === 'jab_obier' && group !== 'jab_obier') return false
-        if (k03AssortmentFilter !== 'jab_przem' && k03AssortmentFilter !== 'jab_obier' && group !== k03AssortmentFilter) return false
-      }
+      if (!matchesK03ClassFilter(line.product_name, line.product_group, k03AssortmentFilter)) return false
       if (!matchesK03WorkflowFilter(k03LineWorkflowModeTag(line), k03LineIsFrozen(line))) return false
       return true
     })
@@ -2565,9 +2568,9 @@ function App() {
     return sourceDocs
       .filter(d => d.document_type === docsFilter)
       .filter(d => {
-        if (docsFilter !== 'K03' || k03AssortmentFilter === 'all') return true
+        if (docsFilter !== 'K03') return true
         const group = d.product_group || d.data?.product_group || productGroupForName(d.product_name || '')
-        return group === k03AssortmentFilter
+        return matchesK03ClassFilter(d.product_name, group, k03AssortmentFilter)
       })
       .filter(d => matchesDocsDateRange(d.document_date))
       .filter(d => {
@@ -2597,15 +2600,32 @@ function App() {
 
   const haccpListDocs = useMemo(() => haccpPeriodDocs, [haccpPeriodDocs])
 
-  const k03AssortmentCounts = useMemo(() => {
-    const filtered = syntheticK03Docs.filter(d => matchesDocsDateRange(d.document_date))
-    const counts = new Map([['all', filtered.length]])
-    for (const doc of filtered) {
-      const group = doc.product_group || doc.data?.product_group || productGroupForName(doc.product_name || '')
-      counts.set(group, (counts.get(group) || 0) + 1)
+  const k03ClassCounts = useMemo(() => {
+    const inRangeDocs = syntheticK03Docs.filter(d => matchesDocsDateRange(d.document_date))
+    const inRangeWz = (wzQueueLines || []).filter(l => matchesDocsDateRange(l.wz_date))
+    const items = [
+      ...inRangeDocs.map(d => ({ product_name: d.product_name, product_group: d.product_group || d.data?.product_group })),
+      ...inRangeWz.map(l => ({ product_name: l.product_name, product_group: l.product_group }))
+    ]
+    const counts = new Map([['all', items.length]])
+    for (const item of items) {
+      const group = item.product_group || productGroupForName(item.product_name || '')
+      const variant = normalizeFifoProductKey(item.product_name)
+      counts.set(`group:${group}`, (counts.get(`group:${group}`) || 0) + 1)
+      counts.set(`variant:${variant}`, (counts.get(`variant:${variant}`) || 0) + 1)
     }
     return counts
-  }, [syntheticK03Docs, docsDateFrom, docsDateTo])
+  }, [syntheticK03Docs, wzQueueLines, docsDateFrom, docsDateTo])
+
+  const k03ExtraVariants = useMemo(() => {
+    const items = [
+      ...syntheticK03Docs.filter(d => matchesDocsDateRange(d.document_date)),
+      ...(wzQueueLines || []).filter(l => matchesDocsDateRange(l.wz_date))
+    ]
+    return collectExtraK03Variants(items)
+  }, [syntheticK03Docs, wzQueueLines, docsDateFrom, docsDateTo])
+
+  const k03AssortmentCounts = k03ClassCounts
 
   const k03YearOptions = useMemo(() => {
     const years = new Set()

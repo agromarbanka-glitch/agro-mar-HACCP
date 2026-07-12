@@ -397,6 +397,8 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .docs-sidebar-block h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent-dark); }
 .docs-sidebar-block label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
 .docs-sidebar-block input, .docs-sidebar-block select { padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; }
+.docs-sidebar-class-filter .k03-class-filter-select { max-width: 100%; }
+.docs-sidebar-class-filter optgroup { font-weight: 700; color: var(--accent-dark); }
 .docs-clear-dates { width: 100%; margin-top: 4px; }
 .sidebar-hint { font-size: 11px; margin: 4px 0 0; }
 .docs-sidebar-counter {
