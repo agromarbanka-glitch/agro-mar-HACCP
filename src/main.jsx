@@ -634,13 +634,20 @@ function App() {
     return date >= f && date <= t
   }
 
-  function k03LineWorkflowTag(line) {
+  function k03LineIsFrozen(line) {
+    return Boolean(line?.frozen || line?.status === 'frozen' || line?.k03Form?.frozen || line?.k03Form?.data?.frozen)
+  }
+
+  function k03DocIsFrozen(doc) {
+    return Boolean(doc?.frozen || doc?.data?.frozen)
+  }
+
+  function k03LineWorkflowModeTag(line) {
     if (line.status === 'pending') return 'nieprzerobione'
-    if (line.frozen || line.status === 'frozen') return 'zamrozone'
     if (line.workflow?.mode === 'przerob') return 'przerobione'
     if (line.workflow?.mode === 'bez_przerobu') return 'bez_przerobu'
     if (line.status === 'legacy_auto') return 'czesciowo'
-    if (line.status === 'k03_ready' && !line.frozen) {
+    if (line.status === 'k03_ready' || line.status === 'frozen') {
       const doc = line.k03Form
       const fifoOk = doc?.data?.quantitiesMatch !== false && Number(doc?.data?.shortage || 0) <= 0
       if (!fifoOk || doc?.status === 'N') return 'czesciowo'
@@ -650,14 +657,36 @@ function App() {
     return 'czesciowo'
   }
 
-  function k03DocWorkflowTag(doc) {
-    if (doc?.frozen || doc?.data?.frozen) return 'zamrozone'
+  function k03LineWorkflowTag(line) {
+    return k03LineWorkflowModeTag(line)
+  }
+
+  function k03DocWorkflowModeTag(doc) {
     if (doc?.data?.k03_workflow?.mode === 'przerob') return 'przerobione'
     if (doc?.data?.k03_workflow?.mode === 'bez_przerobu') return 'bez_przerobu'
     const fifoOk = doc?.data?.quantitiesMatch !== false && Number(doc?.data?.shortage || 0) <= 0
     if (!fifoOk || doc?.status === 'N') return 'czesciowo'
     if (!doc?.signed_by_operator) return 'do_zatwierdzenia'
     return 'przerobione'
+  }
+
+  function k03DocWorkflowTag(doc) {
+    return k03DocWorkflowModeTag(doc)
+  }
+
+  function matchesK03WorkflowFilter(modeTag, frozen, filter = docsWorkflowFilter) {
+    if (filter === 'all') return true
+    if (filter === 'zamrozone') return frozen
+    return modeTag === filter
+  }
+
+  function renderWorkflowStatusPills(modeTag, frozen) {
+    return (
+      <span className="k03-status-pills">
+        <span className={workflowPillClass(modeTag)}>{workflowPillLabel(modeTag)}</span>
+        {frozen ? <span className="wf-pill wf-frozen">Zamrożone</span> : null}
+      </span>
+    )
   }
 
   function matchesDocsWorkflowFilter(tag) {
@@ -925,7 +954,7 @@ function App() {
         if (k03AssortmentFilter === 'jab_obier' && group !== 'jab_obier') return false
         if (k03AssortmentFilter !== 'jab_przem' && k03AssortmentFilter !== 'jab_obier' && group !== k03AssortmentFilter) return false
       }
-      if (!matchesDocsWorkflowFilter(k03LineWorkflowTag(line))) return false
+      if (!matchesK03WorkflowFilter(k03LineWorkflowModeTag(line), k03LineIsFrozen(line))) return false
       return true
     })
   }, [wzQueueLines, k03AssortmentFilter, docsDateFrom, docsDateTo, docsWorkflowFilter])
@@ -1101,12 +1130,32 @@ function App() {
     </section>
   }
 
+  async function unfreezeK03Line(line) {
+    const doc = line?.k03Form
+    if (!doc?.id || !supabase) return
+    await unfreezeK03Document(doc)
+  }
+
   async function revertK03Line(line) {
     if (!line || !supabase) return
     if (!ensureCanDelete()) return
     if (line.frozen || line.status === 'frozen') {
-      setMessage('Nie można cofnąć zamrożonego K03 – najpierw odmroź kartotekę.')
-      return
+      const doc = line.k03Form
+      if (!doc?.id) {
+        setMessage('Brak dokumentu K03 do odmrożenia.')
+        return
+      }
+      const unfreezeReason = window.prompt('K03 jest zamrożony. Podaj powód odmrożenia przed cofnięciem decyzji:')
+      if (!unfreezeReason?.trim()) {
+        setMessage('Anulowano – brak powodu odmrożenia.')
+        return
+      }
+      try {
+        await unfreezeK03Workflow(supabase, doc, unfreezeReason.trim(), userRole)
+      } catch (err) {
+        setMessage(`Błąd odmrożenia: ${err?.message || String(err)}`)
+        return
+      }
     }
     if (!confirmDelete(`Decyzję K03 dla WZ ${line.document_no} / ${line.product_name}.\n\nPozycja wróci do kolejki WZ.`)) return
     const reason = window.prompt('Powód cofnięcia (opcjonalnie):') || 'Cofnięcie decyzji K03/WZ'
@@ -2404,7 +2453,7 @@ function App() {
           if (docsWorkflowFilter === 'czesciowo') return d.status === 'N'
           return true
         }
-        return matchesDocsWorkflowFilter(k03DocWorkflowTag(d))
+        return matchesK03WorkflowFilter(k03DocWorkflowModeTag(d), k03DocIsFrozen(d))
       })
       .filter(d => haccpStatusFilter === 'all' || d.status === haccpStatusFilter)
       .filter(d => {
@@ -8070,12 +8119,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <thead><tr><th>Asortyment</th><th>Data WZ</th><th>Nr WZ</th><th>Ilość</th><th>Status</th><th>Akcje</th></tr></thead>
               <tbody>{filteredWzQueueLines.map(line => {
                 const canDecide = line.status === 'pending'
-                return <tr key={line.key}>
+                const hasK03 = line.status !== 'pending' && Boolean(line.k03Form)
+                const frozen = k03LineIsFrozen(line)
+                const modeTag = k03LineWorkflowModeTag(line)
+                return <tr key={line.key} className={frozen ? 'row-frozen' : ''}>
                   <td><b>{line.product_name}</b></td>
                   <td>{line.wz_date || '-'}</td>
                   <td>{line.document_no || '-'}</td>
                   <td>{Number(line.qty || 0).toLocaleString('pl-PL')} kg</td>
-                  <td><span className={workflowPillClass(k03LineWorkflowTag(line))}>{workflowPillLabel(k03LineWorkflowTag(line))}</span></td>
+                  <td>{renderWorkflowStatusPills(modeTag, frozen)}</td>
                   <td className="row-actions">
                     {canDecide && <>
                       <button className="mini" onClick={() => openK03WzModal(line, 'przerob')}>Przerób</button>
@@ -8085,10 +8137,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                       const k03Doc = syntheticK03Docs.find(d => d.id === line.formId) || line.k03Form
                       return <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [k03Doc] } })}><Eye size={14}/></button>
                     })()}
-                    {(line.status === 'k03_ready' || line.status === 'legacy_auto' || line.status === 'frozen') && <>
+                    {hasK03 && <>
                       <button className="mini" onClick={() => openK03WzEditModal(line)}>Zmień decyzję</button>
+                      {frozen && <button className="mini secondary" onClick={() => unfreezeK03Line(line)}>Odmroź</button>}
+                      {isAdmin(authProfile) && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                     </>}
-                    {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && isAdmin(authProfile) && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                   </td>
                 </tr>
               })}</tbody>
@@ -8119,15 +8172,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 const saleQty = Number(doc.qty || 0)
                 const pzQty = Number(doc.data?.rawTotal || 0)
                 const fifoOk = doc.data?.quantitiesMatch !== false && Number(doc.data?.shortage || 0) <= 0
-                const wfTag = k03DocWorkflowTag(doc)
-                return <tr key={g.key} className={doc.frozen ? 'row-frozen' : ''}>
+                const wfTag = k03DocWorkflowModeTag(doc)
+                const docFrozen = k03DocIsFrozen(doc)
+                return <tr key={g.key} className={docFrozen ? 'row-frozen' : ''}>
                   <td>{doc.document_date || '-'}<KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} onToggle={toggleKartotekaPrintStatus} /></td>
                   <td><b>{doc.document_no || '-'}</b></td>
                   <td>{doc.lot_no || '-'}</td>
                   <td>{doc.product_name || g.product}</td>
                   <td>{saleQty.toLocaleString('pl-PL')}</td>
                   <td>{pzQty.toLocaleString('pl-PL')}</td>
-                  <td><span className={workflowPillClass(wfTag)}>{workflowPillLabel(wfTag)}</span></td>
+                  <td>{renderWorkflowStatusPills(wfTag, docFrozen)}</td>
                   <td><span className={fifoOk ? 'status ok' : 'status danger'}>{fifoOk ? 'OK' : '!'}</span></td>
                   <td>
                     <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => setK03GroupEmployee(doc, e.target.value)}>
