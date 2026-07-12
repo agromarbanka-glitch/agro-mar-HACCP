@@ -1,7 +1,7 @@
 /**
  * FIFO – przeliczanie przyrostowe (braki) i pełne z ochroną zamrożonych K03.
  */
-import { isSaleOperation, resolveFifoProductGroup } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, sameFifoPool } from './k03Engine'
 
 function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
@@ -95,6 +95,7 @@ async function loadFifoBaseData(client) {
       product_id: item.product_id,
       product_name: rawName || product?.name || '',
       sale_group: resolveProductGroup(product, rawName),
+      matchSpec: resolveFifoMatchSpec(product, rawName),
       sale_date: op?.operation_date,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,
@@ -136,14 +137,12 @@ async function loadFifoBaseData(client) {
   }
 }
 
-function candidateLots(lotState, productMap, saleGroup, cutoffDate, opMap) {
+function candidateLots(lotState, productMap, matchSpec, cutoffDate, opMap) {
   const cutoff = String(cutoffDate || '9999-12-31').slice(0, 10)
   return Array.from(lotState.values())
     .filter(lot => {
-      const product = productMap.get(lot.product_id)
-      const group = resolveProductGroup(product, product?.name || '', lot.product_group)
       const receiptDate = lotReceiptDate(lot, opMap)
-      return group === saleGroup &&
+      return fifoLotMatchesMatchSpec(lot, productMap, matchSpec) &&
         Number(lot.remaining_qty || 0) > 0 &&
         receiptDate &&
         receiptDate !== '0000-01-01' &&
@@ -208,7 +207,7 @@ async function allocateSale(client, sale, lotState, productMap, opMap) {
   let allocated = 0
   let allocationCount = 0
   const cutoff = String(sale.sale_date || '9999-12-31').slice(0, 10)
-  const lots = candidateLots(lotState, productMap, sale.sale_group, cutoff, opMap)
+  const lots = candidateLots(lotState, productMap, sale.matchSpec, cutoff, opMap)
   const touchedLots = new Map()
   const allocRows = []
 
@@ -254,7 +253,7 @@ function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap) {
   let remaining = Number(sale.sale_qty || 0)
   let allocated = 0
   const allocationRows = []
-  const lots = candidateLots(lotState, productMap, sale.sale_group, cutoffDate, opMap)
+  const lots = candidateLots(lotState, productMap, sale.matchSpec, cutoffDate, opMap)
 
   for (const lot of lots) {
     if (remaining <= 0.0005) break
@@ -286,7 +285,7 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey) {
 
   for (let i = 0; i < targetIdx; i += 1) {
     const sale = base.sortedSales[i]
-    if (sale.sale_group !== base.sortedSales[targetIdx]?.sale_group) continue
+    if (!sameFifoPool(sale.matchSpec, base.sortedSales[targetIdx]?.matchSpec)) continue
 
     const existing = base.allocationsBySaleKey.get(sale.key) || []
     const saleQty = Number(sale.sale_qty || 0)
@@ -308,7 +307,7 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey) {
   return { priorUnallocatedQty, priorUnallocatedCount }
 }
 
-function summarizeGroupInventory(lotState, productMap, saleGroup, cutoff, opMap) {
+function summarizeGroupInventory(lotState, productMap, matchSpec, cutoff, opMap) {
   let remainingWithinCutoff = 0
   let remainingAfterCutoff = 0
   let purchasedTotal = 0
@@ -318,9 +317,7 @@ function summarizeGroupInventory(lotState, productMap, saleGroup, cutoff, opMap)
   let lotCountWithinCutoff = 0
 
   for (const lot of lotState.values()) {
-    const product = productMap.get(lot.product_id)
-    const group = resolveProductGroup(product, product?.name || '', lot.product_group)
-    if (group !== saleGroup) continue
+    if (!fifoLotMatchesMatchSpec(lot, productMap, matchSpec)) continue
     lotCount += 1
     const initial = Number(lot.initial_qty || 0)
     const remaining = Number(lot.remaining_qty || 0)
@@ -350,14 +347,14 @@ function summarizeGroupInventory(lotState, productMap, saleGroup, cutoff, opMap)
   }
 }
 
-function summarizeGroupSales(base, saleGroup, targetSaleKey) {
+function summarizeGroupSales(base, matchSpec, targetSaleKey) {
   let soldTotal = 0
   let soldBeforeTarget = 0
   const targetIdx = base.sortedSales.findIndex(s => s.key === targetSaleKey)
 
   for (let i = 0; i < base.sortedSales.length; i += 1) {
     const sale = base.sortedSales[i]
-    if (sale.sale_group !== saleGroup) continue
+    if (!sameFifoPool(sale.matchSpec, matchSpec)) continue
     const qty = Number(sale.sale_qty || 0)
     soldTotal += qty
     if (targetIdx >= 0 && i < targetIdx) soldBeforeTarget += qty
@@ -409,10 +406,10 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   resetIncomingLotsToInitial(lotState, base.opMap)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
-  const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, sale.sale_group, cutoff, base.opMap)
-  const salesSummary = summarizeGroupSales(base, sale.sale_group, saleKey)
+  const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, sale.matchSpec, cutoff, base.opMap)
+  const salesSummary = summarizeGroupSales(base, sale.matchSpec, saleKey)
   const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey)
-  const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, sale.sale_group, cutoff, base.opMap)
+  const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, sale.matchSpec, cutoff, base.opMap)
   const sim = simulateAllocation(sale, lotState, base.productMap, cutoff, base.opMap)
   const pzRows = await enrichAllocationRows(client, sim.allocationRows)
   const pzRowsValid = pzRows.filter(r => {
@@ -439,6 +436,8 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     excludedFuturePzQty,
     diagnostics: {
       productGroup: sale.sale_group,
+      fifoVariant: sale.matchSpec?.variantKey,
+      fifoSourceVariants: sale.matchSpec?.mode === 'variant' ? [...sale.matchSpec.sourceKeys] : undefined,
       purchasedTotalKg: inventoryBefore.purchasedTotal,
       purchasedWithinCutoffKg: inventoryBefore.purchasedWithinCutoff,
       soldTotalKg: salesSummary.soldTotal,

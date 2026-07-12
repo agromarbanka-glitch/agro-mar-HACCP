@@ -1,7 +1,7 @@
 /**
  * Stany – nieprzypisany surowiec z PZ na wybrany dzień (symulacja FIFO do daty).
  */
-import { isSaleOperation, resolveFifoProductGroup } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
 import { lotReceiptDate } from './fifoEngine'
 
 export const STOCK_STATES_VERSION = '1.0'
@@ -35,10 +35,8 @@ function simulateFifoToDate({ cutoff, lotState, sortedSales, productMap, opMap }
     let remaining = Number(sale.sale_qty || 0)
     const lots = Array.from(lotState.values())
       .filter(lot => {
-        const product = productMap.get(lot.product_id)
-        const group = resolveGroup(product, product?.name || sale.product_name || '', lot.product_group)
         const receiptDate = lotReceiptDate(lot, opMap)
-        return group === sale.sale_group &&
+        return fifoLotMatchesMatchSpec(lot, productMap, sale.matchSpec) &&
           Number(lot.remaining_qty || 0) > 0 &&
           receiptDate &&
           receiptDate !== '0000-01-01' &&
@@ -135,6 +133,7 @@ export async function computeUnassignedPzStock(client, asOfDate) {
       product_id: item.product_id,
       product_name: rawName || product?.name || '',
       sale_group: resolveGroup(product, rawName),
+      matchSpec: resolveFifoMatchSpec(product, rawName),
       sale_date: saleDate,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,

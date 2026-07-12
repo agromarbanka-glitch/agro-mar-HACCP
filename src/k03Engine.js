@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.7'
+export const K03_ENGINE_VERSION = '3.8'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -224,6 +224,101 @@ export const CANONICAL_PRODUCT_GROUPS = new Set([
   'malina', 'truskawka', 'wisnia', 'porzeczka_czarna', 'porzeczka_czerwona',
   'aronia', 'jab_obier', 'jab_przem', 'sliwka', 'inna'
 ])
+
+/**
+ * Dozwolone źródła PZ dla sprzedaży danego wariantu produktu.
+ * Klucze = normalizeFifoProductKey(nazwa sprzedaży).
+ */
+export const FIFO_SALE_SOURCE_KEYS = {
+  truskawka: ['truskawka'],
+  'truskawka z szypulka': ['truskawka z szypulka'],
+  'malina pulpa': ['malina klasa i', 'malina extra'],
+  'malina klasa i': ['malina klasa i'],
+  'malina extra': ['malina extra'],
+  'porzeczka czarna pulpa': ['porzeczka czarna'],
+  'porzeczka czerwona pulpa': ['porzeczka czerwona'],
+  'porzeczka czarna': ['porzeczka czarna'],
+  'porzeczka czerwona': ['porzeczka czerwona'],
+  wisnia: ['wisnia'],
+  aronia: ['aronia'],
+  sliwka: ['sliwka'],
+  'jablko obierka': ['jablko obierka'],
+  'jablko na obierke': ['jablko obierka'],
+  'jablko przemyslowe': ['jablko przemyslowe'],
+  jablko: ['jablko przemyslowe']
+}
+
+/** Kanoniczny klucz wariantu produktu (T, Tsz, M1, Mex, Mp…) do dopasowania FIFO. */
+export function normalizeFifoProductKey(productName = '', product = null) {
+  const text = normalizeText(productName || product?.name || '')
+  if (!text) return 'inna'
+  if (PRODUCT_CODES.has(text)) return text
+
+  if (product?.code) {
+    const code = String(product.code).toLowerCase()
+    for (const [key, val] of PRODUCT_CODES) {
+      if (String(val).toLowerCase() === code) return key
+    }
+  }
+
+  if (/truskawka\s+z\s+szyp/.test(text)) return 'truskawka z szypulka'
+  if (/^truskawka\b/.test(text)) return 'truskawka'
+
+  if (/malina\s+pulpa/.test(text)) return 'malina pulpa'
+  if (/malina\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'malina i') return 'malina klasa i'
+  if (/malina\s+extra/.test(text)) return 'malina extra'
+  if (/malina/.test(text)) return text
+
+  if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'porzeczka czarna pulpa'
+  if (/porzeczka\s+czarna/.test(text)) return 'porzeczka czarna'
+  if (/porzeczka\s+czerwona\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
+  if (/porzeczka\s+czerwona/.test(text)) return 'porzeczka czerwona'
+
+  if (/wisn/.test(text)) return 'wisnia'
+  if (/aronia/.test(text)) return 'aronia'
+  if (/sliw/.test(text)) return 'sliwka'
+  if (/jabl.*obier/.test(text) || /obier.*jabl/.test(text)) return 'jablko obierka'
+  if (/jabl/.test(text)) return 'jablko przemyslowe'
+
+  return text.split(' ')[0] || 'inna'
+}
+
+/** Specyfikacja puli FIFO dla sprzedaży – wariant (precyzyjnie) lub grupa (fallback). */
+export function resolveFifoMatchSpec(product, productName = '', lotGroup = '') {
+  const variantKey = normalizeFifoProductKey(productName || product?.name || '', product)
+  const explicitSources = FIFO_SALE_SOURCE_KEYS[variantKey]
+  if (explicitSources) {
+    const sourceKeys = new Set(explicitSources)
+    return {
+      mode: 'variant',
+      variantKey,
+      poolKey: `variant:${variantKey}:${explicitSources.slice().sort().join('+')}`,
+      sourceKeys
+    }
+  }
+  const group = resolveFifoProductGroup(product, productName, lotGroup)
+  return {
+    mode: 'group',
+    variantKey,
+    poolKey: `group:${group}`,
+    sourceKeys: new Set([group])
+  }
+}
+
+export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
+  const product = productMap.get(lot.product_id)
+  const name = product?.name || ''
+  if (matchSpec?.mode === 'variant') {
+    const lotKey = normalizeFifoProductKey(name, product)
+    return matchSpec.sourceKeys.has(lotKey)
+  }
+  const group = resolveFifoProductGroup(product, name, lot.product_group)
+  return matchSpec?.sourceKeys?.has(group)
+}
+
+export function sameFifoPool(specA, specB) {
+  return Boolean(specA?.poolKey && specB?.poolKey && specA.poolKey === specB.poolKey)
+}
 
 function looksLikeIsoDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim())

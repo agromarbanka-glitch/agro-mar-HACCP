@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3 } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
-import { resolveFifoProductGroup } from './k03Engine'
+import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
@@ -5995,6 +5995,7 @@ async function recalculateFifoClientSide() {
       operation_id: item.operation_id,
       product_id: item.product_id,
       sale_group: resolveProductGroup(product, rawName),
+      matchSpec: resolveFifoMatchSpec(product, rawName),
       sale_date: op?.operation_date,
       sale_doc_no: op?.document_no || '',
       sale_created_at: op?.created_at,
@@ -6027,9 +6028,8 @@ async function recalculateFifoClientSide() {
 
     const candidateLots = Array.from(lotState.values())
       .filter(lot => {
-        const group = resolveProductGroup(productMap.get(lot.product_id), productMap.get(lot.product_id)?.name || '', lot.product_group)
         const receiptDate = String(opMap.get(lot.source_operation_id)?.operation_date || lot.production_date || '').slice(0, 10)
-        return group === sale.sale_group &&
+        return fifoLotMatchesMatchSpec(lot, productMap, sale.matchSpec) &&
           Number(lot.remaining_qty || 0) > 0 &&
           receiptDate &&
           receiptDate !== '0000-01-01' &&
