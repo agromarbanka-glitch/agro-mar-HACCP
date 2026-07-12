@@ -58,7 +58,16 @@ export function frozenOperationIdsFromSnapshots(snapshots = []) {
   return ids
 }
 
-async function loadFifoBaseData(client) {
+let fifoBaseCache = null
+
+export function invalidateFifoBaseCache() {
+  fifoBaseCache = null
+}
+
+async function loadFifoBaseData(client, options = {}) {
+  if (!options.forceReload && fifoBaseCache) {
+    return fifoBaseCache
+  }
   const [{ data: products, error: productsErr }, { data: lotsRaw, error: lotsErr }, { data: operations, error: opsErr }, { data: saleItemsRaw, error: itemsErr }, { data: allocationsRaw, error: allocErr }] = await Promise.all([
     client.from('products').select('id, name, code, product_group'),
     client.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
@@ -125,7 +134,7 @@ async function loadFifoBaseData(client) {
     lotState.set(lot.id, { ...lot, remaining_qty: Number(lot.remaining_qty || 0) })
   }
 
-  return {
+  fifoBaseCache = {
     productMap,
     opMap,
     saleOpIds,
@@ -135,6 +144,7 @@ async function loadFifoBaseData(client) {
     lotsRaw,
     allocationsRaw: allocationsRaw || []
   }
+  return fifoBaseCache
 }
 
 function candidateLots(lotState, productMap, matchSpec, cutoffDate, opMap) {
@@ -267,6 +277,7 @@ async function allocateSale(client, sale, lotState, productMap, opMap, options =
     allocationCount,
     allocated,
     shortage: remaining > 0.0005 ? remaining : 0,
+    allocRows,
     touchedLotIds: touchedLotIds ? [...touchedLotIds] : [...new Set(allocRows.map(r => r.source_lot_id))]
   }
 }
@@ -386,6 +397,21 @@ function summarizeGroupSales(base, matchSpec, targetSaleKey) {
   return { soldTotal, soldBeforeTarget }
 }
 
+function enrichAllocationRowsLocal(allocationRows, lotState, opMap) {
+  return (allocationRows || []).map(row => {
+    const lot = lotState.get(row.source_lot_id) || {}
+    const pzOp = opMap.get(lot.source_operation_id) || {}
+    return {
+      pz_no: pzOp.document_no || lot.lot_no || '',
+      pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
+      supplier: '',
+      qty: row.qty,
+      source_lot_no: lot.lot_no || '',
+      source_lot_id: row.source_lot_id
+    }
+  })
+}
+
 async function enrichAllocationRows(client, allocationRows) {
   if (!allocationRows.length) return []
   const lotIds = Array.from(new Set(allocationRows.map(a => a.source_lot_id).filter(Boolean)))
@@ -396,11 +422,6 @@ async function enrichAllocationRows(client, allocationRows) {
     ? await fetchInChunks(client, 'operations', 'id, operation_date, document_no, contractor_id', 'id', opIds)
     : []
   const opMap = new Map(ops.map(o => [o.id, o]))
-  const contractorIds = Array.from(new Set(ops.map(o => o.contractor_id).filter(Boolean)))
-  const contractors = contractorIds.length
-    ? await fetchInChunks(client, 'contractors', 'id, name', 'id', contractorIds)
-    : []
-  const contractorMap = new Map(contractors.map(c => [c.id, c]))
 
   return allocationRows.map(row => {
     const lot = lotMap.get(row.source_lot_id) || {}
@@ -505,18 +526,7 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const saleForAlloc = { ...sale, matchSpec, sale_date: cutoff }
   const result = await allocateSale(client, saleForAlloc, base.lotState, base.productMap, base.opMap)
-
-  const { data: newAllocs, error: allocErr } = await client
-    .from('fifo_allocations')
-    .select('id, qty, source_lot_id, product_id')
-    .eq('operation_id', operationId)
-    .eq('product_id', productId)
-  if (allocErr) throw allocErr
-  const enrichedPzAll = await enrichAllocationRows(client, (newAllocs || []).map(a => ({
-    source_lot_id: a.source_lot_id,
-    product_id: a.product_id,
-    qty: a.qty
-  })))
+  const enrichedPzAll = enrichAllocationRowsLocal(result.allocRows, base.lotState, base.opMap)
   const enrichedPz = enrichedPzAll.filter(r => {
     const pzDate = String(r.pz_date || '').slice(0, 10)
     return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
@@ -527,19 +537,40 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
       return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
     })
     .reduce((s, r) => s + Number(r.qty || 0), 0)
-  if (excludedFuturePzQty > 0.0005) {
-    const badAllocIds = (newAllocs || []).filter((a, i) => {
-      const pzDate = String(enrichedPzAll[i]?.pz_date || '').slice(0, 10)
-      return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
-    }).map(a => a.id)
-    if (badAllocIds.length) {
-      restoreAllocationsToLots(
-        (newAllocs || []).filter(a => badAllocIds.includes(a.id)),
-        base.lotState
-      )
-      await deleteAllocations(client, badAllocIds)
-      const badLotIds = [...new Set((newAllocs || []).filter(a => badAllocIds.includes(a.id)).map(a => a.source_lot_id))]
-      await persistLotsBatch(client, base.lotState, badLotIds)
+  if (excludedFuturePzQty > 0.0005 && result.allocRows.length) {
+    const badRows = enrichedPzAll
+      .map((r, i) => ({ r, i }))
+      .filter(({ r }) => {
+        const pzDate = String(r.pz_date || '').slice(0, 10)
+        return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
+      })
+    if (badRows.length) {
+      const badQtyByLot = new Map()
+      for (const { r, i } of badRows) {
+        const lotId = result.allocRows[i]?.source_lot_id
+        const qty = Number(result.allocRows[i]?.qty || 0)
+        if (lotId) badQtyByLot.set(lotId, (badQtyByLot.get(lotId) || 0) + qty)
+      }
+      for (const [lotId, qty] of badQtyByLot) {
+        const lot = base.lotState.get(lotId)
+        if (!lot) continue
+        lot.remaining_qty = Number(lot.remaining_qty || 0) + qty
+        lot.status = lot.remaining_qty > 0.0005 ? 'aktywna' : lot.status
+        base.lotState.set(lotId, lot)
+      }
+      const { data: newAllocs, error: findErr } = await client
+        .from('fifo_allocations')
+        .select('id, qty, source_lot_id')
+        .eq('operation_id', operationId)
+        .eq('product_id', productId)
+      if (findErr) throw findErr
+      const badAllocIds = (newAllocs || [])
+        .filter(a => badQtyByLot.has(a.source_lot_id))
+        .map(a => a.id)
+      if (badAllocIds.length) {
+        await deleteAllocations(client, badAllocIds)
+        await persistLotsBatch(client, base.lotState, [...badQtyByLot.keys()])
+      }
     }
   }
   const allocatedValid = enrichedPz.reduce((s, r) => s + Number(r.qty || 0), 0)
@@ -562,6 +593,8 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
     change_reason: logEntry.change_reason || 'Rozliczenie FIFO dla K03',
     changed_by: logEntry.changed_by || 'operator'
   })
+
+  invalidateFifoBaseCache()
 
   return {
     ok: true,
@@ -605,6 +638,7 @@ export async function revertFifoForSale(client, operationId, productId, logEntry
     changed_by: logEntry.changed_by || 'operator'
   })
 
+  invalidateFifoBaseCache()
   return { ok: true, removed: existing.length }
 }
 

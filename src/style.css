@@ -553,6 +553,15 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   border-radius: 0 0 16px 16px;
   flex-wrap: wrap;
 }
+.k03-wz-saving-step {
+  margin: 0 22px 12px;
+  padding: 10px 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  font-weight: 600;
+  color: #1e40af;
+}
 .k03-wz-modal-footer {
   padding: 0 22px 18px;
   background: #fff;

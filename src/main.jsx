@@ -97,6 +97,14 @@ const WORKFLOW_PILL_LABELS = {
   zamrozone: 'Zamrożony'
 }
 
+const K03_SAVE_STEP_LABELS = {
+  unfreeze: 'Odmrażanie kartoteki…',
+  fifo_revert: 'Cofanie starego FIFO…',
+  fifo_preview: 'Weryfikacja FIFO…',
+  fifo_save: 'Zapis FIFO…',
+  k03_save: 'Zapisywanie kartoteki K03…'
+}
+
 const DOCS = [
   ['Karty kontrolne', 'K01-K06', 'Przyjęcia, temperatury, identyfikacja partii, jakość'],
   ['Raporty', 'R00-R13', 'Mycie, higiena, reklamacje, CCP, magnesy, szkło'],
@@ -1195,6 +1203,7 @@ function App() {
       preview: null,
       loading: false,
       saving: false,
+      savingStep: '',
       error: '',
       confirmMismatch: false
     }
@@ -1242,7 +1251,10 @@ function App() {
 
   async function confirmK03WzModal(acceptMismatch = false) {
     if (!k03WzModal || !supabase) return
-    setK03WzModal(m => ({ ...m, saving: true, error: '' }))
+    setK03WzModal(m => ({ ...m, saving: true, savingStep: 'Przygotowanie…', error: '' }))
+    const reportSaveStep = (step) => {
+      setK03WzModal(m => m ? ({ ...m, savingStep: K03_SAVE_STEP_LABELS[step] || step }) : m)
+    }
     try {
       const workflowOpts = {
         mode: k03WzModal.mode,
@@ -1251,7 +1263,9 @@ function App() {
         rawStored: k03WzModal.rawStored,
         acceptQuantityMismatch: acceptMismatch || k03WzModal.confirmMismatch,
         changedBy: userRole,
-        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal)
+        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal),
+        existingPreview: k03WzModal.preview?.ok ? k03WzModal.preview : undefined,
+        onProgress: reportSaveStep
       }
       const result = k03WzModal.editMode
         ? await changeK03Workflow(supabase, k03WzModal.line, workflowOpts)
@@ -1277,7 +1291,7 @@ function App() {
       await loadFifoChangeLog()
       setMessage(`K03 ${wasEdit ? 'zaktualizowany' : 'utworzony'} dla WZ ${wzNo} (${wzMode}).${editNote}${frozenNote}`)
     } catch (err) {
-      setK03WzModal(m => ({ ...m, saving: false, error: err?.message || String(err) }))
+      setK03WzModal(m => ({ ...m, saving: false, savingStep: '', error: err?.message || String(err) }))
     }
   }
 
@@ -1290,7 +1304,7 @@ function App() {
 
   function renderK03WzModal() {
     if (!k03WzModal) return null
-    const { line, mode, preview, loading, saving, error, confirmMismatch, editMode, fifoSourcePicker, fifoSourceKeys } = k03WzModal
+    const { line, mode, preview, loading, saving, savingStep, error, confirmMismatch, editMode, fifoSourcePicker, fifoSourceKeys } = k03WzModal
     const wzDate = String(line.wz_date || '').slice(0, 10)
     const title = editMode
       ? 'Zmień decyzję K03'
@@ -1364,11 +1378,12 @@ function App() {
         </div>
         <div className="k03-wz-modal-actions actions">
           <button className="secondary" onClick={refreshK03WzPreview} disabled={loading || saving}>{loading ? 'FIFO…' : 'Podgląd FIFO / PZ'}</button>
-          <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || (!preview && !confirmMismatch) || (fifoSourcePicker && !(fifoSourceKeys || []).length)}>
-            {saving ? 'Zapisywanie…' : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
+          <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || loading || (!preview && !confirmMismatch) || (fifoSourcePicker && !(fifoSourceKeys || []).length)}>
+            {saving ? (savingStep || 'Zapisywanie…') : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
           </button>
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
         </div>
+        {saving && savingStep && <p className="hint k03-wz-saving-step">{savingStep}</p>}
         {(error || preview) && <div className="k03-wz-modal-footer">
         {error && <p className="status danger">{error}</p>}
         {preview?.diagnostics && (

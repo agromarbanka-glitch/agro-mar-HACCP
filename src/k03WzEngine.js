@@ -400,7 +400,12 @@ export async function generateK03Workflow(client, line, options = {}) {
   if (dateErr) throw new Error(dateErr)
 
   const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
-  const preview = await previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate, fifoOpts)
+  const onProgress = options.onProgress
+  onProgress?.('fifo_preview')
+  const preview = options.existingPreview?.ok &&
+    String(options.existingPreview.cutoffDate || '').slice(0, 10) === cutoffDate
+    ? options.existingPreview
+    : await previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate, fifoOpts)
   if (!preview.ok) throw new Error(preview.error || 'Błąd podglądu FIFO.')
 
   const rawTotal = preview.pzRows.reduce((s, r) => s + Number(r.qty || 0), 0)
@@ -429,6 +434,7 @@ export async function generateK03Workflow(client, line, options = {}) {
     changed_by: changedBy,
     ...fifoOpts
   })
+  onProgress?.('k03_save')
 
   const { forms } = await loadK03Forms(client)
   const baseForm = forms.find(f => f.id === k03Key)
@@ -525,14 +531,17 @@ export async function generateK03Workflow(client, line, options = {}) {
 export async function changeK03Workflow(client, line, options = {}) {
   const changedBy = options.changedBy || 'operator'
   const reason = options.reason || 'Zmiana decyzji przerób / brak przerobu'
+  const onProgress = options.onProgress
   const wasFrozen = line.frozen || line.status === 'frozen'
 
+  onProgress?.('unfreeze')
   if (wasFrozen) {
     const doc = line.k03Form
     if (!doc?.id) throw new Error('Brak dokumentu K03 do odmrożenia.')
     await unfreezeK03Workflow(client, doc, reason, changedBy)
   }
 
+  onProgress?.('fifo_revert')
   await revertFifoForSale(client, line.operation_id, line.product_id, {
     k03_key: line.formId || `K03-${line.key}`,
     change_type: 'k03_change_decision',
@@ -540,8 +549,9 @@ export async function changeK03Workflow(client, line, options = {}) {
     changed_by: changedBy
   })
 
+  onProgress?.('fifo_save')
   const freshLine = { ...line, frozen: false, status: line.status === 'pending' ? line.status : 'k03_ready' }
-  return generateK03Workflow(client, freshLine, { ...options, changedBy, reason })
+  return generateK03Workflow(client, freshLine, { ...options, changedBy, reason, onProgress })
 }
 
 /**
