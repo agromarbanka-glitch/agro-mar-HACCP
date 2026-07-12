@@ -5,8 +5,8 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourceOptionsForVariant, defaultFifoSourceKeys, normalizeFifoProductKey } from './k03Engine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
@@ -379,6 +379,7 @@ function App() {
   const [k03UnfreezeSuggestions, setK03UnfreezeSuggestions] = useState([])
   const [fifoChangeLog, setFifoChangeLog] = useState([])
   const [fifoRecalculating, setFifoRecalculating] = useState(false)
+  const [fifoProgress, setFifoProgress] = useState(null)
   const [auxRows, setAuxRows] = useState([])
   const [auxYear, setAuxYear] = useState(new Date().getFullYear().toString())
   const [auxHalf, setAuxHalf] = useState(new Date().getMonth() < 6 ? '1' : '2')
@@ -1047,6 +1048,23 @@ function App() {
     }
   }
 
+  function renderFifoProgressBanner() {
+    if (!fifoProgress || !fifoRecalculating) return null
+    return (
+      <div className="card fifo-progress-banner" role="status">
+        <b>Przeliczanie FIFO</b>
+        {fifoProgress.phase === 'start' && <span> · {fifoProgress.message || 'Wczytywanie…'}</span>}
+        {fifoProgress.phase === 'running' && fifoProgress.total > 0 && (
+          <span> · {fifoProgress.current}/{fifoProgress.total} WZ · uzupełniono {fifoProgress.processed || 0} · pominięto {fifoProgress.skippedComplete || 0}</span>
+        )}
+        {fifoProgress.phase === 'saving' && <span> · {fifoProgress.message || 'Zapis do bazy…'}</span>}
+        {fifoProgress.total > 0 && fifoProgress.phase === 'running' && (
+          <div className="fifo-progress-bar"><div style={{ width: `${Math.min(100, Math.round((fifoProgress.current / fifoProgress.total) * 100))}%` }} /></div>
+        )}
+      </div>
+    )
+  }
+
   function renderK03UnfreezeBanner() {
     if (!k03UnfreezeSuggestions.length) return null
     return <section className="card k03-unfreeze-banner">
@@ -1102,13 +1120,54 @@ function App() {
     }
   }
 
-  function openK03WzModal(line, mode) {
+  function buildK03WzModalState(line, mode, editMode = false) {
     const wzDate = String(line.wz_date || '').slice(0, 10)
-    const przerobDate = mode === 'przerob' ? (wzDate || new Date().toISOString().slice(0, 10)) : ''
-    const lotNo = mode === 'przerob'
-      ? suggestK03LotNo(k03FormsRaw, line, przerobDate)
+    const wf = line.workflow || {}
+    const resolvedMode = editMode ? (wf.mode || mode || 'bez_przerobu') : mode
+    const przerobDate = resolvedMode === 'przerob'
+      ? String(wf.przerob_date || wf.fifo_cutoff_date || wzDate || new Date().toISOString().slice(0, 10)).slice(0, 10)
       : ''
-    setK03WzModal({ line, mode, przerobDate, lotNo, rawStored: false, preview: null, loading: false, saving: false, error: '', confirmMismatch: false })
+    const lotNo = resolvedMode === 'przerob'
+      ? (wf.lot_no || line.k03Form?.lot_no || suggestK03LotNo(k03FormsRaw, line, przerobDate))
+      : ''
+    const variantKey = normalizeFifoProductKey(line.product_name)
+    const sourceOpt = fifoSourceOptionsForVariant(variantKey)
+    const fifoSourceKeys = wf.fifo_source_keys?.length
+      ? [...wf.fifo_source_keys]
+      : defaultFifoSourceKeys(line.product_name)
+    const fifoSourceStrict = Boolean(sourceOpt && fifoSourceKeys.length === 1 && fifoSourceKeys[0] === sourceOpt.strictKeys[0])
+    return {
+      line,
+      mode: resolvedMode,
+      editMode,
+      przerobDate,
+      lotNo,
+      rawStored: wf.raw_stored === true,
+      fifoSourceKeys,
+      fifoSourceStrict,
+      fifoSourceOpt: sourceOpt,
+      preview: null,
+      loading: false,
+      saving: false,
+      error: '',
+      confirmMismatch: false
+    }
+  }
+
+  function openK03WzModal(line, mode) {
+    setK03WzModal(buildK03WzModalState(line, mode, false))
+  }
+
+  function openK03WzEditModal(line) {
+    setK03WzModal(buildK03WzModalState(line, line.workflow?.mode || 'bez_przerobu', true))
+  }
+
+  function k03WzFifoSourceKeys(modal) {
+    if (!modal) return null
+    if (modal.fifoSourceOpt) {
+      return modal.fifoSourceStrict ? modal.fifoSourceOpt.strictKeys : modal.fifoSourceOpt.defaultKeys
+    }
+    return modal.fifoSourceKeys?.length ? modal.fifoSourceKeys : null
   }
 
   async function refreshK03WzPreview() {
@@ -1117,7 +1176,8 @@ function App() {
     try {
       const preview = await previewK03Workflow(supabase, k03WzModal.line, {
         mode: k03WzModal.mode,
-        przerobDate: k03WzModal.przerobDate
+        przerobDate: k03WzModal.przerobDate,
+        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal)
       })
       if (!preview.ok) throw new Error(preview.error || 'Błąd podglądu FIFO.')
       setK03WzModal(m => ({ ...m, preview, loading: false }))
@@ -1130,14 +1190,18 @@ function App() {
     if (!k03WzModal || !supabase) return
     setK03WzModal(m => ({ ...m, saving: true, error: '' }))
     try {
-      const result = await generateK03Workflow(supabase, k03WzModal.line, {
+      const workflowOpts = {
         mode: k03WzModal.mode,
         przerobDate: k03WzModal.przerobDate,
         lotNo: k03WzModal.lotNo,
         rawStored: k03WzModal.rawStored,
         acceptQuantityMismatch: acceptMismatch || k03WzModal.confirmMismatch,
-        changedBy: userRole
-      })
+        changedBy: userRole,
+        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal)
+      }
+      const result = k03WzModal.editMode
+        ? await changeK03Workflow(supabase, k03WzModal.line, workflowOpts)
+        : await generateK03Workflow(supabase, k03WzModal.line, workflowOpts)
       if (result.needConfirm) {
         setK03WzModal(m => ({
           ...m,
@@ -1149,13 +1213,15 @@ function App() {
         return
       }
       if (!result.ok) throw new Error(result.message || 'Nie udało się utworzyć K03.')
+      const wasEdit = k03WzModal.editMode
       const wzNo = k03WzModal.line.document_no
       const wzMode = k03WzModal.mode === 'przerob' ? 'przerób' : 'brak przerobu'
       const frozenNote = result.autoFrozen ? ' Kartoteka zamrożona automatycznie (kompletna i prawidłowa).' : ' Kartoteka pozostaje robocza (niespójność ilości – uzupełnij i odmroź ręcznie po korekcie).'
+      const editNote = wasEdit ? ' Decyzja K03 zmieniona.' : ''
       setK03WzModal(null)
       await loadK03TraceData()
       await loadFifoChangeLog()
-      setMessage(`K03 utworzony dla WZ ${wzNo} (${wzMode}).${frozenNote}`)
+      setMessage(`K03 ${wasEdit ? 'zaktualizowany' : 'utworzony'} dla WZ ${wzNo} (${wzMode}).${editNote}${frozenNote}`)
     } catch (err) {
       setK03WzModal(m => ({ ...m, saving: false, error: err?.message || String(err) }))
     }
@@ -1170,9 +1236,11 @@ function App() {
 
   function renderK03WzModal() {
     if (!k03WzModal) return null
-    const { line, mode, preview, loading, saving, error, confirmMismatch } = k03WzModal
+    const { line, mode, preview, loading, saving, error, confirmMismatch, editMode, fifoSourceOpt, fifoSourceStrict } = k03WzModal
     const wzDate = String(line.wz_date || '').slice(0, 10)
-    const title = mode === 'przerob' ? 'Dodaj przerób → K03' : 'Brak przerobu → K03'
+    const title = editMode
+      ? 'Zmień decyzję K03'
+      : (mode === 'przerob' ? 'Dodaj przerób → K03' : 'Brak przerobu → K03')
     const rawTotal = preview?.pzRows?.reduce((s, r) => s + Number(r.qty || 0), 0) || 0
     const mismatch = preview && (Math.abs(rawTotal - Number(preview.saleQty || 0)) >= 0.001 || Number(preview.shortage || 0) > 0)
 
@@ -1180,7 +1248,36 @@ function App() {
       <div className="haccp-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 720 }}>
         <h3>{title}</h3>
         <p><b>{line.product_name}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
+        {editMode && <p className="hint">Możesz zmienić tryb (przerób / bez przerobu), datę, źródła PZ i numer partii. Zamrożona kartoteka zostanie odmrożona i zapisana od nowa.</p>}
         <div className="form-grid compact">
+          {editMode && <label>Decyzja
+            <select value={mode} onChange={e => setK03WzModal(m => ({
+              ...m,
+              mode: e.target.value,
+              przerobDate: e.target.value === 'przerob'
+                ? String(m.przerobDate || m.line.workflow?.przerob_date || wzDate).slice(0, 10)
+                : '',
+              lotNo: e.target.value === 'przerob'
+                ? (m.lotNo || m.line.workflow?.lot_no || m.line.k03Form?.lot_no || '')
+                : '',
+              preview: null,
+              confirmMismatch: false
+            }))}>
+              <option value="przerob">Przerób</option>
+              <option value="bez_przerobu">Bez przerobu</option>
+            </select>
+          </label>}
+          {fifoSourceOpt && <label className="checkbox-row">
+            <input type="checkbox" checked={fifoSourceStrict} onChange={e => setK03WzModal(m => ({
+              ...m,
+              fifoSourceStrict: e.target.checked,
+              fifoSourceKeys: e.target.checked ? fifoSourceOpt.strictKeys : fifoSourceOpt.defaultKeys,
+              preview: null,
+              confirmMismatch: false
+            }))} />
+            {fifoSourceOpt.strictLabel}
+          </label>}
+          {fifoSourceOpt && <p className="hint">{fifoSourceOpt.hint}</p>}
           {mode === 'przerob' && <>
             <label>Data przerobu (max = data WZ {wzDate || '—'})
               <input type="date" max={wzDate || undefined} value={k03WzModal.przerobDate} onChange={e => setK03WzModal(m => ({ ...m, przerobDate: clampPrzerobDateToWz(e.target.value, wzDate), preview: null, confirmMismatch: false }))} />
@@ -1203,7 +1300,7 @@ function App() {
         <div className="actions">
           <button className="secondary" onClick={refreshK03WzPreview} disabled={loading || saving}>{loading ? 'FIFO…' : 'Podgląd FIFO / PZ'}</button>
           <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || (!preview && !confirmMismatch)}>
-            {saving ? 'Zapisywanie…' : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : 'Utwórz K03'}
+            {saving ? 'Zapisywanie…' : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
           </button>
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
         </div>
@@ -5635,8 +5732,20 @@ function App() {
     )) return null
 
     setFifoRecalculating(true)
+    setFifoProgress({ phase: 'init', current: 0, total: 0, message: 'Przygotowanie przeliczenia FIFO…' })
+    setMessage('Przeliczanie FIFO…')
     try {
-      const fifoResult = await recalculateFifoIncremental(supabase, { frozenKeys })
+      const fifoResult = await recalculateFifoIncremental(supabase, {
+        frozenKeys,
+        onProgress: (p) => {
+          setFifoProgress(p)
+          if (p.phase === 'running' && p.total) {
+            setMessage(`FIFO: ${p.current}/${p.total} WZ (${p.processed || 0} uzupełnionych, ${p.skippedComplete || 0} pominiętych)…`)
+          } else if (p.phase === 'saving') {
+            setMessage(p.message || 'Zapis partii magazynowych…')
+          }
+        }
+      })
       if (!fifoResult.ok) throw new Error('Przeliczenie FIFO nie powiodło się.')
       await loadFifoData()
       await loadK03TraceData()
@@ -5655,6 +5764,7 @@ function App() {
       return null
     } finally {
       setFifoRecalculating(false)
+      setFifoProgress(null)
     }
   }
 
@@ -7486,6 +7596,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     <section className="card">
       <div className="section-title"><Database/><div><h2>PZ – Zarządzanie FIFO</h2><p>Ręczna korekta dat PZ bez ponownego importu. Po zmianie FIFO przelicza się od początku, ale kartoteki odświeżasz osobnym przyciskiem.</p></div></div>
       {fifoKartotekiDirty && <div className="warning inline-warning"><AlertTriangle size={18}/><div><b>Zmieniono dane FIFO.</b> Kartoteki mogą pokazywać stary układ. Kliknij „Odśwież kartoteki”.</div></div>}
+      {renderFifoProgressBanner()}
       {message && <p className="message">{message}</p>}
       <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={recalculateFifoFullFromPzTab} disabled={fifoRecalculating}>Pełne FIFO (admin)</button><button className="secondary" onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> Odśwież kartoteki</button></div>
       <div className="summary"><span>PZ razem: <b>{pzRows.length}</b></span><span>Nieprzypisane: <b>{pzRows.filter(r => r.status_key === 'wolna').length}</b></span><span>Częściowo: <b>{pzRows.filter(r => r.status_key === 'czesciowo').length}</b></span><span>Wykorzystane: <b>{pzRows.filter(r => r.status_key === 'wykorzystana').length}</b></span></div>
@@ -7882,6 +7993,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       {docsHubSection === 'kartoteki' && <>
       {renderK03UnfreezeBanner()}
+      {renderFifoProgressBanner()}
       <div className="docs-layout">
         {renderDocsSidebar(docsFilterStats)}
         <div className="docs-main">
@@ -7943,6 +8055,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                       const k03Doc = syntheticK03Docs.find(d => d.id === line.formId) || line.k03Form
                       return <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: { key: line.formId, type: 'K03', product: line.product_name, docs: [k03Doc] } })}><Eye size={14}/></button>
                     })()}
+                    {(line.status === 'k03_ready' || line.status === 'legacy_auto' || line.status === 'frozen') && <>
+                      <button className="mini" onClick={() => openK03WzEditModal(line)}>Zmień decyzję</button>
+                    </>}
                     {(line.status === 'k03_ready' || line.status === 'legacy_auto') && !line.frozen && isAdmin(authProfile) && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                   </td>
                 </tr>

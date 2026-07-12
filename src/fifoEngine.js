@@ -1,7 +1,7 @@
 /**
  * FIFO – przeliczanie przyrostowe (braki) i pełne z ochroną zamrożonych K03.
  */
-import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, sameFifoPool } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey } from './k03Engine'
 
 function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
@@ -163,6 +163,22 @@ async function persistLot(client, lot) {
   if (error) throw error
 }
 
+async function persistLotsBatch(client, lotState, lotIds) {
+  const ids = Array.from(new Set((lotIds || []).filter(Boolean)))
+  if (!ids.length) return
+  await Promise.all(ids.map(id => {
+    const lot = lotState.get(id)
+    return lot ? persistLot(client, lot) : Promise.resolve()
+  }))
+}
+
+function saleMatchSpecWithOptions(sale, options = {}) {
+  const keys = options.fifoSourceKeys || options.fifo_source_keys
+  if (!keys?.length) return sale.matchSpec
+  const variantKey = sale.matchSpec?.variantKey || normalizeFifoProductKey(sale.product_name)
+  return buildFifoMatchSpecFromSourceKeys(variantKey, keys) || sale.matchSpec
+}
+
 async function deleteAllocations(client, ids) {
   for (let i = 0; i < ids.length; i += 100) {
     const chunk = ids.slice(i, i + 100)
@@ -202,13 +218,15 @@ function resetIncomingLotsToInitial(lotState, opMap) {
   }
 }
 
-async function allocateSale(client, sale, lotState, productMap, opMap) {
+async function allocateSale(client, sale, lotState, productMap, opMap, options = {}) {
   let remaining = Number(sale.sale_qty || 0)
   let allocated = 0
   let allocationCount = 0
   const cutoff = String(sale.sale_date || '9999-12-31').slice(0, 10)
-  const lots = candidateLots(lotState, productMap, sale.matchSpec, cutoff, opMap)
-  const touchedLots = new Map()
+  const matchSpec = options.matchSpec || sale.matchSpec
+  const lots = candidateLots(lotState, productMap, matchSpec, cutoff, opMap)
+  const touchedLotIds = options.touchedLotIds || null
+  const deferPersist = Boolean(options.deferPersist)
   const allocRows = []
 
   for (const lot of lots) {
@@ -221,7 +239,7 @@ async function allocateSale(client, sale, lotState, productMap, opMap) {
     lot.remaining_qty = newRemaining
     lot.status = newRemaining <= 0.0005 ? 'zuzyta' : 'aktywna'
     lotState.set(lot.id, lot)
-    touchedLots.set(lot.id, lot)
+    if (touchedLotIds) touchedLotIds.add(lot.id)
     allocRows.push({
       operation_id: sale.operation_id,
       source_lot_id: lot.id,
@@ -234,8 +252,11 @@ async function allocateSale(client, sale, lotState, productMap, opMap) {
     allocated += take
   }
 
-  if (touchedLots.size) {
-    await Promise.all([...touchedLots.values()].map(lot => persistLot(client, lot)))
+  if (!deferPersist && touchedLotIds) {
+    await persistLotsBatch(client, lotState, [...touchedLotIds])
+  } else if (!deferPersist) {
+    const uniqueIds = [...new Set(allocRows.map(r => r.source_lot_id))]
+    await persistLotsBatch(client, lotState, uniqueIds)
   }
   if (allocRows.length) {
     const { error: allocErr } = await client.from('fifo_allocations').insert(allocRows)
@@ -245,7 +266,8 @@ async function allocateSale(client, sale, lotState, productMap, opMap) {
   return {
     allocationCount,
     allocated,
-    shortage: remaining > 0.0005 ? remaining : 0
+    shortage: remaining > 0.0005 ? remaining : 0,
+    touchedLotIds: touchedLotIds ? [...touchedLotIds] : [...new Set(allocRows.map(r => r.source_lot_id))]
   }
 }
 
@@ -276,16 +298,17 @@ function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap) {
 }
 
 /** Rezerwuje FIFO dla wcześniejszych WZ bez pełnego rozliczenia (kolejność chronologiczna). */
-function reservePriorUnallocatedSales(base, lotState, targetSaleKey) {
+function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatchSpec = null) {
   const targetIdx = base.sortedSales.findIndex(s => s.key === targetSaleKey)
   if (targetIdx <= 0) return { priorUnallocatedQty: 0, priorUnallocatedCount: 0 }
 
+  const poolSpec = targetMatchSpec || base.sortedSales[targetIdx]?.matchSpec
   let priorUnallocatedQty = 0
   let priorUnallocatedCount = 0
 
   for (let i = 0; i < targetIdx; i += 1) {
     const sale = base.sortedSales[i]
-    if (!sameFifoPool(sale.matchSpec, base.sortedSales[targetIdx]?.matchSpec)) continue
+    if (!sameFifoPool(sale.matchSpec, poolSpec)) continue
 
     const existing = base.allocationsBySaleKey.get(sale.key) || []
     const saleQty = Number(sale.sale_qty || 0)
@@ -394,7 +417,7 @@ async function enrichAllocationRows(client, allocationRows) {
 }
 
 /** Podgląd FIFO dla jednej pozycji WZ z datą graniczną (przerób lub WZ). */
-export async function previewFifoForSale(client, operationId, productId, cutoffDate) {
+export async function previewFifoForSale(client, operationId, productId, cutoffDate, options = {}) {
   const base = await loadFifoBaseData(client)
   const saleKey = saleLineKey(operationId, productId)
   const sale = base.sortedSales.find(s => s.key === saleKey)
@@ -402,15 +425,16 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     return { ok: false, error: 'Nie znaleziono pozycji WZ w danych FIFO.', pzRows: [], allocated: 0, shortage: 0, saleQty: 0 }
   }
 
+  const matchSpec = saleMatchSpecWithOptions(sale, options)
   const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
   resetIncomingLotsToInitial(lotState, base.opMap)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
-  const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, sale.matchSpec, cutoff, base.opMap)
-  const salesSummary = summarizeGroupSales(base, sale.matchSpec, saleKey)
-  const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey)
-  const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, sale.matchSpec, cutoff, base.opMap)
-  const sim = simulateAllocation(sale, lotState, base.productMap, cutoff, base.opMap)
+  const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
+  const salesSummary = summarizeGroupSales(base, matchSpec, saleKey)
+  const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey, matchSpec)
+  const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
+  const sim = simulateAllocation({ ...sale, matchSpec }, lotState, base.productMap, cutoff, base.opMap)
   const pzRows = await enrichAllocationRows(client, sim.allocationRows)
   const pzRowsValid = pzRows.filter(r => {
     const pzDate = String(r.pz_date || '').slice(0, 10)
@@ -436,8 +460,8 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     excludedFuturePzQty,
     diagnostics: {
       productGroup: sale.sale_group,
-      fifoVariant: sale.matchSpec?.variantKey,
-      fifoSourceVariants: sale.matchSpec?.mode === 'variant' ? [...sale.matchSpec.sourceKeys] : undefined,
+      fifoVariant: matchSpec?.variantKey,
+      fifoSourceVariants: matchSpec?.mode === 'variant' ? [...matchSpec.sourceKeys] : undefined,
       purchasedTotalKg: inventoryBefore.purchasedTotal,
       purchasedWithinCutoffKg: inventoryBefore.purchasedWithinCutoff,
       soldTotalKg: salesSummary.soldTotal,
@@ -461,6 +485,7 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   const saleKey = saleLineKey(operationId, productId)
   const sale = base.sortedSales.find(s => s.key === saleKey)
   if (!sale) throw new Error('Nie znaleziono pozycji WZ w danych FIFO.')
+  const matchSpec = saleMatchSpecWithOptions(sale, logEntry)
 
   const existing = base.allocationsBySaleKey.get(saleKey) || []
   const beforeData = {
@@ -471,15 +496,14 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   if (existing.length) {
     restoreAllocationsToLots(existing, base.lotState)
     await deleteAllocations(client, existing.map(a => a.id))
-    for (const lot of base.lotState.values()) {
-      await persistLot(client, lot)
-    }
+    const restoredLotIds = [...new Set(existing.map(a => a.source_lot_id).filter(Boolean))]
+    await persistLotsBatch(client, base.lotState, restoredLotIds)
   }
 
-  reservePriorUnallocatedSales(base, base.lotState, saleKey)
+  reservePriorUnallocatedSales(base, base.lotState, saleKey, matchSpec)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
-  const saleForAlloc = { ...sale, sale_date: cutoff }
+  const saleForAlloc = { ...sale, matchSpec, sale_date: cutoff }
   const result = await allocateSale(client, saleForAlloc, base.lotState, base.productMap, base.opMap)
 
   const { data: newAllocs, error: allocErr } = await client
@@ -514,9 +538,8 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
         base.lotState
       )
       await deleteAllocations(client, badAllocIds)
-      for (const lot of base.lotState.values()) {
-        await persistLot(client, lot)
-      }
+      const badLotIds = [...new Set((newAllocs || []).filter(a => badAllocIds.includes(a.id)).map(a => a.source_lot_id))]
+      await persistLotsBatch(client, base.lotState, badLotIds)
     }
   }
   const allocatedValid = enrichedPz.reduce((s, r) => s + Number(r.qty || 0), 0)
@@ -566,9 +589,8 @@ export async function revertFifoForSale(client, operationId, productId, logEntry
 
   restoreAllocationsToLots(existing, base.lotState)
   await deleteAllocations(client, existing.map(a => a.id))
-  for (const lot of base.lotState.values()) {
-    await persistLot(client, lot)
-  }
+  const restoredLotIds = [...new Set(existing.map(a => a.source_lot_id).filter(Boolean))]
+  await persistLotsBatch(client, base.lotState, restoredLotIds)
 
   const sale = base.sortedSales.find(s => s.key === saleKey)
   await logFifoChange(client, {
@@ -599,6 +621,7 @@ async function logFifoChange(client, entry) {
  */
 export async function recalculateFifoIncremental(client, options = {}) {
   const frozenKeys = options.frozenKeys || new Set()
+  const onProgress = options.onProgress
   const base = await loadFifoBaseData(client)
   const { sortedSales, allocationsBySaleKey, lotState, productMap, opMap } = base
 
@@ -607,33 +630,38 @@ export async function recalculateFifoIncremental(client, options = {}) {
   let skippedFrozen = 0
   let allocationCount = 0
   const shortages = []
+  const touchedLotIds = new Set()
+  const total = sortedSales.length
+  onProgress?.({ phase: 'start', current: 0, total, message: `Wczytano ${total} pozycji WZ…` })
 
-  for (const sale of sortedSales) {
+  for (let i = 0; i < sortedSales.length; i += 1) {
+    const sale = sortedSales[i]
     const existing = allocationsBySaleKey.get(sale.key) || []
     const allocatedQty = existing.reduce((sum, a) => sum + Number(a.qty || 0), 0)
     const saleQty = Number(sale.sale_qty || 0)
 
     if (frozenKeys.has(sale.key)) {
       skippedFrozen += 1
+      if (i % 25 === 0) onProgress?.({ phase: 'running', current: i + 1, total, processed, skippedComplete, skippedFrozen })
       continue
     }
 
     if (allocatedQty + 0.001 >= saleQty) {
       skippedComplete += 1
+      if (i % 25 === 0) onProgress?.({ phase: 'running', current: i + 1, total, processed, skippedComplete, skippedFrozen })
       continue
     }
 
     if (existing.length) {
       restoreAllocationsToLots(existing, lotState)
       await deleteAllocations(client, existing.map(a => a.id))
-      const restoredLotIds = [...new Set(existing.map(a => a.source_lot_id).filter(Boolean))]
-      await Promise.all(restoredLotIds.map(lotId => {
-        const lot = lotState.get(lotId)
-        return lot ? persistLot(client, lot) : Promise.resolve()
-      }))
+      for (const id of existing.map(a => a.source_lot_id).filter(Boolean)) touchedLotIds.add(id)
     }
 
-    const result = await allocateSale(client, sale, lotState, productMap, opMap)
+    const result = await allocateSale(client, sale, lotState, productMap, opMap, {
+      deferPersist: true,
+      touchedLotIds
+    })
     processed += 1
     allocationCount += result.allocationCount
 
@@ -648,7 +676,15 @@ export async function recalculateFifoIncremental(client, options = {}) {
         shortage: result.shortage
       })
     }
+
+    if (i % 10 === 0 || i === sortedSales.length - 1) {
+      onProgress?.({ phase: 'running', current: i + 1, total, processed, skippedComplete, skippedFrozen, allocationCount })
+    }
   }
+
+  onProgress?.({ phase: 'saving', current: total, total, message: `Zapis partii (${touchedLotIds.size})…` })
+  await persistLotsBatch(client, lotState, [...touchedLotIds])
+  onProgress?.({ phase: 'done', current: total, total, processed, skippedComplete, skippedFrozen, allocationCount, shortages: shortages.length })
 
   return {
     ok: true,

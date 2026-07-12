@@ -14,7 +14,12 @@ import {
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.2'
+export const K03_WZ_ENGINE_VERSION = '1.3'
+
+function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
+  const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys
+  return keys?.length ? { fifoSourceKeys: keys } : {}
+}
 
 function wzMonthKey(dateStr) {
   return String(dateStr || '').slice(0, 7)
@@ -33,11 +38,13 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
   if (mode === 'przerob' && !przerobDate) throw new Error('Brak daty przerobu w zapisie K03.')
 
   const k03Key = line.formId || `K03-${line.key}`
+  const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
   const fifoResult = await persistFifoForSale(client, line.operation_id, line.product_id, cutoffDate, {
     k03_key: k03Key,
     change_type: 'k03_resync_fifo',
     change_reason: logReason,
-    changed_by: changedBy
+    changed_by: changedBy,
+    ...fifoOpts
   })
 
   const productMap = new Map()
@@ -374,7 +381,8 @@ export async function previewK03Workflow(client, line, options = {}) {
   const dateErr = validatePrzerobDate(mode, przerobDate, wzDate)
   if (dateErr) return { ok: false, error: dateErr }
 
-  return previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate)
+  const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
+  return previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate, fifoOpts)
 }
 
 /** Generuje K03 po decyzji użytkownika (przerób / brak przerobu). */
@@ -391,7 +399,8 @@ export async function generateK03Workflow(client, line, options = {}) {
   const dateErr = validatePrzerobDate(mode, przerobDate, wzDate)
   if (dateErr) throw new Error(dateErr)
 
-  const preview = await previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate)
+  const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
+  const preview = await previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate, fifoOpts)
   if (!preview.ok) throw new Error(preview.error || 'Błąd podglądu FIFO.')
 
   const rawTotal = preview.pzRows.reduce((s, r) => s + Number(r.qty || 0), 0)
@@ -417,7 +426,8 @@ export async function generateK03Workflow(client, line, options = {}) {
     k03_key: k03Key,
     change_type: mode === 'przerob' ? 'k03_created_przerob' : 'k03_created_bez_przerobu',
     change_reason: options.reason || (mode === 'przerob' ? 'Utworzenie K03 po przerobie' : 'Utworzenie K03 – brak przerobu'),
-    changed_by: changedBy
+    changed_by: changedBy,
+    ...fifoOpts
   })
 
   const { forms } = await loadK03Forms(client)
@@ -430,6 +440,7 @@ export async function generateK03Workflow(client, line, options = {}) {
   const lotNo = String(options.lotNo || '').trim() ||
     suggestLotNo(forms, line.product_name, line.product_id, productMap, mode === 'przerob' ? przerobDate : wzDate)
 
+  const fifoSourceKeys = options.fifoSourceKeys || options.fifo_source_keys || null
   const workflow = {
     mode,
     przerob_date: mode === 'przerob' ? przerobDate : null,
@@ -438,9 +449,12 @@ export async function generateK03Workflow(client, line, options = {}) {
     skip_k04_k06: mode === 'bez_przerobu',
     lot_no: lotNo,
     lot_no_manual: Boolean(String(options.lotNo || '').trim()),
+    fifo_source_keys: fifoSourceKeys?.length ? [...fifoSourceKeys] : null,
     quantity_warning_accepted: mismatch,
-    created_at: new Date().toISOString(),
-    created_by: changedBy,
+    created_at: line.workflow?.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    created_by: line.workflow?.created_by || changedBy,
+    updated_by: changedBy,
     engine_version: K03_WZ_ENGINE_VERSION
   }
 
@@ -502,6 +516,32 @@ export async function generateK03Workflow(client, line, options = {}) {
   }
 
   return { ok: true, doc, workflow, fifoResult, autoFrozen: canAutoFreeze }
+}
+
+/**
+ * Zmiana decyzji przerób / brak przerobu dla istniejącego K03.
+ * Odmraża zamrożoną kartotekę, cofa FIFO i generuje K03 od nowa.
+ */
+export async function changeK03Workflow(client, line, options = {}) {
+  const changedBy = options.changedBy || 'operator'
+  const reason = options.reason || 'Zmiana decyzji przerób / brak przerobu'
+  const wasFrozen = line.frozen || line.status === 'frozen'
+
+  if (wasFrozen) {
+    const doc = line.k03Form
+    if (!doc?.id) throw new Error('Brak dokumentu K03 do odmrożenia.')
+    await unfreezeK03Workflow(client, doc, reason, changedBy)
+  }
+
+  await revertFifoForSale(client, line.operation_id, line.product_id, {
+    k03_key: line.formId || `K03-${line.key}`,
+    change_type: 'k03_change_decision',
+    change_reason: reason,
+    changed_by: changedBy
+  })
+
+  const freshLine = { ...line, frozen: false, status: line.status === 'pending' ? line.status : 'k03_ready' }
+  return generateK03Workflow(client, freshLine, { ...options, changedBy, reason })
 }
 
 /**

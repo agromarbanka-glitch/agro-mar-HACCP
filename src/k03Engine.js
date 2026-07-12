@@ -230,7 +230,7 @@ export const CANONICAL_PRODUCT_GROUPS = new Set([
  * Klucze = normalizeFifoProductKey(nazwa sprzedaży).
  */
 export const FIFO_SALE_SOURCE_KEYS = {
-  truskawka: ['truskawka'],
+  truskawka: ['truskawka', 'truskawka z szypulka'],
   'truskawka z szypulka': ['truskawka z szypulka'],
   'malina pulpa': ['malina klasa i', 'malina extra'],
   'malina klasa i': ['malina klasa i'],
@@ -283,9 +283,46 @@ export function normalizeFifoProductKey(productName = '', product = null) {
   return text.split(' ')[0] || 'inna'
 }
 
+export function buildFifoMatchSpecFromSourceKeys(variantKey, sourceKeys) {
+  const keys = (sourceKeys || []).filter(Boolean)
+  if (!keys.length) return null
+  return {
+    mode: 'variant',
+    variantKey,
+    poolKey: `variant:${variantKey}:${keys.slice().sort().join('+')}`,
+    sourceKeys: new Set(keys)
+  }
+}
+
+/** Opcje wyboru źródeł PZ w modalu K03 (np. truskawka z/bez szypułki). */
+export function fifoSourceOptionsForVariant(variantKey) {
+  if (variantKey === 'truskawka') {
+    return {
+      variantKey,
+      defaultKeys: ['truskawka', 'truskawka z szypulka'],
+      strictKeys: ['truskawka'],
+      strictLabel: 'Tylko truskawka (bez szypułki)',
+      hint: 'Domyślnie magazyn traktuje obie odmiany łącznie. Odznacz, jeśli ten WZ dotyczy wyłącznie truskawki bez szypułki.'
+    }
+  }
+  return null
+}
+
+export function defaultFifoSourceKeys(productName = '', product = null) {
+  const variantKey = normalizeFifoProductKey(productName, product)
+  const opt = fifoSourceOptionsForVariant(variantKey)
+  if (opt) return opt.defaultKeys
+  return [...(FIFO_SALE_SOURCE_KEYS[variantKey] || [])]
+}
+
 /** Specyfikacja puli FIFO dla sprzedaży – wariant (precyzyjnie) lub grupa (fallback). */
-export function resolveFifoMatchSpec(product, productName = '', lotGroup = '') {
+export function resolveFifoMatchSpec(product, productName = '', lotGroup = '', options = {}) {
   const variantKey = normalizeFifoProductKey(productName || product?.name || '', product)
+  const overrideKeys = options.fifoSourceKeys || options.fifo_source_keys
+  if (overrideKeys?.length) {
+    const built = buildFifoMatchSpecFromSourceKeys(variantKey, overrideKeys)
+    if (built) return built
+  }
   const explicitSources = FIFO_SALE_SOURCE_KEYS[variantKey]
   if (explicitSources) {
     const sourceKeys = new Set(explicitSources)
@@ -317,7 +354,14 @@ export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
 }
 
 export function sameFifoPool(specA, specB) {
-  return Boolean(specA?.poolKey && specB?.poolKey && specA.poolKey === specB.poolKey)
+  if (!specA || !specB) return false
+  if (specA.poolKey && specB.poolKey && specA.poolKey === specB.poolKey) return true
+  if (specA.mode === 'variant' && specB.mode === 'variant') {
+    for (const k of specA.sourceKeys) {
+      if (specB.sourceKeys.has(k)) return true
+    }
+  }
+  return false
 }
 
 function looksLikeIsoDate(value) {
