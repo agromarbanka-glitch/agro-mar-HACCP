@@ -352,7 +352,7 @@ export function normalizeFifoProductKey(productName = '', product = null) {
     }
   }
 
-  if (/truskawka\s+z\s+szyp/.test(text)) return 'truskawka z szypulka'
+  if (/truskawka\s+(z\s*)?szyp|truskawka\s*szyp|\btsz\b/.test(text)) return 'truskawka z szypulka'
   if (/^truskawka\b/.test(text)) return 'truskawka'
 
   if (/malina\s+pulpa/.test(text)) return 'malina pulpa'
@@ -585,11 +585,11 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
     }]
     : rawRowsBase
 
-  const rawTotal = rawRows.reduce((sum, r) => sum + Number(r.qty || 0), 0)
+  const rawTotal = allocatedTotal
   const quantityWarningAccepted = workflow?.quantity_warning_accepted === true
   const quantitiesMatch = source === 'excel'
     ? false
-    : (Math.abs(rawTotal - saleQty) < 0.001 && shortage <= 0) || quantityWarningAccepted
+    : (Math.abs(allocatedTotal - saleQty) < 0.001 && shortage <= 0) || quantityWarningAccepted
   const formId = `K03-${saleLine.key}`
 
   return {
