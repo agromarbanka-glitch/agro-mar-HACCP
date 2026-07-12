@@ -646,9 +646,26 @@ export async function unfreezeAndResyncK03ByWzMonth(client, yearMonth, options =
   return { ok: true, ...results }
 }
 
+/** Obiekt WZ po odmrożeniu – bez flagi frozen w pamięci UI. */
+export function k03LineAfterUnfreeze(line) {
+  if (!line) return line
+  return {
+    ...line,
+    frozen: false,
+    status: line.status === 'frozen' ? 'k03_ready' : line.status,
+    k03Form: line.k03Form ? {
+      ...line.k03Form,
+      frozen: false,
+      data: {
+        ...(line.k03Form.data || {}),
+        frozen: false
+      }
+    } : line.k03Form
+  }
+}
+
 /** Cofnięcie decyzji K03 (tylko gdy nie zamrożony). */
 export async function revertK03Workflow(client, line, options = {}) {
-  if (line.frozen) throw new Error('Nie można cofnąć zamrożonego K03 – najpierw odmroź.')
   const k03Key = line.formId || `K03-${line.key}`
   const changedBy = options.changedBy || 'operator'
 
@@ -659,7 +676,9 @@ export async function revertK03Workflow(client, line, options = {}) {
   if (findErr) throw findErr
 
   const snap = (snaps || []).find(s => s.data?.k03_key === k03Key)
-  if (snap?.data?.frozen) throw new Error('K03 jest zamrożony.')
+  if (snap?.data?.frozen && !options.alreadyUnfrozen) {
+    throw new Error('K03 jest zamrożony – najpierw odmroź kartotekę.')
+  }
 
   await revertFifoForSale(client, line.operation_id, line.product_id, {
     k03_key: k03Key,

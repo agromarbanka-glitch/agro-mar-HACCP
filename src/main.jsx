@@ -6,7 +6,7 @@ import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocume
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
@@ -384,6 +384,7 @@ function App() {
   const [k03Snapshots, setK03Snapshots] = useState([])
   const [wzQueueLines, setWzQueueLines] = useState([])
   const [k03WzModal, setK03WzModal] = useState(null)
+  const [k03ActionDialog, setK03ActionDialog] = useState(null)
   const [k03UnfreezeSuggestions, setK03UnfreezeSuggestions] = useState([])
   const [fifoChangeLog, setFifoChangeLog] = useState([])
   const [fifoRecalculating, setFifoRecalculating] = useState(false)
@@ -1046,27 +1047,114 @@ function App() {
     patchK03Document(doc, { rawRowPatches: { [rowIndex]: { [field]: value } } })
   }
 
-  async function unfreezeK03Document(doc) {
+  function openK03UnfreezeDialog(doc) {
     if (!doc?.id || !supabase) return
     if (!doc.frozen && doc.data?.frozen !== true) {
       setMessage('Kartoteka nie jest zamrożona.')
       return
     }
-    const reason = window.prompt('Podaj powód odmrożenia K03 (wymagane):')
-    if (!reason?.trim()) {
-      setMessage('Odmrożenie anulowane – brak powodu.')
+    setK03ActionDialog({
+      kind: 'unfreeze',
+      doc,
+      reason: '',
+      busy: false,
+      error: ''
+    })
+  }
+
+  function openK03RevertDialog(line) {
+    if (!line || !supabase) return
+    if (!ensureCanDelete()) return
+    const frozen = k03LineIsFrozen(line)
+    setK03ActionDialog({
+      kind: 'revert',
+      line,
+      frozen,
+      reason: '',
+      revertReason: 'Cofnięcie decyzji K03/WZ',
+      busy: false,
+      error: ''
+    })
+  }
+
+  async function submitK03ActionDialog() {
+    if (!k03ActionDialog || !supabase) return
+    const dialog = k03ActionDialog
+
+    if (dialog.kind === 'unfreeze') {
+      const reason = String(dialog.reason || '').trim()
+      if (!reason) {
+        setK03ActionDialog(d => ({ ...d, error: 'Podaj powód odmrożenia.' }))
+        return
+      }
+      setK03ActionDialog(d => ({ ...d, busy: true, error: '' }))
+      try {
+        await unfreezeK03Workflow(supabase, dialog.doc, reason, userRole)
+        await loadK03TraceData()
+        await loadFifoChangeLog()
+        setK03UnfreezeSuggestions(prev => prev.filter(s => s.k03_key !== dialog.doc.id))
+        setK03ActionDialog(null)
+        setMessage(`K03 odmrożony: ${reason}`)
+      } catch (err) {
+        setK03ActionDialog(d => ({ ...d, busy: false, error: err?.message || String(err) }))
+      }
       return
     }
-    if (!window.confirm(`Odmrozić K03 dla WZ ${doc.document_no || ''}? FIFO będzie mógł ponownie zmienić to rozliczenie.`)) return
-    try {
-      await unfreezeK03Workflow(supabase, doc, reason.trim(), userRole)
-      await loadK03TraceData()
-      await loadFifoChangeLog()
-      setK03UnfreezeSuggestions(prev => prev.filter(s => s.k03_key !== doc.id))
-      setMessage(`K03 odmrożony: ${reason.trim()}`)
-    } catch (err) {
-      setMessage(`Błąd odmrożenia: ${err?.message || String(err)}`)
+
+    if (dialog.kind === 'revert') {
+      const { line, frozen } = dialog
+      let workLine = line
+      const revertReason = String(dialog.revertReason || dialog.reason || 'Cofnięcie decyzji K03/WZ').trim() || 'Cofnięcie decyzji K03/WZ'
+
+      if (frozen) {
+        const unfreezeReason = String(dialog.reason || '').trim()
+        if (!unfreezeReason) {
+          setK03ActionDialog(d => ({ ...d, error: 'Podaj powód odmrożenia przed cofnięciem.' }))
+          return
+        }
+        const doc = line.k03Form
+        if (!doc?.id) {
+          setK03ActionDialog(d => ({ ...d, error: 'Brak dokumentu K03 do odmrożenia.' }))
+          return
+        }
+        setK03ActionDialog(d => ({ ...d, busy: true, error: '' }))
+        try {
+          await unfreezeK03Workflow(supabase, doc, unfreezeReason, userRole)
+          workLine = k03LineAfterUnfreeze(line)
+        } catch (err) {
+          setK03ActionDialog(d => ({ ...d, busy: false, error: `Błąd odmrożenia: ${err?.message || String(err)}` }))
+          return
+        }
+      } else {
+        setK03ActionDialog(d => ({ ...d, busy: true, error: '' }))
+      }
+
+      try {
+        await revertK03Workflow(supabase, workLine, {
+          reason: revertReason,
+          changedBy: userRole,
+          alreadyUnfrozen: frozen
+        })
+        await loadK03TraceData()
+        await loadFifoChangeLog()
+        setK03ActionDialog(null)
+        setMessage('Decyzja K03 cofnięta – pozycja wróciła do kolejki WZ.')
+      } catch (err) {
+        setK03ActionDialog(d => ({ ...d, busy: false, error: `Błąd cofania: ${err?.message || String(err)}` }))
+      }
     }
+  }
+
+  async function unfreezeK03Document(doc) {
+    openK03UnfreezeDialog(doc)
+  }
+
+  async function unfreezeK03Line(line) {
+    openK03UnfreezeDialog(line?.k03Form)
+  }
+
+  async function revertK03Line(line) {
+    openK03RevertDialog(line)
   }
 
   function docFromK03Snapshot(snap) {
@@ -1136,45 +1224,6 @@ function App() {
         ))}
       </div>
     </section>
-  }
-
-  async function unfreezeK03Line(line) {
-    const doc = line?.k03Form
-    if (!doc?.id || !supabase) return
-    await unfreezeK03Document(doc)
-  }
-
-  async function revertK03Line(line) {
-    if (!line || !supabase) return
-    if (!ensureCanDelete()) return
-    if (line.frozen || line.status === 'frozen') {
-      const doc = line.k03Form
-      if (!doc?.id) {
-        setMessage('Brak dokumentu K03 do odmrożenia.')
-        return
-      }
-      const unfreezeReason = window.prompt('K03 jest zamrożony. Podaj powód odmrożenia przed cofnięciem decyzji:')
-      if (!unfreezeReason?.trim()) {
-        setMessage('Anulowano – brak powodu odmrożenia.')
-        return
-      }
-      try {
-        await unfreezeK03Workflow(supabase, doc, unfreezeReason.trim(), userRole)
-      } catch (err) {
-        setMessage(`Błąd odmrożenia: ${err?.message || String(err)}`)
-        return
-      }
-    }
-    if (!confirmDelete(`Decyzję K03 dla WZ ${line.document_no} / ${line.product_name}.\n\nPozycja wróci do kolejki WZ.`)) return
-    const reason = window.prompt('Powód cofnięcia (opcjonalnie):') || 'Cofnięcie decyzji K03/WZ'
-    try {
-      await revertK03Workflow(supabase, line, { reason, changedBy: userRole })
-      await loadK03TraceData()
-      await loadFifoChangeLog()
-      setMessage('Decyzja K03 cofnięta – pozycja wróciła do kolejki WZ.')
-    } catch (err) {
-      setMessage(`Błąd cofania: ${err?.message || String(err)}`)
-    }
   }
 
   function buildK03WzModalState(line, mode, editMode = false) {
@@ -1416,6 +1465,59 @@ function App() {
           <tbody>{preview.pzRows.map((r, i) => <tr key={i}><td>{r.pz_no}</td><td>{r.pz_date}</td><td>{r.supplier}</td><td>{Number(r.qty || 0).toLocaleString('pl-PL')}</td></tr>)}</tbody>
         </table></div>}
         </div>}
+      </div>
+    </div>
+  }
+
+  function renderK03ActionDialog() {
+    if (!k03ActionDialog) return null
+    const { kind, busy, error } = k03ActionDialog
+    const isUnfreeze = kind === 'unfreeze'
+    const doc = k03ActionDialog.doc
+    const line = k03ActionDialog.line
+    const frozen = k03ActionDialog.frozen
+    const wzNo = isUnfreeze ? (doc?.document_no || '') : (line?.document_no || '')
+    const productName = isUnfreeze ? (doc?.product_name || '') : (line?.product_name || '')
+
+    return <div className="modal-backdrop k03-wz-modal-backdrop" onClick={() => !busy && setK03ActionDialog(null)}>
+      <div className="haccp-modal k03-wz-modal" onClick={e => e.stopPropagation()}>
+        <div className="k03-wz-modal-header">
+          <h3>{isUnfreeze ? 'Odmrożenie K03' : 'Cofnięcie decyzji K03'}</h3>
+          <p className="k03-wz-modal-subtitle">
+            <b>{productName}</b>{wzNo ? ` · WZ ${wzNo}` : ''}
+          </p>
+          {isUnfreeze && <p className="hint k03-wz-modal-note">Po odmrożeniu FIFO może ponownie zmienić rozliczenie tej kartoteki.</p>}
+          {!isUnfreeze && frozen && <p className="hint k03-wz-modal-note">Kartoteka jest zamrożona – najpierw zostanie odmrożona, potem decyzja wróci do kolejki WZ.</p>}
+          {!isUnfreeze && !frozen && <p className="hint k03-wz-modal-note">Pozycja wróci do kolejki WZ – możesz ponownie wybrać przerób lub brak przerobu.</p>}
+        </div>
+        <div className="k03-wz-modal-body">
+          {(isUnfreeze || frozen) && <label className="k03-wz-field full-width">
+            Powód odmrożenia (wymagane)
+            <textarea
+              rows={3}
+              value={k03ActionDialog.reason || ''}
+              onChange={e => setK03ActionDialog(d => ({ ...d, reason: e.target.value, error: '' }))}
+              placeholder="np. korekta źródeł PZ, ponowne rozliczenie FIFO"
+              disabled={busy}
+            />
+          </label>}
+          {!isUnfreeze && <label className="k03-wz-field full-width">
+            Powód cofnięcia (opcjonalnie)
+            <input
+              value={k03ActionDialog.revertReason || ''}
+              onChange={e => setK03ActionDialog(d => ({ ...d, revertReason: e.target.value, error: '' }))}
+              placeholder="Cofnięcie decyzji K03/WZ"
+              disabled={busy}
+            />
+          </label>}
+          {error && <p className="status danger">{error}</p>}
+        </div>
+        <div className="k03-wz-modal-actions actions">
+          <button type="button" onClick={submitK03ActionDialog} disabled={busy}>
+            {busy ? 'Zapisywanie…' : (isUnfreeze ? 'Odmroź' : 'Cofnij decyzję')}
+          </button>
+          <button type="button" className="secondary" onClick={() => setK03ActionDialog(null)} disabled={busy}>Anuluj</button>
+        </div>
       </div>
     </div>
   }
@@ -8165,8 +8267,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                     })()}
                     {hasK03 && <>
                       <button className="mini" onClick={() => openK03WzEditModal(line)}>Zmień decyzję</button>
-                      {frozen && <button className="mini secondary" onClick={() => unfreezeK03Line(line)}>Odmroź</button>}
-                      {isAdmin(authProfile) && <button className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
+                      {frozen && <button type="button" className="mini secondary" onClick={() => unfreezeK03Line(line)}>Odmroź</button>}
+                      {isAdmin(authProfile) && <button type="button" className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                     </>}
                   </td>
                 </tr>
@@ -8284,6 +8386,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </div>
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     {renderK03WzModal()}
+    {renderK03ActionDialog()}
     </>}
 
     {activeTab === 'archiwum-pdf' && canSeeTab(authProfile, 'archiwum-pdf') && (
