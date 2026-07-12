@@ -1249,13 +1249,15 @@ function App() {
     const rawTotal = preview?.pzRows?.reduce((s, r) => s + Number(r.qty || 0), 0) || 0
     const mismatch = preview && (Math.abs(rawTotal - Number(preview.saleQty || 0)) >= 0.001 || Number(preview.shortage || 0) > 0)
 
-    return <div className="modal-backdrop" onClick={() => !saving && setK03WzModal(null)}>
-      <div className="haccp-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 720 }}>
-        <h3>{title}</h3>
-        <p><b>{line.product_name}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
-        {editMode && <p className="hint">Możesz zmienić tryb (przerób / bez przerobu), datę, źródła PZ i numer partii. Zamrożona kartoteka zostanie odmrożona i zapisana od nowa.</p>}
-        <div className="form-grid compact">
-          {editMode && <label>Decyzja
+    return <div className="modal-backdrop k03-wz-modal-backdrop" onClick={() => !saving && setK03WzModal(null)}>
+      <div className="haccp-modal k03-wz-modal" onClick={e => e.stopPropagation()}>
+        <div className="k03-wz-modal-header">
+          <h3>{title}</h3>
+          <p className="k03-wz-modal-subtitle"><b>{line.product_name}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
+          {editMode && <p className="hint k03-wz-modal-note">Możesz zmienić tryb (przerób / bez przerobu), datę, źródła PZ i numer partii. Zamrożona kartoteka zostanie odmrożona i zapisana od nowa.</p>}
+        </div>
+        <div className="k03-wz-modal-body">
+          {editMode && <label className="k03-wz-field">Decyzja
             <select value={mode} onChange={e => setK03WzModal(m => ({
               ...m,
               mode: e.target.value,
@@ -1274,45 +1276,51 @@ function App() {
           </label>}
           {fifoSourcePicker && <fieldset className="fifo-source-picker">
             <legend>Źródła PZ (klasa / odmiana)</legend>
-            <p className="hint">{fifoSourcePicker.hint}</p>
-            {fifoSourcePicker.choices.map(choice => (
-              <label key={choice.key} className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={(fifoSourceKeys || []).includes(choice.key)}
-                  onChange={e => toggleK03FifoSourceKey(choice.key, e.target.checked)}
-                />
-                {choice.label}
-              </label>
-            ))}
+            <p className="fifo-source-hint">{fifoSourcePicker.hint}</p>
+            <div className="fifo-source-choices">
+              {fifoSourcePicker.choices.map(choice => {
+                const active = (fifoSourceKeys || []).includes(choice.key)
+                return (
+                  <label key={choice.key} className={`fifo-source-choice${active ? ' active' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={active}
+                      onChange={e => toggleK03FifoSourceKey(choice.key, e.target.checked)}
+                    />
+                    <span>{choice.label}</span>
+                  </label>
+                )
+              })}
+            </div>
             {(fifoSourceKeys || []).length === 0 && <p className="status danger">Zaznacz co najmniej jedno źródło PZ.</p>}
           </fieldset>}
           {mode === 'przerob' && <>
-            <label>Data przerobu (max = data WZ {wzDate || '—'})
+            <label className="k03-wz-field">Data przerobu (max = data WZ {wzDate || '—'})
               <input type="date" max={wzDate || undefined} value={k03WzModal.przerobDate} onChange={e => setK03WzModal(m => ({ ...m, przerobDate: clampPrzerobDateToWz(e.target.value, wzDate), preview: null, confirmMismatch: false }))} />
             </label>
-            <label>Numer partii wyrobu (proponowany – możesz zmienić)
+            <label className="k03-wz-field">Numer partii wyrobu (proponowany – możesz zmienić)
               <input value={k03WzModal.lotNo} onChange={e => setK03WzModal(m => ({ ...m, lotNo: e.target.value }))} placeholder="np. T/001/2026" />
             </label>
-            <p className="hint">Przerób musi być w dniu WZ lub wcześniej. FIFO dobiera PZ z datą ≤ data przerobu. Jeśli brakuje surowca, a w magazynie widać PZ z późniejszą datą – popraw datę przyjęcia w Magazyn → PZ/FIFO (nie datę przerobu).</p>
+            <p className="hint">Przerób musi być w dniu WZ lub wcześniej. FIFO dobiera PZ z datą ≤ data przerobu.</p>
           </>}
           {mode === 'bez_przerobu' && <>
-            <label>Czy surowiec był magazynowany (K02)?
+            <label className="k03-wz-field">Czy surowiec był magazynowany (K02)?
               <select value={k03WzModal.rawStored ? 'tak' : 'nie'} onChange={e => setK03WzModal(m => ({ ...m, rawStored: e.target.value === 'tak' }))}>
                 <option value="nie">Nie – gotowiec / prosto na samochód</option>
                 <option value="tak">Tak – wymaga K02</option>
               </select>
             </label>
-            <p className="hint">FIFO dobiera tylko PZ z datą ≤ data WZ. Późniejsze PZ nie są przypisywane.</p>
+            <p className="hint">FIFO dobiera tylko PZ z datą ≤ data WZ.</p>
           </>}
         </div>
-        <div className="actions">
+        <div className="k03-wz-modal-actions actions">
           <button className="secondary" onClick={refreshK03WzPreview} disabled={loading || saving}>{loading ? 'FIFO…' : 'Podgląd FIFO / PZ'}</button>
           <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || (!preview && !confirmMismatch) || (fifoSourcePicker && !(fifoSourceKeys || []).length)}>
             {saving ? 'Zapisywanie…' : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
           </button>
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
         </div>
+        {(error || preview) && <div className="k03-wz-modal-footer">
         {error && <p className="status danger">{error}</p>}
         {preview?.diagnostics && (
           <div className="hint fifo-diag-box">
@@ -1343,6 +1351,7 @@ function App() {
           <thead><tr><th>PZ</th><th>Data</th><th>Dostawca</th><th>Ilość kg</th></tr></thead>
           <tbody>{preview.pzRows.map((r, i) => <tr key={i}><td>{r.pz_no}</td><td>{r.pz_date}</td><td>{r.supplier}</td><td>{Number(r.qty || 0).toLocaleString('pl-PL')}</td></tr>)}</tbody>
         </table></div>}
+        </div>}
       </div>
     </div>
   }
@@ -8044,6 +8053,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <p className="hint k03-bulk-stats">
               W {k03BulkMonth}: <b>{k03BulkMonthStats.total}</b> WZ · <b>{k03BulkMonthStats.frozen}</b> zamrożonych · <b>{k03BulkMonthStats.ready}</b> otwartych · <b>{k03BulkMonthStats.pending}</b> oczekuje
             </p>
+            <details className="k03-reset-guide">
+              <summary><b>Od nowa przeliczyć K03 za miesiąc?</b></summary>
+              <ol className="hint k03-reset-steps">
+                <li><b>Nie usuwaj importu</b> – PZ i WZ w bazie są poprawne. Import usuwałby też dane magazynowe.</li>
+                <li>Magazyn → PZ/FIFO → <b>Pełne FIFO (admin)</b> – zeruje rozliczenia FIFO (zachowuje zamrożone K03).</li>
+                <li>Tu wybierz miesiąc → <b>Odmroź miesiąc i przelicz K03</b> – odmraża kartoteki i zapisuje K03 wg zapisanych decyzji.</li>
+                <li>Jeśli chcesz <b>decyzje od zera</b> (przerób/bez przerobu, klasy PZ): w Liście WZ użyj <b>Cofnij</b> (najpierw odmroź zamrożone), potem od najstarszej daty WZ wybierz <b>Przerób</b> lub <b>Bez przerobu</b> z właściwymi źródłami PZ.</li>
+              </ol>
+            </details>
           </section>
           <details className="docs-k03-wz" open>
             <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje · {syntheticK03Docs.length} K03</summary>

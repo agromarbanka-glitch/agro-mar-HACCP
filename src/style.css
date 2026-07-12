@@ -452,6 +452,10 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k03-bulk-row label { font-size: 12px; font-weight: 700; display: flex; flex-direction: column; gap: 6px; min-width: 180px; }
 .k03-bulk-row input[type="month"] { padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
 .k03-bulk-stats { margin-top: 10px; }
+.k03-reset-guide { margin-top: 12px; }
+.k03-reset-guide summary { cursor: pointer; font-size: 14px; color: #1e40af; }
+.k03-reset-steps { margin: 10px 0 0 20px; line-height: 1.55; }
+.k03-reset-steps li { margin-bottom: 6px; }
 
 .fifo-progress-banner {
   margin-bottom: 12px;
@@ -481,19 +485,127 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   font-weight: 600;
 }
 .checkbox-row input[type="checkbox"] { width: auto; margin: 0; }
+
+/* Modal K03/WZ – czytelny, nieprzezroczysty */
+.k03-wz-modal-backdrop {
+  z-index: 120;
+  background: rgba(15, 23, 42, 0.62);
+  backdrop-filter: blur(2px);
+}
+.haccp-modal.k03-wz-modal {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+  background: #fff;
+  color: #111827;
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+  padding: 0;
+  border: 1px solid #e5e7eb;
+}
+.k03-wz-modal-header {
+  padding: 20px 22px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+  border-radius: 16px 16px 0 0;
+}
+.k03-wz-modal-header h3 { margin: 0 0 8px; font-size: 20px; color: #0f172a; }
+.k03-wz-modal-subtitle { margin: 0; font-size: 14px; line-height: 1.45; }
+.k03-wz-modal-note { margin: 10px 0 0; }
+.k03-wz-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 22px;
+  background: #fff;
+}
+.k03-wz-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #374151;
+}
+.k03-wz-field input,
+.k03-wz-field select {
+  font-weight: 500;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #fff;
+  font-size: 14px;
+}
+.k03-wz-modal-actions {
+  padding: 14px 22px 20px;
+  border-top: 1px solid #e5e7eb;
+  background: #f8fafc;
+  border-radius: 0 0 16px 16px;
+  flex-wrap: wrap;
+}
+.k03-wz-modal-footer {
+  padding: 0 22px 18px;
+  background: #fff;
+  border-top: 1px solid #f1f5f9;
+}
+.k03-wz-modal-footer .fifo-diag-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
 .fifo-source-picker {
-  border: 1px solid var(--line);
+  border: 2px solid #dbeafe;
   border-radius: 12px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   margin: 0;
-  grid-column: 1 / -1;
+  background: #eff6ff;
 }
 .fifo-source-picker legend {
-  font-weight: 700;
-  font-size: 13px;
-  padding: 0 6px;
+  font-weight: 800;
+  font-size: 14px;
+  padding: 0 8px;
+  color: #1e40af;
 }
-.fifo-source-picker .checkbox-row { margin-top: 6px; }
+.fifo-source-hint {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #475569;
+}
+.fifo-source-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fifo-source-choice {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.fifo-source-choice:hover { border-color: #93c5fd; background: #f8fbff; }
+.fifo-source-choice.active {
+  border-color: #2563eb;
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+.fifo-source-choice input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: #2563eb;
+}
+.fifo-source-choice span { flex: 1; }
 
 /* W03 – harmonogram mycia/czyszczenia */
 .w03-paper { overflow-x: auto; }
