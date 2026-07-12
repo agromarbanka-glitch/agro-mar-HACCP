@@ -428,6 +428,18 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   gap: 6px;
   align-items: center;
 }
+.k01-group-total {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.k01-group-total b { font-weight: 800; }
 .docs-table .row-actions {
   flex-wrap: wrap;
   gap: 6px;

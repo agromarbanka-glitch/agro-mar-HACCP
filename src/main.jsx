@@ -2769,6 +2769,10 @@ function App() {
     return cleanSupplierName(doc?.data?.faktyczny_dostawca || doc?.data?.dostawca_rzeczywisty || doc?.data?.dostawca || '')
   }
 
+  function k01GroupTotalKg(group) {
+    return (group?.docs || []).reduce((sum, doc) => sum + Number(doc.qty || 0), 0)
+  }
+
   /** K01: domyślnie tylko nr PZ; ręczny dostawca opcjonalnie przez „Zmień dostawcę”. */
   function shortSupplier(nameOrDoc, docNo) {
     const isDoc = nameOrDoc && typeof nameOrDoc === 'object'
@@ -5587,7 +5591,14 @@ function App() {
         {isAdmin(authProfile) && liveGroup.type === 'R02' && <button className="secondary danger" onClick={() => deleteR02Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R01' && <button className="secondary danger" onClick={() => deleteR01Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
         {isAdmin(authProfile) && liveGroup.type === 'R13' && <button className="secondary danger" onClick={() => deleteR13Month(liveGroup)}><Trash2 size={16}/> Usuń kartotekę</button>}
-        {isAdmin(authProfile) && String(liveGroup.type || '').startsWith('K') && <button className="secondary danger" onClick={() => deleteKartotekaGroup(liveGroup)} disabled={haccpBusy}><Trash2 size={16}/> Usuń kartotekę</button>}
+        {isAdmin(authProfile) && String(liveGroup.type || '').startsWith('K') && <>
+          {liveGroup.type === 'K01' && (
+            <span className="k01-group-total" title="Suma ilości z wpisów w kartotece">
+              Σ <b>{k01GroupTotalKg(liveGroup).toLocaleString('pl-PL')} kg</b>
+            </span>
+          )}
+          <button className="secondary danger" onClick={() => deleteKartotekaGroup(liveGroup)} disabled={haccpBusy}><Trash2 size={16}/> Usuń kartotekę</button>
+        </>}
         {isAdmin(authProfile) && isRMonthlyReport(liveGroup.type) && <button className="secondary danger" onClick={async () => {
           const docsToDelete = resolveRMonthlyGroupDeleteDocs(liveGroup.type, haccpDocs, liveGroup)
           if (!docsToDelete.length) {
@@ -8221,6 +8232,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                   <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                   <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                   <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                  {docsFilter === 'K01' && (
+                    <span className="k01-group-total" title="Suma kg z wpisów w kartotece">
+                      <b>{k01GroupTotalKg(g).toLocaleString('pl-PL')} kg</b>
+                    </span>
+                  )}
                   {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy} title="Usuń kartotekę (Historia)"><Trash2 size={14}/> Usuń</button>}
                 </td>
               </tr>
