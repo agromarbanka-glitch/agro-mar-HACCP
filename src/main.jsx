@@ -1234,7 +1234,7 @@ function App() {
       ? String(wf.przerob_date || wf.fifo_cutoff_date || wzDate || new Date().toISOString().slice(0, 10)).slice(0, 10)
       : ''
     const lotNo = resolvedMode === 'przerob'
-      ? (wf.lot_no || line.k03Form?.lot_no || suggestK03LotNo(k03FormsRaw, line, przerobDate))
+      ? (wf.lot_no || line.k03Form?.lot_no || suggestK03LotNo(k03FormsRaw, line, przerobDate, { mode: 'przerob' }))
       : ''
     const fifoSourcePicker = fifoSourcePickerForProduct(line.product_name)
     const fifoSourceKeys = wf.fifo_source_keys?.length
@@ -1377,7 +1377,7 @@ function App() {
                 ? String(m.przerobDate || m.line.workflow?.przerob_date || wzDate).slice(0, 10)
                 : '',
               lotNo: e.target.value === 'przerob'
-                ? (m.lotNo || m.line.workflow?.lot_no || m.line.k03Form?.lot_no || '')
+                ? (m.lotNo || m.line.workflow?.lot_no || m.line.k03Form?.lot_no || suggestK03LotNo(k03FormsRaw, m.line, String(m.przerobDate || m.line.workflow?.przerob_date || wzDate).slice(0, 10), { mode: 'przerob' }))
                 : '',
               preview: null,
               confirmMismatch: false

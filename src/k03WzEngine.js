@@ -9,6 +9,7 @@ import {
   saveK03Snapshot,
   applyK03DocEdits,
   inferProductCode,
+  inferK03LotCode,
   productGroupForName,
   K03_ENGINE_VERSION
 } from './k03Engine'
@@ -206,10 +207,10 @@ export function wzStatusLabel(status) {
   return map[status] || status
 }
 
-function suggestLotNo(existingForms, productName, productId, productMap, referenceDate) {
+function suggestLotNo(existingForms, productName, productId, productMap, referenceDate, options = {}) {
   const year = String(referenceDate || '').slice(0, 4) || String(new Date().getFullYear())
   const product = productMap?.get?.(productId)
-  const code = inferProductCode(productName, product)
+  const code = inferK03LotCode(productName, product, options)
   const sameProduct = (existingForms || []).filter(f =>
     (f.data?.product_id === productId || normalizeKey(f.product_name) === normalizeKey(productName)) &&
     String(f.lot_no || '').includes(`/${year}`)
@@ -219,12 +220,13 @@ function suggestLotNo(existingForms, productName, productId, productMap, referen
 }
 
 /** Proponowany numer partii wyrobu gotowego dla K03 (przerób). */
-export function suggestK03LotNo(existingForms, line, referenceDate) {
+export function suggestK03LotNo(existingForms, line, referenceDate, options = {}) {
   const productMap = new Map()
   if (line?.product_id) {
     productMap.set(line.product_id, { name: line.product_name, product_group: line.product_group })
   }
-  return suggestLotNo(existingForms, line?.product_name, line?.product_id, productMap, referenceDate)
+  const mode = options.mode || line?.workflow?.mode || 'przerob'
+  return suggestLotNo(existingForms, line?.product_name, line?.product_id, productMap, referenceDate, { mode })
 }
 
 function normalizeKey(value) {
@@ -444,7 +446,7 @@ export async function generateK03Workflow(client, line, options = {}) {
   if (line.product_id) productMap.set(line.product_id, { name: line.product_name, product_group: line.product_group })
 
   const lotNo = String(options.lotNo || '').trim() ||
-    suggestLotNo(forms, line.product_name, line.product_id, productMap, mode === 'przerob' ? przerobDate : wzDate)
+    suggestLotNo(forms, line.product_name, line.product_id, productMap, mode === 'przerob' ? przerobDate : wzDate, { mode })
 
   const fifoSourceKeys = options.fifoSourceKeys || options.fifo_source_keys || null
   const workflow = {

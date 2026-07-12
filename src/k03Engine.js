@@ -9,8 +9,8 @@ const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
   ['porzeczka czerwona', 'Pk'], ['porzeczka czerwona pulpa', 'Pkp'], ['truskawka', 'T'],
   ['truskawka z szypulka', 'Tsz'], ['aronia', 'A'], ['sliwka', 'S'], ['wisnia', 'W'],
-  ['malina klasa i', 'M1'], ['malina extra', 'Mex'], ['jablko obierka', 'Jabobier'],
-  ['jablko na obierke', 'Jabobier'], ['jablko przemyslowe', 'Jab'], ['jablko', 'Jab']
+  ['malina klasa i', 'M1'], ['malina extra', 'Mex'], ['malina pw', 'Mpw'],
+  ['jablko obierka', 'Jabobier'], ['jablko na obierke', 'Jabobier'], ['jablko przemyslowe', 'Jab'], ['jablko', 'Jab']
 ])
 
 function escapeHtml(value) {
@@ -25,12 +25,30 @@ export function inferProductCode(productName, product) {
   if (product?.code) return product.code
   const key = normalizeText(productName)
   if (PRODUCT_CODES.has(key)) return PRODUCT_CODES.get(key)
+  const variantKey = normalizeFifoProductKey(productName, product)
+  if (variantKey === 'malina pw') return 'Mpw'
+  if (variantKey === 'malina klasa i') return 'M1'
+  if (variantKey === 'malina extra') return 'Mex'
+  if (variantKey === 'malina pulpa') return 'Mpulpa'
   const text = String(productName || 'Produkt')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/ł/g, 'l')
     .replace(/[^a-zA-Z0-9]/g, '')
   return (text.slice(0, 8) || 'X')
+}
+
+/** Numer partii wyrobu K03 – zależy od wariantu maliny i trybu przerób / bez przerobu. */
+export function inferK03LotCode(productName, product, options = {}) {
+  const mode = options.mode || 'bez_przerobu'
+  const variantKey = normalizeFifoProductKey(productName, product)
+  const isMalina = /^malina/.test(variantKey)
+  if (mode === 'przerob' && isMalina) return 'Mpulpa'
+  if (variantKey === 'malina pw' || variantKey === 'malina swieza') return 'Mpw'
+  if (variantKey === 'malina klasa i') return 'M1'
+  if (variantKey === 'malina extra') return 'Mex'
+  if (variantKey === 'malina pulpa') return 'Mpulpa'
+  return inferProductCode(productName, product)
 }
 
 export function formatK03PzNo(row) {
@@ -85,7 +103,7 @@ function assignFinishedLotNumbers(forms, productMap) {
     const counterKey = `${productKey}|${year}`
     const seq = (counters.get(counterKey) || 0) + 1
     counters.set(counterKey, seq)
-    const code = inferProductCode(form.product_name, product)
+    const code = inferK03LotCode(form.product_name, product, { mode: form.data?.k03_workflow?.mode || 'bez_przerobu' })
     lotById.set(form.id, `${code}/${String(seq).padStart(3, '0')}/${year}`)
   }
   return (forms || []).map(form => lotById.has(form.id) ? { ...form, lot_no: lotById.get(form.id) } : form)
@@ -232,11 +250,11 @@ export const CANONICAL_PRODUCT_GROUPS = new Set([
 export const FIFO_SALE_SOURCE_KEYS = {
   truskawka: ['truskawka', 'truskawka z szypulka'],
   'truskawka z szypulka': ['truskawka z szypulka'],
-  'malina pulpa': ['malina klasa i', 'malina extra'],
+  'malina pulpa': ['malina pw', 'malina klasa i', 'malina extra'],
   'malina klasa i': ['malina klasa i'],
   'malina extra': ['malina extra'],
-  'malina pw': ['malina klasa i', 'malina extra'],
-  'malina swieza': ['malina klasa i', 'malina extra'],
+  'malina pw': ['malina pw'],
+  'malina swieza': ['malina pw'],
   'porzeczka czarna pulpa': ['porzeczka czarna'],
   'porzeczka czerwona pulpa': ['porzeczka czerwona'],
   'porzeczka czarna': ['porzeczka czarna'],
@@ -274,18 +292,19 @@ const FIFO_SOURCE_PICKERS = {
     }
   },
   malina: {
-    hint: 'Która klasa maliny (źródło PZ) idzie na ten WZ / przerób?',
+    hint: 'Z jakich PZ pobierać surowiec? Przy przerobie pulpy domyślnie malina świeża PW (+ klasa I). Extra zaznacz tylko gdy faktycznie dodajesz do przerobu.',
     choices: [
+      { key: 'malina pw', label: 'Malina świeża PW (Mpw)' },
       { key: 'malina klasa i', label: 'Malina klasa I (M1)' },
-      { key: 'malina extra', label: 'Malina extra' }
+      { key: 'malina extra', label: 'Malina extra (Mex)' }
     ],
     defaultKeysForVariant: {
-      'malina pulpa': ['malina klasa i', 'malina extra'],
+      'malina pulpa': ['malina pw', 'malina klasa i'],
       'malina klasa i': ['malina klasa i'],
       'malina extra': ['malina extra'],
-      'malina pw': ['malina klasa i'],
-      'malina swieza': ['malina klasa i', 'malina extra'],
-      _default: ['malina klasa i', 'malina extra']
+      'malina pw': ['malina pw'],
+      'malina swieza': ['malina pw'],
+      _default: ['malina pw', 'malina klasa i']
     }
   },
   porzeczka_czarna: {
@@ -356,7 +375,8 @@ export function normalizeFifoProductKey(productName = '', product = null) {
   if (/^truskawka\b/.test(text)) return 'truskawka'
 
   if (/malina\s+pulpa/.test(text)) return 'malina pulpa'
-  if (/malina\s+swieza/.test(text)) return 'malina swieza'
+  if (/malina\s+(swieza\s*)?pw\b/.test(text)) return 'malina pw'
+  if (/malina\s+swieza/.test(text)) return 'malina pw'
   if (/malina\s+pw\b/.test(text)) return 'malina pw'
   if (/malina\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'malina i') return 'malina klasa i'
   if (/malina\s+extra/.test(text)) return 'malina extra'
