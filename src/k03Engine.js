@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-export const K03_ENGINE_VERSION = '3.8'
+export const K03_ENGINE_VERSION = '3.9'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -235,6 +235,8 @@ export const FIFO_SALE_SOURCE_KEYS = {
   'malina pulpa': ['malina klasa i', 'malina extra'],
   'malina klasa i': ['malina klasa i'],
   'malina extra': ['malina extra'],
+  'malina pw': ['malina klasa i', 'malina extra'],
+  'malina swieza': ['malina klasa i', 'malina extra'],
   'porzeczka czarna pulpa': ['porzeczka czarna'],
   'porzeczka czerwona pulpa': ['porzeczka czerwona'],
   'porzeczka czarna': ['porzeczka czarna'],
@@ -246,6 +248,95 @@ export const FIFO_SALE_SOURCE_KEYS = {
   'jablko na obierke': ['jablko obierka'],
   'jablko przemyslowe': ['jablko przemyslowe'],
   jablko: ['jablko przemyslowe']
+}
+
+/** Rodzina owocu do wyboru źródeł PZ w modalu K03. */
+function fifoSourceFamily(variantKey = '') {
+  if (variantKey === 'truskawka' || variantKey === 'truskawka z szypulka') return 'truskawka'
+  if (/^malina/.test(variantKey)) return 'malina'
+  if (/porzeczka czarna/.test(variantKey)) return 'porzeczka_czarna'
+  if (/porzeczka czerwona/.test(variantKey)) return 'porzeczka_czerwona'
+  if (/jablko/.test(variantKey)) return 'jablko'
+  if (variantKey === 'wisnia' || variantKey === 'aronia' || variantKey === 'sliwka') return variantKey
+  return null
+}
+
+const FIFO_SOURCE_PICKERS = {
+  truskawka: {
+    hint: 'Z jakich PZ pobierać surowiec? Domyślnie truskawka z szypułką bierze tylko PZ szypułkowe – nie zabiera zwykłej truskawki innym WZ.',
+    choices: [
+      { key: 'truskawka', label: 'Truskawka (bez szypułki)' },
+      { key: 'truskawka z szypulka', label: 'Truskawka z szypułką' }
+    ],
+    defaultKeysForVariant: {
+      truskawka: ['truskawka', 'truskawka z szypulka'],
+      'truskawka z szypulka': ['truskawka z szypulka']
+    }
+  },
+  malina: {
+    hint: 'Która klasa maliny (źródło PZ) idzie na ten WZ / przerób?',
+    choices: [
+      { key: 'malina klasa i', label: 'Malina klasa I (M1)' },
+      { key: 'malina extra', label: 'Malina extra' }
+    ],
+    defaultKeysForVariant: {
+      'malina pulpa': ['malina klasa i', 'malina extra'],
+      'malina klasa i': ['malina klasa i'],
+      'malina extra': ['malina extra'],
+      'malina pw': ['malina klasa i'],
+      'malina swieza': ['malina klasa i', 'malina extra'],
+      _default: ['malina klasa i', 'malina extra']
+    }
+  },
+  porzeczka_czarna: {
+    hint: 'Źródło PZ porzeczki czarnej dla tego WZ.',
+    choices: [
+      { key: 'porzeczka czarna', label: 'Porzeczka czarna' }
+    ],
+    defaultKeysForVariant: {
+      'porzeczka czarna': ['porzeczka czarna'],
+      'porzeczka czarna pulpa': ['porzeczka czarna']
+    }
+  },
+  porzeczka_czerwona: {
+    hint: 'Źródło PZ porzeczki czerwonej dla tego WZ.',
+    choices: [
+      { key: 'porzeczka czerwona', label: 'Porzeczka czerwona' }
+    ],
+    defaultKeysForVariant: {
+      'porzeczka czerwona': ['porzeczka czerwona'],
+      'porzeczka czerwona pulpa': ['porzeczka czerwona']
+    }
+  },
+  jablko: {
+    hint: 'Który rodzaj jabłka (źródło PZ) idzie na ten WZ?',
+    choices: [
+      { key: 'jablko obierka', label: 'Jabłko na obierkę' },
+      { key: 'jablko przemyslowe', label: 'Jabłko przemysłowe' }
+    ],
+    defaultKeysForVariant: {
+      'jablko obierka': ['jablko obierka'],
+      'jablko na obierke': ['jablko obierka'],
+      'jablko przemyslowe': ['jablko przemyslowe'],
+      jablko: ['jablko przemyslowe'],
+      _default: ['jablko przemyslowe']
+    }
+  },
+  wisnia: {
+    hint: 'Źródło PZ wiśni.',
+    choices: [{ key: 'wisnia', label: 'Wiśnia' }],
+    defaultKeysForVariant: { wisnia: ['wisnia'] }
+  },
+  aronia: {
+    hint: 'Źródło PZ aronii.',
+    choices: [{ key: 'aronia', label: 'Aronia' }],
+    defaultKeysForVariant: { aronia: ['aronia'] }
+  },
+  sliwka: {
+    hint: 'Źródło PZ śliwki.',
+    choices: [{ key: 'sliwka', label: 'Śliwka' }],
+    defaultKeysForVariant: { sliwka: ['sliwka'] }
+  }
 }
 
 /** Kanoniczny klucz wariantu produktu (T, Tsz, M1, Mex, Mp…) do dopasowania FIFO. */
@@ -265,6 +356,8 @@ export function normalizeFifoProductKey(productName = '', product = null) {
   if (/^truskawka\b/.test(text)) return 'truskawka'
 
   if (/malina\s+pulpa/.test(text)) return 'malina pulpa'
+  if (/malina\s+swieza/.test(text)) return 'malina swieza'
+  if (/malina\s+pw\b/.test(text)) return 'malina pw'
   if (/malina\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'malina i') return 'malina klasa i'
   if (/malina\s+extra/.test(text)) return 'malina extra'
   if (/malina/.test(text)) return text
@@ -294,24 +387,29 @@ export function buildFifoMatchSpecFromSourceKeys(variantKey, sourceKeys) {
   }
 }
 
-/** Opcje wyboru źródeł PZ w modalu K03 (np. truskawka z/bez szypułki). */
-export function fifoSourceOptionsForVariant(variantKey) {
-  if (variantKey === 'truskawka') {
-    return {
-      variantKey,
-      defaultKeys: ['truskawka', 'truskawka z szypulka'],
-      strictKeys: ['truskawka'],
-      strictLabel: 'Tylko truskawka (bez szypułki)',
-      hint: 'Domyślnie magazyn traktuje obie odmiany łącznie. Odznacz, jeśli ten WZ dotyczy wyłącznie truskawki bez szypułki.'
-    }
+/** Konfiguracja wyboru źródeł PZ w modalu K03 (wielokrotny wybór klas/odmian). */
+export function fifoSourcePickerForProduct(productName = '', product = null) {
+  const variantKey = normalizeFifoProductKey(productName, product)
+  const family = fifoSourceFamily(variantKey)
+  if (!family || !FIFO_SOURCE_PICKERS[family]) return null
+  const picker = FIFO_SOURCE_PICKERS[family]
+  if ((picker.choices || []).length <= 1) return null
+  const defaultKeys = picker.defaultKeysForVariant[variantKey]
+    || picker.defaultKeysForVariant._default
+    || [...(FIFO_SALE_SOURCE_KEYS[variantKey] || [])]
+  return {
+    variantKey,
+    family,
+    hint: picker.hint,
+    choices: picker.choices,
+    defaultKeys: defaultKeys.filter(Boolean)
   }
-  return null
 }
 
 export function defaultFifoSourceKeys(productName = '', product = null) {
+  const picker = fifoSourcePickerForProduct(productName, product)
+  if (picker?.defaultKeys?.length) return picker.defaultKeys
   const variantKey = normalizeFifoProductKey(productName, product)
-  const opt = fifoSourceOptionsForVariant(variantKey)
-  if (opt) return opt.defaultKeys
   return [...(FIFO_SALE_SOURCE_KEYS[variantKey] || [])]
 }
 

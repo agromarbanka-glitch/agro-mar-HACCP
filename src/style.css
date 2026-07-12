@@ -481,6 +481,19 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   font-weight: 600;
 }
 .checkbox-row input[type="checkbox"] { width: auto; margin: 0; }
+.fifo-source-picker {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0;
+  grid-column: 1 / -1;
+}
+.fifo-source-picker legend {
+  font-weight: 700;
+  font-size: 13px;
+  padding: 0 6px;
+}
+.fifo-source-picker .checkbox-row { margin-top: 6px; }
 
 /* W03 – harmonogram mycia/czyszczenia */
 .w03-paper { overflow-x: auto; }

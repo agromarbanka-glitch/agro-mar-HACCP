@@ -5,7 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourceOptionsForVariant, defaultFifoSourceKeys, normalizeFifoProductKey } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
@@ -1130,12 +1130,10 @@ function App() {
     const lotNo = resolvedMode === 'przerob'
       ? (wf.lot_no || line.k03Form?.lot_no || suggestK03LotNo(k03FormsRaw, line, przerobDate))
       : ''
-    const variantKey = normalizeFifoProductKey(line.product_name)
-    const sourceOpt = fifoSourceOptionsForVariant(variantKey)
+    const fifoSourcePicker = fifoSourcePickerForProduct(line.product_name)
     const fifoSourceKeys = wf.fifo_source_keys?.length
       ? [...wf.fifo_source_keys]
-      : defaultFifoSourceKeys(line.product_name)
-    const fifoSourceStrict = Boolean(sourceOpt && fifoSourceKeys.length === 1 && fifoSourceKeys[0] === sourceOpt.strictKeys[0])
+      : (fifoSourcePicker?.defaultKeys?.length ? [...fifoSourcePicker.defaultKeys] : defaultFifoSourceKeys(line.product_name))
     return {
       line,
       mode: resolvedMode,
@@ -1144,8 +1142,7 @@ function App() {
       lotNo,
       rawStored: wf.raw_stored === true,
       fifoSourceKeys,
-      fifoSourceStrict,
-      fifoSourceOpt: sourceOpt,
+      fifoSourcePicker,
       preview: null,
       loading: false,
       saving: false,
@@ -1163,11 +1160,19 @@ function App() {
   }
 
   function k03WzFifoSourceKeys(modal) {
-    if (!modal) return null
-    if (modal.fifoSourceOpt) {
-      return modal.fifoSourceStrict ? modal.fifoSourceOpt.strictKeys : modal.fifoSourceOpt.defaultKeys
-    }
-    return modal.fifoSourceKeys?.length ? modal.fifoSourceKeys : null
+    if (!modal?.fifoSourceKeys?.length) return null
+    return modal.fifoSourceKeys
+  }
+
+  function toggleK03FifoSourceKey(sourceKey, checked) {
+    setK03WzModal(m => {
+      const keys = new Set(m.fifoSourceKeys || [])
+      if (checked) keys.add(sourceKey)
+      else keys.delete(sourceKey)
+      const next = [...keys]
+      if (!next.length) return m
+      return { ...m, fifoSourceKeys: next, preview: null, confirmMismatch: false }
+    })
   }
 
   async function refreshK03WzPreview() {
@@ -1236,7 +1241,7 @@ function App() {
 
   function renderK03WzModal() {
     if (!k03WzModal) return null
-    const { line, mode, preview, loading, saving, error, confirmMismatch, editMode, fifoSourceOpt, fifoSourceStrict } = k03WzModal
+    const { line, mode, preview, loading, saving, error, confirmMismatch, editMode, fifoSourcePicker, fifoSourceKeys } = k03WzModal
     const wzDate = String(line.wz_date || '').slice(0, 10)
     const title = editMode
       ? 'Zmień decyzję K03'
@@ -1267,17 +1272,21 @@ function App() {
               <option value="bez_przerobu">Bez przerobu</option>
             </select>
           </label>}
-          {fifoSourceOpt && <label className="checkbox-row">
-            <input type="checkbox" checked={fifoSourceStrict} onChange={e => setK03WzModal(m => ({
-              ...m,
-              fifoSourceStrict: e.target.checked,
-              fifoSourceKeys: e.target.checked ? fifoSourceOpt.strictKeys : fifoSourceOpt.defaultKeys,
-              preview: null,
-              confirmMismatch: false
-            }))} />
-            {fifoSourceOpt.strictLabel}
-          </label>}
-          {fifoSourceOpt && <p className="hint">{fifoSourceOpt.hint}</p>}
+          {fifoSourcePicker && <fieldset className="fifo-source-picker">
+            <legend>Źródła PZ (klasa / odmiana)</legend>
+            <p className="hint">{fifoSourcePicker.hint}</p>
+            {fifoSourcePicker.choices.map(choice => (
+              <label key={choice.key} className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={(fifoSourceKeys || []).includes(choice.key)}
+                  onChange={e => toggleK03FifoSourceKey(choice.key, e.target.checked)}
+                />
+                {choice.label}
+              </label>
+            ))}
+            {(fifoSourceKeys || []).length === 0 && <p className="status danger">Zaznacz co najmniej jedno źródło PZ.</p>}
+          </fieldset>}
           {mode === 'przerob' && <>
             <label>Data przerobu (max = data WZ {wzDate || '—'})
               <input type="date" max={wzDate || undefined} value={k03WzModal.przerobDate} onChange={e => setK03WzModal(m => ({ ...m, przerobDate: clampPrzerobDateToWz(e.target.value, wzDate), preview: null, confirmMismatch: false }))} />
@@ -1299,7 +1308,7 @@ function App() {
         </div>
         <div className="actions">
           <button className="secondary" onClick={refreshK03WzPreview} disabled={loading || saving}>{loading ? 'FIFO…' : 'Podgląd FIFO / PZ'}</button>
-          <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || (!preview && !confirmMismatch)}>
+          <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || (!preview && !confirmMismatch) || (fifoSourcePicker && !(fifoSourceKeys || []).length)}>
             {saving ? 'Zapisywanie…' : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
           </button>
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
@@ -1308,6 +1317,9 @@ function App() {
         {preview?.diagnostics && (
           <div className="hint fifo-diag-box">
             <b>Diagnostyka FIFO · grupa {preview.diagnostics.productGroup} · cutoff {preview.cutoffDate}:</b>{' '}
+            {(preview.diagnostics.fifoSourceVariants || []).length > 0 && (
+              <>Źródła PZ: {[...(preview.diagnostics.fifoSourceVariants || [])].join(', ')} · </>
+            )}
             PZ łącznie {Number(preview.diagnostics.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg
             ({preview.diagnostics.lotCountInGroup || 0} partii),
             z datą ≤ {preview.cutoffDate}: {Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
