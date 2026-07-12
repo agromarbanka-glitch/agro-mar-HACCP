@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3 } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
-import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
+import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
@@ -142,17 +142,7 @@ const CHAMBERS = [
 ]
 
 function productGroupForName(productName) {
-  const text = normalizeText(productName)
-  if (text.includes('malin')) return 'malina'
-  if (text.includes('wisn')) return 'wisnia'
-  if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
-  if (text.includes('porzeczka czerwona')) return 'porzeczka_czerwona'
-  if (text.includes('truskawk')) return 'truskawka'
-  if (text.includes('aronia')) return 'aronia'
-  if (text.includes('sliw')) return 'sliwka'
-  if (text.includes('obier')) return 'jab_obier'
-  if (text.includes('jabl')) return 'jab_przem'
-  return text.split(' ')[0] || 'inna'
+  return k03ProductGroupForName(productName)
 }
 
 function targetControlPointForProduct(productName) {
@@ -188,6 +178,8 @@ const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
   [normalizeText('Jabłko na obierke'), 'Jabobier'],
   [normalizeText('Porzeczka czarna pulpa'), 'Pczp'],
   [normalizeText('Porzeczka czerwona pulpa'), 'Pkp'],
+  [normalizeText('Porzeczka kolorowa'), 'Pk'],
+  [normalizeText('Porzeczka kolorowa pulpa'), 'Pkp'],
 ])
 
 function baseCodeForProduct(productName) {
@@ -203,7 +195,7 @@ function baseCodeForProduct(productName) {
 }
 
 async function getOrCreateProduct(productName, cache) {
-  const name = productName || 'Produkt do dopasowania'
+  const name = canonicalProductName(productName || 'Produkt do dopasowania')
   const key = normalizeText(name)
   if (cache.has(key)) return cache.get(key)
 
@@ -215,7 +207,22 @@ async function getOrCreateProduct(productName, cache) {
   if (nameErr) throw nameErr
   if (existingByName) {
     cache.set(key, existingByName.id)
+    if (productName && normalizeText(productName) !== key) cache.set(normalizeText(productName), existingByName.id)
     return existingByName.id
+  }
+
+  if (productName && normalizeText(productName) !== key) {
+    const { data: aliasHit, error: aliasErr } = await supabase
+      .from('products')
+      .select('id, name, code, product_group')
+      .eq('name', productName)
+      .maybeSingle()
+    if (aliasErr) throw aliasErr
+    if (aliasHit) {
+      cache.set(key, aliasHit.id)
+      cache.set(normalizeText(productName), aliasHit.id)
+      return aliasHit.id
+    }
   }
 
   let code = baseCodeForProduct(name)
@@ -7565,7 +7572,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       groupsToImport.sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
       const duplicateCount = duplicates.length
 
-      const importDeps = { normalizeText, productGroupForName, baseCodeForProduct }
+      const importDeps = { normalizeText, productGroupForName, baseCodeForProduct, canonicalProductName }
       const { importedFileId, importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
         groupsToImport,
         rowsCount: rows.length,

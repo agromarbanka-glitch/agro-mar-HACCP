@@ -18,7 +18,7 @@ export function productGroupForName(productName) {
   if (text.includes('malin')) return 'malina'
   if (text.includes('wisn')) return 'wisnia'
   if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
-  if (text.includes('porzeczka czerwona')) return 'porzeczka_czerwona'
+  if (/porzeczka\s+(czerwona|kolorowa)/.test(text)) return 'porzeczka_czerwona'
   if (text.includes('truskawk')) return 'truskawka'
   if (text.includes('aronia')) return 'aronia'
   if (text.includes('gruszk')) return 'gruszka'

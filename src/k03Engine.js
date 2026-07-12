@@ -7,7 +7,7 @@ export const K03_ENGINE_VERSION = '3.9'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
-  ['porzeczka czerwona', 'Pk'], ['porzeczka czerwona pulpa', 'Pkp'], ['truskawka', 'T'],
+  ['porzeczka czerwona', 'Pk'], ['porzeczka czerwona pulpa', 'Pkp'], ['porzeczka kolorowa', 'Pk'], ['porzeczka kolorowa pulpa', 'Pkp'], ['truskawka', 'T'],
   ['truskawka z szypulka', 'Tsz'], ['aronia', 'A'], ['sliwka', 'S'], ['wisnia', 'W'],
   ['malina klasa i', 'M1'], ['malina extra', 'Mex'], ['malina pw', 'Mpw'],
   ['jablko obierka', 'Jabobier'], ['jablko na obierke', 'Jabobier'], ['jablko przemyslowe', 'Jab'], ['jablko', 'Jab']
@@ -224,12 +224,31 @@ function normalizeText(value) {
     .replace(/\s+/g, ' ')
 }
 
+/** Porzeczka kolorowa (Excel/import) = porzeczka czerwona. Nie mylić z czarną. */
+export function isPorzeczkaCzerwonaAlias(productName = '') {
+  const text = normalizeText(productName)
+  if (/porzeczka\s+czarna/.test(text)) return false
+  return /porzeczka\s+(czerwona|kolorowa)/.test(text)
+}
+
+/** Nazwa kanoniczna produktu – synonimy z importu mapowane na nazwy w systemie. */
+export function canonicalProductName(productName = '') {
+  const raw = String(productName || '').trim()
+  if (!raw) return raw
+  const text = normalizeText(raw)
+  if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'Porzeczka czarna pulpa'
+  if (/porzeczka\s+czarna/.test(text)) return raw
+  if (/porzeczka\s+kolorowa\s+pulpa/.test(text)) return 'Porzeczka czerwona pulpa'
+  if (/porzeczka\s+kolorowa/.test(text)) return 'Porzeczka czerwona'
+  return raw
+}
+
 export function productGroupForName(productName) {
   const text = normalizeText(productName)
   if (text.includes('malin')) return 'malina'
   if (text.includes('wisn')) return 'wisnia'
   if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
-  if (text.includes('porzeczka czerwona')) return 'porzeczka_czerwona'
+  if (isPorzeczkaCzerwonaAlias(text)) return 'porzeczka_czerwona'
   if (text.includes('truskawk')) return 'truskawka'
   if (text.includes('aronia')) return 'aronia'
   if (text.includes('sliw')) return 'sliwka'
@@ -259,6 +278,7 @@ export const FIFO_SALE_SOURCE_KEYS = {
   'porzeczka czerwona pulpa': ['porzeczka czerwona'],
   'porzeczka czarna': ['porzeczka czarna'],
   'porzeczka czerwona': ['porzeczka czerwona'],
+  'porzeczka kolorowa': ['porzeczka czerwona'],
   wisnia: ['wisnia'],
   aronia: ['aronia'],
   sliwka: ['sliwka'],
@@ -273,7 +293,7 @@ function fifoSourceFamily(variantKey = '') {
   if (variantKey === 'truskawka' || variantKey === 'truskawka z szypulka') return 'truskawka'
   if (/^malina/.test(variantKey)) return 'malina'
   if (/porzeczka czarna/.test(variantKey)) return 'porzeczka_czarna'
-  if (/porzeczka czerwona/.test(variantKey)) return 'porzeczka_czerwona'
+  if (variantKey === 'porzeczka kolorowa' || variantKey === 'porzeczka czerwona' || /porzeczka czerwona/.test(variantKey)) return 'porzeczka_czerwona'
   if (/jablko/.test(variantKey)) return 'jablko'
   if (variantKey === 'wisnia' || variantKey === 'aronia' || variantKey === 'sliwka') return variantKey
   return null
@@ -318,12 +338,13 @@ const FIFO_SOURCE_PICKERS = {
     }
   },
   porzeczka_czerwona: {
-    hint: 'Źródło PZ porzeczki czerwonej dla tego WZ.',
+    hint: 'Źródło PZ porzeczki czerwonej (kolorowej) dla tego WZ.',
     choices: [
-      { key: 'porzeczka czerwona', label: 'Porzeczka czerwona' }
+      { key: 'porzeczka czerwona', label: 'Porzeczka czerwona / kolorowa' }
     ],
     defaultKeysForVariant: {
       'porzeczka czerwona': ['porzeczka czerwona'],
+      'porzeczka kolorowa': ['porzeczka czerwona'],
       'porzeczka czerwona pulpa': ['porzeczka czerwona']
     }
   },
@@ -384,8 +405,8 @@ export function normalizeFifoProductKey(productName = '', product = null) {
 
   if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'porzeczka czarna pulpa'
   if (/porzeczka\s+czarna/.test(text)) return 'porzeczka czarna'
-  if (/porzeczka\s+czerwona\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
-  if (/porzeczka\s+czerwona/.test(text)) return 'porzeczka czerwona'
+  if (/porzeczka\s+(czerwona|kolorowa)\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
+  if (/porzeczka\s+(czerwona|kolorowa)/.test(text)) return 'porzeczka czerwona'
 
   if (/wisn/.test(text)) return 'wisnia'
   if (/aronia/.test(text)) return 'aronia'

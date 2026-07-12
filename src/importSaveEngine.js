@@ -327,20 +327,23 @@ async function fetchNamesInChunks(client, table, column, names, selectCols = '*'
 }
 
 async function ensureProductIds(client, productNames, deps) {
-  const unique = [...new Set(productNames.map(n => n || 'Produkt do dopasowania'))]
-  const { normalizeText, baseCodeForProduct, productGroupForName } = deps
+  const unique = [...new Set(productNames.map(n => (deps.canonicalProductName?.(n) || n) || 'Produkt do dopasowania'))]
+  const { normalizeText, baseCodeForProduct, productGroupForName, canonicalProductName } = deps
   const map = new Map()
-
-  const existing = await fetchNamesInChunks(client, 'products', 'name', unique, 'id, name, code')
-  for (const p of existing) map.set(normalizeText(p.name), p.id)
-
-  const missing = unique.filter(name => !map.has(normalizeText(name)))
-  if (!missing.length) return map
 
   const { data: catalog, error: catalogErr } = await withImportRetry(() =>
     client.from('products').select('id, name, code')
   )
   if (catalogErr) throw catalogErr
+
+  for (const p of catalog || []) {
+    map.set(normalizeText(p.name), p.id)
+    const canonical = canonicalProductName?.(p.name) || p.name
+    map.set(normalizeText(canonical), p.id)
+  }
+
+  const missing = unique.filter(name => !map.has(normalizeText(name)))
+  if (!missing.length) return map
 
   const codesInUse = new Set((catalog || []).map(p => p.code))
   const toInsert = []
@@ -598,7 +601,8 @@ export async function saveImportToSupabase(client, {
     if (!opId) continue
 
     for (const row of group.items) {
-      const productId = productMap.get(deps.normalizeText(row.productName || 'Produkt do dopasowania'))
+      const canonicalName = deps.canonicalProductName?.(row.productName) || row.productName || 'Produkt do dopasowania'
+      const productId = productMap.get(deps.normalizeText(canonicalName))
       const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
       const itemQty = Math.abs(Number(row.qty) || 0)
       if (itemQty <= 0 || !productId) continue
