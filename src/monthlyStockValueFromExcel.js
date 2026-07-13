@@ -10,7 +10,7 @@ import {
 } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
 
-export const EXCEL_REPORT_VERSION = '2.2'
+export const EXCEL_REPORT_VERSION = '2.3'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -335,6 +335,32 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
   reportPayload.reportTitle = buildReportTitle(reportPayload)
   return reportPayload
+}
+
+/** Audyt produktu: sumy PZ/WZ do daty stanu (diagnostyka duplikatów w danych). */
+export function auditProductFifoBalance(excelRows, productName, asOfDate) {
+  const bounds = parseAsOfDate(asOfDate)
+  if (!bounds) return null
+  const targetKey = normalizeKey(productName)
+  const cutoff = bounds.asOfDate
+  const lines = normalizeExcelRows(excelRows).filter(l => l.productKey === targetKey)
+  let pzKg = 0
+  let wzKg = 0
+  let pzCount = 0
+  let wzCount = 0
+  for (const line of lines) {
+    if (line.issueDate > cutoff) continue
+    if (line.operation === 'przyjecie') { pzKg += line.qty; pzCount += 1 }
+    else if (line.operation === 'sprzedaz') { wzKg += line.qty; wzCount += 1 }
+  }
+  return {
+    productName: displayName(productName),
+    pzKg: roundKg(pzKg),
+    wzKg: roundKg(wzKg),
+    netKg: roundKg(pzKg - wzKg),
+    pzCount,
+    wzCount
+  }
 }
 
 export async function parseExcelFilesForReport(files) {

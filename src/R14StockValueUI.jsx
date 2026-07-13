@@ -11,19 +11,23 @@ import {
   computeMonthlyStockValueReportFromExcel,
   parseExcelFilesForReport,
   formatReportTitleDate,
-  buildReportTitle
+  buildReportTitle,
+  auditProductFifoBalance
 } from './monthlyStockValueFromExcel'
 import {
-  loadReportExcelStore,
-  saveReportExcelStore,
+  loadReportExcelStoreAsync,
+  saveReportExcelStoreAsync,
   appendExcelRowsToStore,
+  replaceExcelRowsInStore,
   removeBatchFromStore,
   removeLineFromStore,
   findDuplicateGroups,
   getStoredExcelRows,
   getStoredFileNames,
   formatRowSummary,
-  clearReportExcelStore
+  clearReportExcelStore,
+  storeStats,
+  sanitizeStoreDuplicates
 } from './reportExcelStore'
 
 function defaultAsOfDate() {
@@ -129,11 +133,14 @@ function ReportDatePicker({ value, onChange, disabled }) {
 
 export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage, confirmDelete }) {
   const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [storeReady, setStoreReady] = useState(false)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
-  const [store, setStore] = useState(() => loadReportExcelStore())
+  const [store, setStore] = useState(() => ({ version: 2, batches: [], rows: [] }))
   const [showDuplicates, setShowDuplicates] = useState(false)
+  const [uploadMode, setUploadMode] = useState('append')
+  const [storageBackend, setStorageBackend] = useState('')
   const fileInputRef = useRef(null)
   const didShowStoredHint = useRef(false)
 
@@ -141,11 +148,36 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   const fileNames = useMemo(() => getStoredFileNames(store), [store])
   const duplicateGroups = useMemo(() => findDuplicateGroups(store), [store])
 
-  const persistStore = useCallback((nextStore) => {
+  const persistStore = useCallback(async (nextStore) => {
     setStore(nextStore)
-    const ok = saveReportExcelStore(nextStore)
-    if (!ok) setMessage?.('Nie udało się zapisać danych w przeglądarce (limit pamięci?).')
-    return ok
+    const result = await saveReportExcelStoreAsync(nextStore)
+    if (result.backend) setStorageBackend(result.backend)
+    if (!result.ok) setMessage?.('Nie udało się zapisać danych w przeglądarce (limit pamięci?).')
+    return result.ok
+  }, [setMessage])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const loaded = await loadReportExcelStoreAsync()
+        if (cancelled) return
+        setStore(loaded)
+        setStoreReady(true)
+        const stats = storeStats(loaded)
+        if (stats.totalRows > 0) {
+          setMessage?.(
+            `Przywrócono ${stats.totalRows} wierszy (${stats.pz} PZ, ${stats.wz} WZ) z ${stats.batchCount} partii. Silnik FIFO bez zmian (wersja ${EXCEL_REPORT_VERSION}).`
+          )
+        }
+      } catch (err) {
+        console.error('loadReportExcelStoreAsync', err)
+        if (!cancelled) setStoreReady(true)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
   }, [setMessage])
 
   const recalculate = useCallback((rows, names, date) => {
@@ -156,9 +188,10 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   }, [])
 
   useEffect(() => {
+    if (!storeReady) return
     if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
     else setReport(null)
-  }, [asOfDate, excelRows, fileNames, recalculate])
+  }, [asOfDate, excelRows, fileNames, recalculate, storeReady])
 
   useEffect(() => {
     if (excelRows.length && !loading && !didShowStoredHint.current) {
@@ -180,7 +213,8 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
         parsedByFile.push({ fileName: file.name, rows, skippedMm: skippedMmCount || 0 })
       }
 
-      const { store: nextStore, results } = appendExcelRowsToStore(store, parsedByFile)
+      const mergeFn = uploadMode === 'replace' ? replaceExcelRowsInStore : appendExcelRowsToStore
+      const { store: nextStore, results } = mergeFn(store, parsedByFile)
       const totalAdded = results.reduce((s, r) => s + r.added, 0)
       const totalDup = results.reduce((s, r) => s + r.duplicates, 0)
       const skippedMm = parsedByFile.reduce((s, f) => s + (f.skippedMm || 0), 0)
@@ -192,7 +226,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             : 'W pliku nie znaleziono nowych operacji PZ/WZ.'
         )
       } else {
-        persistStore(nextStore)
+        await persistStore(nextStore)
         const names = getStoredFileNames(nextStore)
         const rows = getStoredExcelRows(nextStore)
         const result = recalculate(rows, names, asOfDate)
@@ -215,30 +249,51 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
     }
   }
 
-  function handleRemoveBatch(batch) {
+  async function handleRemoveBatch(batch) {
     const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
     if (!ask(`Partię importu: „${batch.fileName}" (${batch.rowCount} wierszy).\n\nDane zostaną usunięte z pamięci przeglądarki.`)) return
     const next = removeBatchFromStore(store, batch.id)
-    persistStore(next)
+    await persistStore(next)
     setMessage?.(`Usunięto partię „${batch.fileName}" (${batch.rowCount} wierszy).`)
   }
 
-  function handleRemoveDuplicateLine(row) {
+  async function handleRemoveDuplicateLine(row) {
     const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
     if (!ask(`Duplikat operacji:\n${formatRowSummary(row)}\n\nPozostałe kopie tej samej operacji zostaną w pamięci.`)) return
     const next = removeLineFromStore(store, row._lineId)
-    persistStore(next)
+    await persistStore(next)
     setMessage?.(`Usunięto duplikat: ${formatRowSummary(row)}`)
   }
 
-  function handleClearAll() {
+  async function handleClearAll() {
     const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
     if (!ask(`Wszystkie ${excelRows.length} wierszy z ${store.batches.length} partii.\n\nTrzeba będzie ponownie wgrać pliki Excel.`)) return
-    persistStore(clearReportExcelStore())
+    await persistStore(await clearReportExcelStore())
     setReport(null)
     setShowDuplicates(false)
     setMessage?.('Wyczyszczono wszystkie dane raportu z pamięci przeglądarki.')
   }
+
+  async function handleSanitizeDuplicates() {
+    const { store: cleaned, removed } = sanitizeStoreDuplicates(store)
+    if (!removed) {
+      setMessage?.('Nie znaleziono duplikatów do usunięcia.')
+      return
+    }
+    await persistStore(cleaned)
+    setMessage?.(`Usunięto ${removed} zduplikowanych wierszy (ta sama operacja wgrana więcej niż raz). Przelicz raport ponownie.`)
+  }
+
+  const productAudits = useMemo(() => {
+    if (!excelRows.length || !report?.rows) return new Map()
+    const m = new Map()
+    for (const row of report.rows) {
+      if (row.remaining_kg > 0.5) {
+        m.set(row.product_key, auditProductFifoBalance(excelRows, row.product_name, asOfDate))
+      }
+    }
+    return m
+  }, [excelRows, report?.rows, asOfDate])
 
   function toggleExpand(key) {
     setExpanded(prev => {
@@ -272,14 +327,23 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
     <div className="stock-value-report">
       <p className="hint">
         Raport z pliku Excel · FIFO · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION}.
-        Dane zapisane w przeglądarce — możesz wgrywać partiami (np. po 1000 operacji); duplikaty są pomijane.
+        <b> Sposób liczenia nie zmienia się</b> — wynik zależy wyłącznie od wierszy zapisanych w pamięci.
+        {storageBackend ? ` Magazyn danych: ${storageBackend === 'indexeddb' ? 'IndexedDB' : 'localStorage'}.` : null}
       </p>
 
       <section className="card stock-excel-panel">
         <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel</h3>
         <p className="hint">
-          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Możesz wskazać kilka plików naraz lub dodawać kolejne partie później.
+          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Przy eksporcie partiami (np. 1000 wierszy) wybierz <b>Dodaj partię</b>.
+          Jeśli wgrywasz od zera jeden komplet — <b>Zastąp wszystko</b>.
         </p>
+        <label className="checkbox-inline report-upload-mode">
+          <span>Tryb wgrywania:</span>
+          <select value={uploadMode} onChange={e => setUploadMode(e.target.value)} disabled={loading}>
+            <option value="append">Dodaj partię (łączy z pamięcią, pomija duplikaty)</option>
+            <option value="replace">Zastąp wszystko (czyści pamięć, nowy komplet plików)</option>
+          </select>
+        </label>
         <div className="actions">
           <input
             ref={fileInputRef}
@@ -292,6 +356,11 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
           <button type="button" disabled={loading} onClick={() => fileInputRef.current?.click()}>
             <Upload size={16} /> {loading ? 'Wczytywanie…' : 'Dodaj plik Excel'}
           </button>
+          {duplicateGroups.length > 0 && (
+            <button type="button" className="secondary" disabled={loading} onClick={handleSanitizeDuplicates}>
+              Usuń duplikaty ({duplicateGroups.reduce((s, g) => s + g.rows.length - 1, 0)})
+            </button>
+          )}
           {store.batches.length > 0 && (
             <button type="button" className="secondary" disabled={loading} onClick={handleClearAll}>
               <Trash2 size={16} /> Wyczyść wszystko
@@ -428,7 +497,19 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
                 return (
                   <React.Fragment key={key}>
                     <tr>
-                      <td><b>{row.product_name}</b>{row.product_group ? <small className="hint"> · {row.product_group}</small> : null}</td>
+                      <td>
+                        <b>{row.product_name}</b>
+                        {row.product_group ? <small className="hint"> · {row.product_group}</small> : null}
+                        {(() => {
+                          const audit = productAudits.get(key)
+                          if (!audit || row.remaining_kg <= 0.5) return null
+                          return (
+                            <small className="hint report-audit-hint">
+                              {' '}· PZ do daty: {audit.pzKg.toLocaleString('pl-PL')} kg · WZ: {audit.wzKg.toLocaleString('pl-PL')} kg
+                            </small>
+                          )
+                        })()}
+                      </td>
                       <td className="num">{Number(row.purchased_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.sold_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.remaining_kg || 0).toLocaleString('pl-PL')}</td>

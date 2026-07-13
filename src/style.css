@@ -757,7 +757,8 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .report-dup-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .report-dup-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
 button.mini.secondary.danger { color: #a33; border-color: #e8c8c8; }
-button.mini.secondary.danger:hover { background: #fff0f0; }
+.report-upload-mode select { font: inherit; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; max-width: 100%; }
+.report-audit-hint { display: block; margin-top: 2px; font-size: 11px; }
 .checkbox-inline { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 14px; }
 .file-input-hidden { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 

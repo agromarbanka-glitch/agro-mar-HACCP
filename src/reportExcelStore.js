@@ -1,6 +1,7 @@
 /**
- * Trwałe przechowywanie wierszy Excel dla raportu magazynowego (localStorage).
- * Łączenie partii wgrywania, deduplikacja operacji, ręczne usuwanie.
+ * Trwałe przechowywanie wierszy Excel dla raportu magazynowego.
+ * IndexedDB (duże pliki) + fallback localStorage.
+ * Łączenie partii, deduplikacja operacji, ręczne usuwanie.
  */
 import {
   classifyOperation,
@@ -9,8 +10,11 @@ import {
   isMmDocument
 } from './excelImport'
 
-export const REPORT_EXCEL_STORE_VERSION = 1
-const STORAGE_KEY = 'agro-mar-report-excel-v1'
+export const REPORT_EXCEL_STORE_VERSION = 2
+const LS_KEY = 'agro-mar-report-excel-v1'
+const IDB_NAME = 'agro-mar-report'
+const IDB_STORE = 'excel-batches'
+const IDB_KEY = 'main'
 
 function newLineId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
@@ -26,23 +30,45 @@ function roundQty(qty) {
   return Math.round(Math.abs(Number(qty) || 0) * 1000) / 1000
 }
 
-function normalizeProduct(name) {
-  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
+/** Ta sama normalizacja co w raporcie + bez polskich znaków (szypułką = szypulka). */
+export function normalizeProductKey(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ł/g, 'l')
+    .replace(/\s+/g, ' ')
 }
 
-/** Klucz deduplikacji: ta sama operacja + produkt + ilość + data. */
-export function excelRowDedupKey(row) {
+function rowOperation(row) {
   if (!row?.productName || !Number(row.qty)) return null
   if (isMmDocument(row.documentType, row.documentNo)) return null
   const documentNo = normalizeDocumentNo(row.documentNo)
   if (!documentNo) return null
   const operation = classifyOperation(row.documentType, documentNo)
   if (operation === 'pominiete_mm') return null
-  const issueDate = resolveDocumentIssueDate(row.issueDate, documentNo)
+  return { operation, documentNo, product: normalizeProductKey(row.productName), qty: roundQty(row.qty) }
+}
+
+/**
+ * Klucz deduplikacji — bez daty (ta sama operacja w dwóch eksportach Excel
+ * często ma inną datę w kolumnie vs. datę z numeru dokumentu).
+ * operation | nr dokumentu | produkt | ilość
+ */
+export function excelRowDedupKey(row) {
+  const op = rowOperation(row)
+  if (!op) return null
+  return `${op.operation}|${op.documentNo}|${op.product}|${op.qty}`
+}
+
+/** Klucz ścisły (z datą) — do wykrywania duplikatów w pamięci. */
+export function excelRowDedupKeyStrict(row) {
+  const op = rowOperation(row)
+  if (!op) return null
+  const issueDate = resolveDocumentIssueDate(row.issueDate, op.documentNo)
   if (!issueDate) return null
-  const product = normalizeProduct(row.productName)
-  const qty = roundQty(row.qty)
-  return `${operation}|${documentNo}|${product}|${qty}|${issueDate}`
+  return `${op.operation}|${op.documentNo}|${op.product}|${op.qty}|${issueDate}`
 }
 
 function compactRow(row, batchId, lineId) {
@@ -77,9 +103,46 @@ export function emptyReportExcelStore() {
   return { version: REPORT_EXCEL_STORE_VERSION, batches: [], rows: [] }
 }
 
+function openIdb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('indexedDB unavailable'))
+      return
+    }
+    const req = indexedDB.open(IDB_NAME, 1)
+    req.onerror = () => reject(req.error)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE)
+    }
+    req.onsuccess = () => resolve(req.result)
+  })
+}
+
+async function idbGet() {
+  const db = await openIdb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly')
+    const req = tx.objectStore(IDB_STORE).get(IDB_KEY)
+    req.onerror = () => reject(req.error)
+    req.onsuccess = () => resolve(req.result || null)
+    tx.oncomplete = () => db.close()
+  })
+}
+
+async function idbSet(store) {
+  const db = await openIdb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite')
+    tx.objectStore(IDB_STORE).put(store, IDB_KEY)
+    tx.oncomplete = () => { db.close(); resolve(true) }
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
 export function loadReportExcelStore() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(LS_KEY)
     if (!raw) return emptyReportExcelStore()
     const parsed = JSON.parse(raw)
     if (!parsed || !Array.isArray(parsed.batches) || !Array.isArray(parsed.rows)) {
@@ -95,13 +158,71 @@ export function loadReportExcelStore() {
   }
 }
 
+/** Wczytaj z IndexedDB (preferowane) lub localStorage; usuń duplikaty. */
+export async function loadReportExcelStoreAsync() {
+  let store = emptyReportExcelStore()
+  try {
+    const fromIdb = await idbGet()
+    if (fromIdb?.rows?.length) store = fromIdb
+  } catch (_) {}
+
+  if (!store.rows?.length) {
+    const fromLs = loadReportExcelStore()
+    if (fromLs.rows?.length) store = fromLs
+  }
+
+  const { store: cleaned, removed } = sanitizeStoreDuplicates(store)
+  if (removed > 0) await saveReportExcelStoreAsync(cleaned)
+  return cleaned
+}
+
 export function saveReportExcelStore(store) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
+    localStorage.setItem(LS_KEY, JSON.stringify(store))
     return true
   } catch (err) {
-    console.error('reportExcelStore save failed', err)
+    console.error('reportExcelStore localStorage save failed', err)
     return false
+  }
+}
+
+export async function saveReportExcelStoreAsync(store) {
+  const payload = { ...store, version: REPORT_EXCEL_STORE_VERSION }
+  try {
+    await idbSet(payload)
+    try { localStorage.removeItem(LS_KEY) } catch (_) {}
+    return { ok: true, backend: 'indexeddb' }
+  } catch (err) {
+    console.warn('IndexedDB save failed, fallback localStorage', err)
+    const ok = saveReportExcelStore(payload)
+    return { ok, backend: ok ? 'localStorage' : null, error: ok ? null : err }
+  }
+}
+
+/** Usuwa duplikaty wg klucza bez daty (zostawia pierwszą kopię). */
+export function sanitizeStoreDuplicates(store) {
+  const seen = new Set()
+  const rows = []
+  let removed = 0
+  for (const stored of store?.rows || []) {
+    const key = excelRowDedupKey(toExcelRow(stored))
+    if (!key) continue
+    if (seen.has(key)) { removed += 1; continue }
+    seen.add(key)
+    rows.push(stored)
+  }
+  if (!removed) return { store, removed: 0 }
+
+  const batchCounts = new Map()
+  for (const r of rows) batchCounts.set(r.batchId, (batchCounts.get(r.batchId) || 0) + 1)
+
+  const batches = (store.batches || [])
+    .map(b => ({ ...b, rowCount: batchCounts.get(b.id) || 0 }))
+    .filter(b => b.rowCount > 0)
+
+  return {
+    store: { version: REPORT_EXCEL_STORE_VERSION, batches, rows },
+    removed
   }
 }
 
@@ -113,9 +234,13 @@ export function getStoredFileNames(store) {
   return (store?.batches || []).map(b => b.fileName).filter(Boolean)
 }
 
+export function replaceExcelRowsInStore(parsedFiles) {
+  const empty = emptyReportExcelStore()
+  return appendExcelRowsToStore(empty, parsedFiles)
+}
+
 /**
  * Dodaje wiersze z nowego wgrywania; pomija duplikaty względem istniejących danych.
- * @returns {{ store, results: Array<{ fileName, added, duplicates, batchId|null }> }}
  */
 export function appendExcelRowsToStore(store, parsedFiles) {
   const next = {
@@ -143,8 +268,7 @@ export function appendExcelRowsToStore(store, parsedFiles) {
       }
       batchKeys.add(key)
       existingKeys.add(key)
-      const lineId = newLineId()
-      next.rows.push(compactRow(row, batchId, lineId))
+      next.rows.push(compactRow(row, batchId, newLineId()))
       added += 1
     }
 
@@ -185,15 +309,13 @@ export function removeLineFromStore(store, lineId) {
   const nextBatches = batchStillHasRows
     ? store.batches.map(b => {
         if (b.id !== removed.batchId) return b
-        const count = nextRows.filter(r => r.batchId === b.id).length
-        return { ...b, rowCount: count }
+        return { ...b, rowCount: nextRows.filter(r => r.batchId === b.id).length }
       })
     : store.batches.filter(b => b.id !== removed.batchId)
 
   return { ...store, batches: nextBatches, rows: nextRows }
 }
 
-/** Grupy wierszy o tym samym kluczu operacji (potencjalne duplikaty w magazynie danych). */
 export function findDuplicateGroups(store) {
   const byKey = new Map()
   for (const stored of store?.rows || []) {
@@ -213,13 +335,33 @@ export function formatRowSummary(row) {
   const docNo = normalizeDocumentNo(row.documentNo) || row.documentNo || '—'
   const op = classifyOperation(row.documentType, row.documentNo)
   const opLabel = op === 'sprzedaz' ? 'WZ' : op === 'przyjecie' ? 'PZ' : String(row.documentType || '')
-  const qty = roundQty(row.qty)
-  return `${opLabel} ${docNo} · ${row.productName || '—'} · ${qty} kg · ${row.issueDate || '—'}`
+  const issueDate = resolveDocumentIssueDate(row.issueDate, row.documentNo) || row.issueDate || '—'
+  return `${opLabel} ${docNo} · ${row.productName || '—'} · ${roundQty(row.qty)} kg · ${issueDate}`
 }
 
-export function clearReportExcelStore() {
+export async function clearReportExcelStore() {
+  try { localStorage.removeItem(LS_KEY) } catch (_) {}
   try {
-    localStorage.removeItem(STORAGE_KEY)
+    const db = await openIdb()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite')
+      tx.objectStore(IDB_STORE).delete(IDB_KEY)
+      tx.oncomplete = () => { db.close(); resolve() }
+      tx.onerror = () => reject(tx.error)
+    })
   } catch (_) {}
   return emptyReportExcelStore()
+}
+
+export function storeStats(store) {
+  const rows = store?.rows || []
+  let pz = 0
+  let wz = 0
+  for (const stored of rows) {
+    const row = toExcelRow(stored)
+    const op = classifyOperation(row.documentType, row.documentNo)
+    if (op === 'przyjecie') pz += 1
+    else if (op === 'sprzedaz') wz += 1
+  }
+  return { totalRows: rows.length, batchCount: store?.batches?.length || 0, pz, wz }
 }
