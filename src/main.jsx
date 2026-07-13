@@ -7908,7 +7908,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         escapeHtml={escapeHtml}
         printHtmlInIframe={printHtmlInIframe}
         setMessage={setMessage}
-        confirmDelete={confirmDelete}
       />
     </section>
     </>}

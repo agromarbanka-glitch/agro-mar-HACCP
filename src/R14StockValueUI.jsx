@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Printer, RefreshCcw, Upload, FileSpreadsheet, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Printer, RefreshCcw, Upload, FileSpreadsheet } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import {
   formatPlMoney,
@@ -11,24 +11,11 @@ import {
   computeMonthlyStockValueReportFromExcel,
   parseExcelFilesForReport,
   formatReportTitleDate,
-  buildReportTitle,
-  auditProductFifoBalance
+  buildReportTitle
 } from './monthlyStockValueFromExcel'
-import {
-  loadReportExcelStoreAsync,
-  saveReportExcelStoreAsync,
-  appendExcelRowsToStore,
-  replaceExcelRowsInStore,
-  removeBatchFromStore,
-  removeLineFromStore,
-  findDuplicateGroups,
-  getStoredExcelRows,
-  getStoredFileNames,
-  formatRowSummary,
-  clearReportExcelStore,
-  storeStats,
-  sanitizeStoreDuplicates
-} from './reportExcelStore'
+import { clearReportExcelStore } from './reportExcelStore'
+
+const SESSION_KEY = 'agro-mar-report-session-v2.5'
 
 function defaultAsOfDate() {
   const d = new Date()
@@ -36,6 +23,32 @@ function defaultAsOfDate() {
   const m = d.getMonth() + 1
   const last = new Date(y, m, 0).getDate()
   return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`
+}
+
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (parsed?.engineVersion !== EXCEL_REPORT_VERSION) return null
+    if (!Array.isArray(parsed.rows) || !parsed.rows.length) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function saveSession(rows, fileNames) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      engineVersion: EXCEL_REPORT_VERSION,
+      savedAt: new Date().toISOString(),
+      rows,
+      fileNames
+    }))
+  } catch (err) {
+    console.warn('saveSession failed', err)
+  }
 }
 
 function parseIsoDate(iso) {
@@ -48,13 +61,6 @@ function buildIsoDate(y, mo, d) {
   const last = new Date(y, mo, 0).getDate()
   const day = Math.min(Math.max(1, d), last)
   return `${y}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-}
-
-function formatBatchDate(iso) {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })
 }
 
 function ReportDatePicker({ value, onChange, disabled }) {
@@ -88,21 +94,14 @@ function ReportDatePicker({ value, onChange, disabled }) {
     }
   }
 
-  const dayOptions = useMemo(() => {
-    return Array.from({ length: daysInMonth }, (_, i) => i + 1)
-  }, [daysInMonth])
+  const dayOptions = useMemo(() => Array.from({ length: daysInMonth }, (_, i) => i + 1), [daysInMonth])
 
   return (
     <div className="report-date-picker">
       <div className="report-date-row">
         <label className="report-date-field">
           <span className="report-date-label">Miesiąc</span>
-          <input
-            type="month"
-            value={monthValue}
-            onChange={e => setMonth(e.target.value)}
-            disabled={disabled}
-          />
+          <input type="month" value={monthValue} onChange={e => setMonth(e.target.value)} disabled={disabled} />
         </label>
         <label className="report-date-field report-date-day">
           <span className="report-date-label">Dzień</span>
@@ -114,12 +113,7 @@ function ReportDatePicker({ value, onChange, disabled }) {
         </label>
         <label className="report-date-field report-date-native">
           <span className="report-date-label">Kalendarz</span>
-          <input
-            type="date"
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            disabled={disabled}
-          />
+          <input type="date" value={value} onChange={e => onChange(e.target.value)} disabled={disabled} />
         </label>
       </div>
       <div className="report-date-presets">
@@ -131,54 +125,14 @@ function ReportDatePicker({ value, onChange, disabled }) {
   )
 }
 
-export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage, confirmDelete }) {
+export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage }) {
   const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
-  const [loading, setLoading] = useState(true)
-  const [storeReady, setStoreReady] = useState(false)
+  const [loading, setLoading] = useState(false)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
-  const [store, setStore] = useState(() => ({ version: 2, batches: [], rows: [] }))
-  const [showDuplicates, setShowDuplicates] = useState(false)
-  const [uploadMode, setUploadMode] = useState('append')
-  const [storageBackend, setStorageBackend] = useState('')
+  const [excelRows, setExcelRows] = useState([])
+  const [fileNames, setFileNames] = useState([])
   const fileInputRef = useRef(null)
-  const didShowStoredHint = useRef(false)
-
-  const excelRows = useMemo(() => getStoredExcelRows(store), [store])
-  const fileNames = useMemo(() => getStoredFileNames(store), [store])
-  const duplicateGroups = useMemo(() => findDuplicateGroups(store), [store])
-
-  const persistStore = useCallback(async (nextStore) => {
-    setStore(nextStore)
-    const result = await saveReportExcelStoreAsync(nextStore)
-    if (result.backend) setStorageBackend(result.backend)
-    if (!result.ok) setMessage?.('Nie udało się zapisać danych w przeglądarce (limit pamięci?).')
-    return result.ok
-  }, [setMessage])
-
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const loaded = await loadReportExcelStoreAsync()
-        if (cancelled) return
-        setStore(loaded)
-        setStoreReady(true)
-        const stats = storeStats(loaded)
-        if (stats.totalRows > 0) {
-          setMessage?.(
-            `Przywrócono ${stats.totalRows} wierszy (${stats.pz} PZ, ${stats.wz} WZ) z ${stats.batchCount} partii. Silnik FIFO bez zmian (wersja ${EXCEL_REPORT_VERSION}).`
-          )
-        }
-      } catch (err) {
-        console.error('loadReportExcelStoreAsync', err)
-        if (!cancelled) setStoreReady(true)
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    })()
-    return () => { cancelled = true }
-  }, [setMessage])
 
   const recalculate = useCallback((rows, names, date) => {
     const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
@@ -188,58 +142,36 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   }, [])
 
   useEffect(() => {
-    if (!storeReady) return
-    if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
-    else setReport(null)
-  }, [asOfDate, excelRows, fileNames, recalculate, storeReady])
+    clearReportExcelStore().catch(() => {})
+    const session = loadSession()
+    if (session) {
+      setExcelRows(session.rows)
+      setFileNames(session.fileNames || [])
+      setMessage?.(`Przywrócono ostatni wczytany Excel (${session.rows.length} wierszy). Wgraj plik ponownie, jeśli wynik się nie zgadza.`)
+    }
+  }, [setMessage])
 
   useEffect(() => {
-    if (excelRows.length && !loading && !didShowStoredHint.current) {
-      didShowStoredHint.current = true
-      setMessage?.(
-        `W pamięci: ${excelRows.length} wierszy z ${store.batches.length} partii. Zmień datę lub wgraj kolejną paczkę Excel.`
-      )
-    }
-  }, [excelRows.length, loading, setMessage, store.batches.length])
+    if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
+    else setReport(null)
+  }, [asOfDate, excelRows, fileNames, recalculate])
 
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
     if (!files.length) return
     setLoading(true)
     try {
-      const parsedByFile = []
-      for (const file of files) {
-        const { rows, skippedMmCount } = await parseExcelFilesForReport([file])
-        parsedByFile.push({ fileName: file.name, rows, skippedMm: skippedMmCount || 0 })
-      }
-
-      const mergeFn = uploadMode === 'replace' ? replaceExcelRowsInStore : appendExcelRowsToStore
-      const { store: nextStore, results } = mergeFn(store, parsedByFile)
-      const totalAdded = results.reduce((s, r) => s + r.added, 0)
-      const totalDup = results.reduce((s, r) => s + r.duplicates, 0)
-      const skippedMm = parsedByFile.reduce((s, f) => s + (f.skippedMm || 0), 0)
-
-      if (totalAdded === 0) {
-        setMessage?.(
-          totalDup > 0
-            ? `Wszystkie ${totalDup} wierszy z pliku już są w pamięci (duplikaty pominięte).`
-            : 'W pliku nie znaleziono nowych operacji PZ/WZ.'
-        )
-      } else {
-        await persistStore(nextStore)
-        const names = getStoredFileNames(nextStore)
-        const rows = getStoredExcelRows(nextStore)
-        const result = recalculate(rows, names, asOfDate)
-        const detail = results.map(r =>
-          `„${r.fileName}”: +${r.added}${r.duplicates ? `, pominięto ${r.duplicates} dupl.` : ''}`
-        ).join(' · ')
-        const priceHint = result.diagnostics?.linesWithPrice
-          ? ` · ${result.diagnostics.linesWithPrice} linii PZ z ceną netto`
-          : ''
-        setMessage?.(
-          `Dodano ${totalAdded} wierszy${totalDup ? ` (pominięto ${totalDup} duplikatów)` : ''}${skippedMm ? ` · pominięto ${skippedMm} MM` : ''}. ${detail}${priceHint}. Łącznie w pamięci: ${rows.length} wierszy.`
-        )
-      }
+      const { rows, fileNames: names, skippedMm } = await parseExcelFilesForReport(files)
+      setExcelRows(rows)
+      setFileNames(names)
+      saveSession(rows, names)
+      const result = recalculate(rows, names, asOfDate)
+      const priceHint = result.diagnostics?.linesWithPrice
+        ? ` · ${result.diagnostics.linesWithPrice} linii PZ z ceną netto`
+        : ''
+      setMessage?.(
+        `Wczytano ${rows.length} wierszy z ${names.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${priceHint}. ${result.message || ''}`
+      )
     } catch (err) {
       console.error('Excel report error', err)
       setMessage?.(`Błąd wczytywania Excel: ${err?.message || String(err)}`)
@@ -248,52 +180,6 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
-
-  async function handleRemoveBatch(batch) {
-    const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
-    if (!ask(`Partię importu: „${batch.fileName}" (${batch.rowCount} wierszy).\n\nDane zostaną usunięte z pamięci przeglądarki.`)) return
-    const next = removeBatchFromStore(store, batch.id)
-    await persistStore(next)
-    setMessage?.(`Usunięto partię „${batch.fileName}" (${batch.rowCount} wierszy).`)
-  }
-
-  async function handleRemoveDuplicateLine(row) {
-    const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
-    if (!ask(`Duplikat operacji:\n${formatRowSummary(row)}\n\nPozostałe kopie tej samej operacji zostaną w pamięci.`)) return
-    const next = removeLineFromStore(store, row._lineId)
-    await persistStore(next)
-    setMessage?.(`Usunięto duplikat: ${formatRowSummary(row)}`)
-  }
-
-  async function handleClearAll() {
-    const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
-    if (!ask(`Wszystkie ${excelRows.length} wierszy z ${store.batches.length} partii.\n\nTrzeba będzie ponownie wgrać pliki Excel.`)) return
-    await persistStore(await clearReportExcelStore())
-    setReport(null)
-    setShowDuplicates(false)
-    setMessage?.('Wyczyszczono wszystkie dane raportu z pamięci przeglądarki.')
-  }
-
-  async function handleSanitizeDuplicates() {
-    const { store: cleaned, removed } = sanitizeStoreDuplicates(store)
-    if (!removed) {
-      setMessage?.('Nie znaleziono duplikatów do usunięcia.')
-      return
-    }
-    await persistStore(cleaned)
-    setMessage?.(`Usunięto ${removed} zduplikowanych wierszy (ta sama operacja wgrana więcej niż raz). Przelicz raport ponownie.`)
-  }
-
-  const productAudits = useMemo(() => {
-    if (!excelRows.length || !report?.rows) return new Map()
-    const m = new Map()
-    for (const row of report.rows) {
-      if (row.remaining_kg > 0.5) {
-        m.set(row.product_key, auditProductFifoBalance(excelRows, row.product_name, asOfDate))
-      }
-    }
-    return m
-  }, [excelRows, report?.rows, asOfDate])
 
   function toggleExpand(key) {
     setExpanded(prev => {
@@ -326,23 +212,15 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   return (
     <div className="stock-value-report">
       <p className="hint">
-        Raport z pliku Excel · FIFO (te same reguły wariantów co K03) · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION}.
-        {storageBackend ? ` Magazyn danych: ${storageBackend === 'indexeddb' ? 'IndexedDB' : 'localStorage'}.` : null}
+        Raport z pliku Excel · FIFO · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION} (silnik oryginalny 2.1).
+        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w imporcie. Możesz wskazać <b>kilka plików naraz</b> (np. dwie paczki po 1000 wierszy).
       </p>
 
       <section className="card stock-excel-panel">
         <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel</h3>
         <p className="hint">
-          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Przy eksporcie partiami (np. 1000 wierszy) wybierz <b>Dodaj partię</b>.
-          Jeśli wgrywasz od zera jeden komplet — <b>Zastąp wszystko</b>.
+          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Każde wgrywanie <b>zastępuje</b> poprzednie dane — tak jak na początku, gdy raport działał poprawnie.
         </p>
-        <label className="checkbox-inline report-upload-mode">
-          <span>Tryb wgrywania:</span>
-          <select value={uploadMode} onChange={e => setUploadMode(e.target.value)} disabled={loading}>
-            <option value="append">Dodaj partię (łączy z pamięcią, pomija duplikaty)</option>
-            <option value="replace">Zastąp wszystko (czyści pamięć, nowy komplet plików)</option>
-          </select>
-        </label>
         <div className="actions">
           <input
             ref={fileInputRef}
@@ -353,75 +231,14 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             onChange={e => handleExcelUpload(e.target.files)}
           />
           <button type="button" disabled={loading} onClick={() => fileInputRef.current?.click()}>
-            <Upload size={16} /> {loading ? 'Wczytywanie…' : 'Dodaj plik Excel'}
+            <Upload size={16} /> {loading ? 'Wczytywanie…' : 'Wybierz plik Excel i przelicz'}
           </button>
-          {duplicateGroups.length > 0 && (
-            <button type="button" className="secondary" disabled={loading} onClick={handleSanitizeDuplicates}>
-              Usuń duplikaty ({duplicateGroups.reduce((s, g) => s + g.rows.length - 1, 0)})
-            </button>
-          )}
-          {store.batches.length > 0 && (
-            <button type="button" className="secondary" disabled={loading} onClick={handleClearAll}>
-              <Trash2 size={16} /> Wyczyść wszystko
-            </button>
-          )}
         </div>
-
-        {store.batches.length > 0 && (
-          <div className="report-batches">
-            <p className="hint"><b>W pamięci:</b> {excelRows.length} wierszy · {store.batches.length} partii</p>
-            <ul className="report-batch-list">
-              {[...store.batches].reverse().map(batch => (
-                <li key={batch.id} className="report-batch-item">
-                  <span>
-                    <b>{batch.fileName}</b>
-                    <small className="hint"> · {batch.rowCount} wierszy · {formatBatchDate(batch.uploadedAt)}</small>
-                    {batch.duplicateCount > 0 && (
-                      <small className="hint"> · pominięto {batch.duplicateCount} dupl. przy wgrywaniu</small>
-                    )}
-                  </span>
-                  <button type="button" className="mini secondary danger" title="Usuń partię" onClick={() => handleRemoveBatch(batch)}>
-                    <Trash2 size={14} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {duplicateGroups.length > 0 && (
-          <div className="report-duplicates-panel">
-            <button type="button" className="linkish" onClick={() => setShowDuplicates(v => !v)}>
-              {showDuplicates ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              {duplicateGroups.length} grup duplikatów ({duplicateGroups.reduce((s, g) => s + g.rows.length - 1, 0)} nadmiarowych wierszy)
-            </button>
-            {showDuplicates && (
-              <div className="report-duplicates-list">
-                <p className="hint">Te same operacje wgrane więcej niż raz. Usuń nadmiarowe kopie po potwierdzeniu.</p>
-                {duplicateGroups.map(group => (
-                  <div key={group.key} className="report-dup-group">
-                    <div className="report-dup-header">{formatRowSummary(group.rows[0])}</div>
-                    <ul>
-                      {group.rows.map(row => {
-                        const batch = store.batches.find(b => b.id === row._batchId)
-                        return (
-                          <li key={row._lineId} className="report-dup-line">
-                            <span>
-                              <small className="hint">{batch?.fileName || '—'}</small>
-                              {row.rowNo != null && <small className="hint"> · wiersz {row.rowNo}</small>}
-                            </span>
-                            <button type="button" className="mini secondary danger" onClick={() => handleRemoveDuplicateLine(row)}>
-                              Usuń tę kopię
-                            </button>
-                          </li>
-                        )
-                      })}
-                    </ul>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+        {fileNames.length > 0 && (
+          <p className="hint loaded-files">
+            Wczytane: <b>{fileNames.join(', ')}</b> · {excelRows.length} wierszy
+            {diag ? <> · {diag.pzLines} PZ, {diag.wzLines} WZ</> : null}
+          </p>
         )}
       </section>
 
@@ -430,11 +247,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
         <div className="form-grid compact r14-controls">
           <label>
             Stan na dzień
-            <ReportDatePicker
-              value={asOfDate}
-              onChange={setAsOfDate}
-              disabled={!excelRows.length}
-            />
+            <ReportDatePicker value={asOfDate} onChange={setAsOfDate} disabled={!excelRows.length} />
           </label>
           <div className="actions">
             <button
@@ -457,7 +270,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
       </section>
 
       {!excelRows.length && !loading && (
-        <p className="hint">Wgraj plik Excel, aby zobaczyć zestawienie ilościowo-wartościowe. Dane zostaną zapisane w przeglądarce.</p>
+        <p className="hint">Wgraj plik Excel, aby zobaczyć zestawienie ilościowo-wartościowe.</p>
       )}
 
       {report && excelRows.length > 0 && (
@@ -468,7 +281,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
           <span>Ilość końcowa FIFO: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
           {diag && (
             <span className="hint">
-              {diag.pzLines} PZ, {diag.wzLines} WZ w pamięci · {diag.linesWithPrice} z ceną
+              {diag.pzLines} PZ, {diag.wzLines} WZ w pliku · {diag.linesWithPrice} z ceną
               {diag.wzAfterCutoff > 0 ? ` · ${diag.wzAfterCutoff} WZ po dacie stanu pominięte` : ''}
             </span>
           )}
@@ -496,19 +309,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
                 return (
                   <React.Fragment key={key}>
                     <tr>
-                      <td>
-                        <b>{row.product_name}</b>
-                        {row.product_group ? <small className="hint"> · {row.product_group}</small> : null}
-                        {(() => {
-                          const audit = productAudits.get(key)
-                          if (!audit || row.remaining_kg <= 0.5) return null
-                          return (
-                            <small className="hint report-audit-hint">
-                              {' '}· PZ do daty: {audit.pzKg.toLocaleString('pl-PL')} kg · WZ: {audit.wzKg.toLocaleString('pl-PL')} kg
-                            </small>
-                          )
-                        })()}
-                      </td>
+                      <td><b>{row.product_name}</b>{row.product_group ? <small className="hint"> · {row.product_group}</small> : null}</td>
                       <td className="num">{Number(row.purchased_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.sold_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.remaining_kg || 0).toLocaleString('pl-PL')}</td>
