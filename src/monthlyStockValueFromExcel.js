@@ -10,7 +10,7 @@ import {
 } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
 
-export const EXCEL_REPORT_VERSION = '2.1'
+export const EXCEL_REPORT_VERSION = '2.2'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)

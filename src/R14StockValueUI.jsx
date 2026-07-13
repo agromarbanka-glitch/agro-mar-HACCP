@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Printer, RefreshCcw, Upload, FileSpreadsheet } from 'lucide-react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Printer, RefreshCcw, Upload, FileSpreadsheet, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import {
   formatPlMoney,
@@ -13,6 +13,18 @@ import {
   formatReportTitleDate,
   buildReportTitle
 } from './monthlyStockValueFromExcel'
+import {
+  loadReportExcelStore,
+  saveReportExcelStore,
+  appendExcelRowsToStore,
+  removeBatchFromStore,
+  removeLineFromStore,
+  findDuplicateGroups,
+  getStoredExcelRows,
+  getStoredFileNames,
+  formatRowSummary,
+  clearReportExcelStore
+} from './reportExcelStore'
 
 function defaultAsOfDate() {
   const d = new Date()
@@ -22,49 +34,178 @@ function defaultAsOfDate() {
   return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`
 }
 
-function shiftDate(isoDate, deltaDays) {
-  const d = new Date(String(isoDate || '').slice(0, 10))
-  if (Number.isNaN(d.getTime())) return defaultAsOfDate()
-  d.setDate(d.getDate() + deltaDays)
-  return d.toISOString().slice(0, 10)
+function parseIsoDate(iso) {
+  const m = String(iso || '').slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return null
+  return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) }
 }
 
-export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage }) {
+function buildIsoDate(y, mo, d) {
+  const last = new Date(y, mo, 0).getDate()
+  const day = Math.min(Math.max(1, d), last)
+  return `${y}-${String(mo).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function formatBatchDate(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' })
+}
+
+function ReportDatePicker({ value, onChange, disabled }) {
+  const parts = parseIsoDate(value) || parseIsoDate(defaultAsOfDate())
+  const { y, mo, d } = parts
+  const daysInMonth = new Date(y, mo, 0).getDate()
+  const monthValue = `${y}-${String(mo).padStart(2, '0')}`
+
+  function setMonth(monthStr) {
+    const mm = String(monthStr || '').match(/^(\d{4})-(\d{2})$/)
+    if (!mm) return
+    onChange(buildIsoDate(Number(mm[1]), Number(mm[2]), d))
+  }
+
+  function setDay(day) {
+    onChange(buildIsoDate(y, mo, Number(day)))
+  }
+
+  function preset(kind) {
+    const now = new Date()
+    if (kind === 'today') {
+      onChange(now.toISOString().slice(0, 10))
+      return
+    }
+    if (kind === 'monthStart') {
+      onChange(`${y}-${String(mo).padStart(2, '0')}-01`)
+      return
+    }
+    if (kind === 'monthEnd') {
+      onChange(buildIsoDate(y, mo, daysInMonth))
+    }
+  }
+
+  const dayOptions = useMemo(() => {
+    return Array.from({ length: daysInMonth }, (_, i) => i + 1)
+  }, [daysInMonth])
+
+  return (
+    <div className="report-date-picker">
+      <div className="report-date-row">
+        <label className="report-date-field">
+          <span className="report-date-label">Miesiąc</span>
+          <input
+            type="month"
+            value={monthValue}
+            onChange={e => setMonth(e.target.value)}
+            disabled={disabled}
+          />
+        </label>
+        <label className="report-date-field report-date-day">
+          <span className="report-date-label">Dzień</span>
+          <select value={Math.min(d, daysInMonth)} onChange={e => setDay(e.target.value)} disabled={disabled}>
+            {dayOptions.map(day => (
+              <option key={day} value={day}>{day}</option>
+            ))}
+          </select>
+        </label>
+        <label className="report-date-field report-date-native">
+          <span className="report-date-label">Kalendarz</span>
+          <input
+            type="date"
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            disabled={disabled}
+          />
+        </label>
+      </div>
+      <div className="report-date-presets">
+        <button type="button" className="mini secondary" disabled={disabled} onClick={() => preset('monthEnd')}>Koniec miesiąca</button>
+        <button type="button" className="mini secondary" disabled={disabled} onClick={() => preset('monthStart')}>Pierwszy dzień</button>
+        <button type="button" className="mini secondary" disabled={disabled} onClick={() => preset('today')}>Dziś</button>
+      </div>
+    </div>
+  )
+}
+
+export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage, confirmDelete }) {
   const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
   const [loading, setLoading] = useState(false)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
-  const [excelRows, setExcelRows] = useState([])
-  const [fileNames, setFileNames] = useState([])
+  const [store, setStore] = useState(() => loadReportExcelStore())
+  const [showDuplicates, setShowDuplicates] = useState(false)
   const fileInputRef = useRef(null)
+  const didShowStoredHint = useRef(false)
+
+  const excelRows = useMemo(() => getStoredExcelRows(store), [store])
+  const fileNames = useMemo(() => getStoredFileNames(store), [store])
+  const duplicateGroups = useMemo(() => findDuplicateGroups(store), [store])
+
+  const persistStore = useCallback((nextStore) => {
+    setStore(nextStore)
+    const ok = saveReportExcelStore(nextStore)
+    if (!ok) setMessage?.('Nie udało się zapisać danych w przeglądarce (limit pamięci?).')
+    return ok
+  }, [setMessage])
 
   const recalculate = useCallback((rows, names, date) => {
     const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
     setReport(result)
     setExpanded(new Set())
-    setMessage?.(result.message || '')
     return result
-  }, [setMessage])
+  }, [])
 
   useEffect(() => {
     if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
+    else setReport(null)
   }, [asOfDate, excelRows, fileNames, recalculate])
+
+  useEffect(() => {
+    if (excelRows.length && !loading && !didShowStoredHint.current) {
+      didShowStoredHint.current = true
+      setMessage?.(
+        `W pamięci: ${excelRows.length} wierszy z ${store.batches.length} partii. Zmień datę lub wgraj kolejną paczkę Excel.`
+      )
+    }
+  }, [excelRows.length, loading, setMessage, store.batches.length])
 
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
     if (!files.length) return
     setLoading(true)
     try {
-      const { rows, fileNames: names, skippedMm } = await parseExcelFilesForReport(files)
-      setExcelRows(rows)
-      setFileNames(names)
-      const result = recalculate(rows, names, asOfDate)
-      const priceHint = result.diagnostics?.linesWithPrice
-        ? ` · ${result.diagnostics.linesWithPrice} linii PZ z ceną netto`
-        : ''
-      setMessage?.(
-        `Wczytano ${rows.length} wierszy z ${names.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${priceHint}. ${result.message || ''}`
-      )
+      const parsedByFile = []
+      for (const file of files) {
+        const { rows, skippedMmCount } = await parseExcelFilesForReport([file])
+        parsedByFile.push({ fileName: file.name, rows, skippedMm: skippedMmCount || 0 })
+      }
+
+      const { store: nextStore, results } = appendExcelRowsToStore(store, parsedByFile)
+      const totalAdded = results.reduce((s, r) => s + r.added, 0)
+      const totalDup = results.reduce((s, r) => s + r.duplicates, 0)
+      const skippedMm = parsedByFile.reduce((s, f) => s + (f.skippedMm || 0), 0)
+
+      if (totalAdded === 0) {
+        setMessage?.(
+          totalDup > 0
+            ? `Wszystkie ${totalDup} wierszy z pliku już są w pamięci (duplikaty pominięte).`
+            : 'W pliku nie znaleziono nowych operacji PZ/WZ.'
+        )
+      } else {
+        persistStore(nextStore)
+        const names = getStoredFileNames(nextStore)
+        const rows = getStoredExcelRows(nextStore)
+        const result = recalculate(rows, names, asOfDate)
+        const detail = results.map(r =>
+          `„${r.fileName}”: +${r.added}${r.duplicates ? `, pominięto ${r.duplicates} dupl.` : ''}`
+        ).join(' · ')
+        const priceHint = result.diagnostics?.linesWithPrice
+          ? ` · ${result.diagnostics.linesWithPrice} linii PZ z ceną netto`
+          : ''
+        setMessage?.(
+          `Dodano ${totalAdded} wierszy${totalDup ? ` (pominięto ${totalDup} duplikatów)` : ''}${skippedMm ? ` · pominięto ${skippedMm} MM` : ''}. ${detail}${priceHint}. Łącznie w pamięci: ${rows.length} wierszy.`
+        )
+      }
     } catch (err) {
       console.error('Excel report error', err)
       setMessage?.(`Błąd wczytywania Excel: ${err?.message || String(err)}`)
@@ -72,6 +213,31 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
       setLoading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
+  }
+
+  function handleRemoveBatch(batch) {
+    const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
+    if (!ask(`Partię importu: „${batch.fileName}" (${batch.rowCount} wierszy).\n\nDane zostaną usunięte z pamięci przeglądarki.`)) return
+    const next = removeBatchFromStore(store, batch.id)
+    persistStore(next)
+    setMessage?.(`Usunięto partię „${batch.fileName}" (${batch.rowCount} wierszy).`)
+  }
+
+  function handleRemoveDuplicateLine(row) {
+    const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
+    if (!ask(`Duplikat operacji:\n${formatRowSummary(row)}\n\nPozostałe kopie tej samej operacji zostaną w pamięci.`)) return
+    const next = removeLineFromStore(store, row._lineId)
+    persistStore(next)
+    setMessage?.(`Usunięto duplikat: ${formatRowSummary(row)}`)
+  }
+
+  function handleClearAll() {
+    const ask = confirmDelete || ((msg) => window.confirm(`Czy na pewno usunąć?\n\n${msg}`))
+    if (!ask(`Wszystkie ${excelRows.length} wierszy z ${store.batches.length} partii.\n\nTrzeba będzie ponownie wgrać pliki Excel.`)) return
+    persistStore(clearReportExcelStore())
+    setReport(null)
+    setShowDuplicates(false)
+    setMessage?.('Wyczyszczono wszystkie dane raportu z pamięci przeglądarki.')
   }
 
   function toggleExpand(key) {
@@ -106,12 +272,13 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
     <div className="stock-value-report">
       <p className="hint">
         Raport z pliku Excel · FIFO · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION}.
+        Dane zapisane w przeglądarce — możesz wgrywać partiami (np. po 1000 operacji); duplikaty są pomijane.
       </p>
 
       <section className="card stock-excel-panel">
         <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel</h3>
         <p className="hint">
-          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Możesz wskazać kilka plików.
+          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Możesz wskazać kilka plików naraz lub dodawać kolejne partie później.
         </p>
         <div className="actions">
           <input
@@ -123,13 +290,70 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             onChange={e => handleExcelUpload(e.target.files)}
           />
           <button type="button" disabled={loading} onClick={() => fileInputRef.current?.click()}>
-            <Upload size={16} /> {loading ? 'Wczytywanie…' : 'Wybierz plik Excel i przelicz'}
+            <Upload size={16} /> {loading ? 'Wczytywanie…' : 'Dodaj plik Excel'}
           </button>
+          {store.batches.length > 0 && (
+            <button type="button" className="secondary" disabled={loading} onClick={handleClearAll}>
+              <Trash2 size={16} /> Wyczyść wszystko
+            </button>
+          )}
         </div>
-        {fileNames.length > 0 && (
-          <p className="hint loaded-files">
-            Wczytane: <b>{fileNames.join(', ')}</b> · {excelRows.length} wierszy
-          </p>
+
+        {store.batches.length > 0 && (
+          <div className="report-batches">
+            <p className="hint"><b>W pamięci:</b> {excelRows.length} wierszy · {store.batches.length} partii</p>
+            <ul className="report-batch-list">
+              {[...store.batches].reverse().map(batch => (
+                <li key={batch.id} className="report-batch-item">
+                  <span>
+                    <b>{batch.fileName}</b>
+                    <small className="hint"> · {batch.rowCount} wierszy · {formatBatchDate(batch.uploadedAt)}</small>
+                    {batch.duplicateCount > 0 && (
+                      <small className="hint"> · pominięto {batch.duplicateCount} dupl. przy wgrywaniu</small>
+                    )}
+                  </span>
+                  <button type="button" className="mini secondary danger" title="Usuń partię" onClick={() => handleRemoveBatch(batch)}>
+                    <Trash2 size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {duplicateGroups.length > 0 && (
+          <div className="report-duplicates-panel">
+            <button type="button" className="linkish" onClick={() => setShowDuplicates(v => !v)}>
+              {showDuplicates ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              {duplicateGroups.length} grup duplikatów ({duplicateGroups.reduce((s, g) => s + g.rows.length - 1, 0)} nadmiarowych wierszy)
+            </button>
+            {showDuplicates && (
+              <div className="report-duplicates-list">
+                <p className="hint">Te same operacje wgrane więcej niż raz. Usuń nadmiarowe kopie po potwierdzeniu.</p>
+                {duplicateGroups.map(group => (
+                  <div key={group.key} className="report-dup-group">
+                    <div className="report-dup-header">{formatRowSummary(group.rows[0])}</div>
+                    <ul>
+                      {group.rows.map(row => {
+                        const batch = store.batches.find(b => b.id === row._batchId)
+                        return (
+                          <li key={row._lineId} className="report-dup-line">
+                            <span>
+                              <small className="hint">{batch?.fileName || '—'}</small>
+                              {row.rowNo != null && <small className="hint"> · wiersz {row.rowNo}</small>}
+                            </span>
+                            <button type="button" className="mini secondary danger" onClick={() => handleRemoveDuplicateLine(row)}>
+                              Usuń tę kopię
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </section>
 
@@ -138,16 +362,11 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
         <div className="form-grid compact r14-controls">
           <label>
             Stan na dzień
-            <div className="month-nav">
-              <button type="button" className="mini secondary" title="Poprzedni dzień" onClick={() => setAsOfDate(d => shiftDate(d, -1))}>‹</button>
-              <input
-                type="date"
-                value={asOfDate}
-                onChange={e => setAsOfDate(e.target.value)}
-                disabled={!excelRows.length}
-              />
-              <button type="button" className="mini secondary" title="Następny dzień" onClick={() => setAsOfDate(d => shiftDate(d, 1))}>›</button>
-            </div>
+            <ReportDatePicker
+              value={asOfDate}
+              onChange={setAsOfDate}
+              disabled={!excelRows.length}
+            />
           </label>
           <div className="actions">
             <button
@@ -170,7 +389,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
       </section>
 
       {!excelRows.length && !loading && (
-        <p className="hint">Wgraj plik Excel, aby zobaczyć zestawienie ilościowo-wartościowe.</p>
+        <p className="hint">Wgraj plik Excel, aby zobaczyć zestawienie ilościowo-wartościowe. Dane zostaną zapisane w przeglądarce.</p>
       )}
 
       {report && excelRows.length > 0 && (
@@ -181,7 +400,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
           <span>Ilość końcowa FIFO: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
           {diag && (
             <span className="hint">
-              {diag.pzLines} PZ, {diag.wzLines} WZ w pliku · {diag.linesWithPrice} z ceną
+              {diag.pzLines} PZ, {diag.wzLines} WZ w pamięci · {diag.linesWithPrice} z ceną
               {diag.wzAfterCutoff > 0 ? ` · ${diag.wzAfterCutoff} WZ po dacie stanu pominięte` : ''}
             </span>
           )}
