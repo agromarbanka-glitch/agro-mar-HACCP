@@ -9,18 +9,28 @@ import {
 import {
   EXCEL_REPORT_VERSION,
   computeMonthlyStockValueReportFromExcel,
-  parseExcelFilesForReport
+  parseExcelFilesForReport,
+  formatReportTitleDate,
+  buildReportTitle
 } from './monthlyStockValueFromExcel'
 
-function shiftMonth(ym, delta) {
-  const [y, m] = String(ym || '').split('-').map(Number)
-  if (!y || !m) return new Date().toISOString().slice(0, 7)
-  const d = new Date(y, m - 1 + delta, 1)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+function defaultAsOfDate() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = d.getMonth() + 1
+  const last = new Date(y, m, 0).getDate()
+  return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`
+}
+
+function shiftDate(isoDate, deltaDays) {
+  const d = new Date(String(isoDate || '').slice(0, 10))
+  if (Number.isNaN(d.getTime())) return defaultAsOfDate()
+  d.setDate(d.getDate() + deltaDays)
+  return d.toISOString().slice(0, 10)
 }
 
 export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage }) {
-  const [yearMonth, setYearMonth] = useState(() => new Date().toISOString().slice(0, 7))
+  const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
   const [loading, setLoading] = useState(false)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
@@ -28,8 +38,8 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   const [fileNames, setFileNames] = useState([])
   const fileInputRef = useRef(null)
 
-  const recalculate = useCallback((rows, names, ym) => {
-    const result = computeMonthlyStockValueReportFromExcel(rows, ym, { fileNames: names })
+  const recalculate = useCallback((rows, names, date) => {
+    const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
     setReport(result)
     setExpanded(new Set())
     setMessage?.(result.message || '')
@@ -37,8 +47,8 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   }, [setMessage])
 
   useEffect(() => {
-    if (excelRows.length) recalculate(excelRows, fileNames, yearMonth)
-  }, [yearMonth, excelRows, fileNames, recalculate])
+    if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
+  }, [asOfDate, excelRows, fileNames, recalculate])
 
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
@@ -48,7 +58,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
       const { rows, fileNames: names, skippedMm } = await parseExcelFilesForReport(files)
       setExcelRows(rows)
       setFileNames(names)
-      const result = recalculate(rows, names, yearMonth)
+      const result = recalculate(rows, names, asOfDate)
       const priceHint = result.diagnostics?.linesWithPrice
         ? ` · ${result.diagnostics.linesWithPrice} linii PZ z ceną netto`
         : ''
@@ -84,25 +94,24 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
     const ws = XLSX.utils.aoa_to_sheet(out)
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Magazyn')
-    XLSX.writeFile(wb, `Raport_magazyn_${report.yearMonth || 'raport'}.xlsx`)
+    const day = String(report.asOfDate || asOfDate).slice(0, 10).replace(/-/g, '')
+    XLSX.writeFile(wb, `Raport_magazyn_${day}.xlsx`)
   }
 
   const rows = report?.rows || []
   const diag = report?.diagnostics
+  const reportTitle = report?.reportTitle || buildReportTitle({ asOfDate })
 
   return (
     <div className="stock-value-report">
       <p className="hint">
-        Raport liczy się <b>bezpośrednio z pliku Excel</b> — nie używa bazy importu ani dat przerobu K03.
-        Wgraj eksport PZ/WZ z Fakturowni (wiersze z produktem, ilością i <b>ostatnią kolumną „Cena netto”</b>).
-        FIFO do końca miesiąca · sprzedaż wg <b>daty WZ</b>. Wersja: {EXCEL_REPORT_VERSION}.
+        Raport z pliku Excel · FIFO · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION}.
       </p>
 
       <section className="card stock-excel-panel">
         <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel</h3>
         <p className="hint">
-          Ten sam plik, który wgrywasz w Importy (szczegółowy eksport operacji, nie zestawienie zbiorcze bez cen).
-          Możesz wskazać kilka plików naraz.
+          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Możesz wskazać kilka plików.
         </p>
         <div className="actions">
           <input
@@ -125,14 +134,19 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
       </section>
 
       <section className="card stock-excel-panel">
-        <h3>2. Wybierz miesiąc</h3>
+        <h3>2. Wybierz datę stanu</h3>
         <div className="form-grid compact r14-controls">
           <label>
-            Miesiąc raportu
+            Stan na dzień
             <div className="month-nav">
-              <button type="button" className="mini secondary" onClick={() => setYearMonth(m => shiftMonth(m, -1))}>‹</button>
-              <input type="month" value={yearMonth} onChange={e => setYearMonth(e.target.value)} disabled={!excelRows.length} />
-              <button type="button" className="mini secondary" onClick={() => setYearMonth(m => shiftMonth(m, 1))}>›</button>
+              <button type="button" className="mini secondary" title="Poprzedni dzień" onClick={() => setAsOfDate(d => shiftDate(d, -1))}>‹</button>
+              <input
+                type="date"
+                value={asOfDate}
+                onChange={e => setAsOfDate(e.target.value)}
+                disabled={!excelRows.length}
+              />
+              <button type="button" className="mini secondary" title="Następny dzień" onClick={() => setAsOfDate(d => shiftDate(d, 1))}>›</button>
             </div>
           </label>
           <div className="actions">
@@ -140,7 +154,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
               type="button"
               className="secondary"
               disabled={!excelRows.length || loading}
-              onClick={() => recalculate(excelRows, fileNames, yearMonth)}
+              onClick={() => recalculate(excelRows, fileNames, asOfDate)}
             >
               <RefreshCcw size={16} /> Przelicz
             </button>
@@ -150,6 +164,9 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             <button type="button" className="secondary" onClick={exportExcel} disabled={!rows.length}>Excel</button>
           </div>
         </div>
+        {excelRows.length > 0 && (
+          <p className="hint report-title-preview">{reportTitle}</p>
+        )}
       </section>
 
       {!excelRows.length && !loading && (
@@ -158,14 +175,14 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
 
       {report && excelRows.length > 0 && (
         <div className="summary r14-summary">
-          <span>Okres: <b>{report.monthStart} – {report.monthEnd}</b></span>
-          <span>Przybyło (miesiąc): <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.purchased_value)} zł</span>
-          <span>Ubyło (miesiąc): <b>{Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')} kg</b></span>
-          <span>Ilość końcowa FIFO: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b> netto</span>
+          <span>Stan na: <b>{report.asOfDatePl || formatReportTitleDate(asOfDate)}</b></span>
+          <span>Przybyło (01.–{report.asOfDatePl?.replace(/r\.$/, '') || '…'}): <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b></span>
+          <span>Ubyło: <b>{Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')} kg</b></span>
+          <span>Ilość końcowa FIFO: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
           {diag && (
             <span className="hint">
-              Excel: {diag.pzLines} PZ, {diag.wzLines} WZ · {diag.linesWithPrice} linii z ceną
-              {diag.wzAfterMonthEnd > 0 ? ` · ${diag.wzAfterMonthEnd} WZ po ${report.monthEnd} pominięte` : ''}
+              {diag.pzLines} PZ, {diag.wzLines} WZ w pliku · {diag.linesWithPrice} z ceną
+              {diag.wzAfterCutoff > 0 ? ` · ${diag.wzAfterCutoff} WZ po dacie stanu pominięte` : ''}
             </span>
           )}
         </div>
@@ -177,9 +194,9 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             <thead>
               <tr>
                 <th>Produkt</th>
-                <th className="num">Przybyło kg<br /><small>(miesiąc)</small></th>
-                <th className="num">Ubyło kg<br /><small>(miesiąc)</small></th>
-                <th className="num">Ilość końcowa<br /><small>FIFO {report?.monthEnd}</small></th>
+                <th className="num">Przybyło kg</th>
+                <th className="num">Ubyło kg</th>
+                <th className="num">Ilość końcowa<br /><small>FIFO · {report?.asOfDatePl || ''}</small></th>
                 <th className="num">Wartość zakupu<br /><small>netto</small></th>
                 <th className="num">Wartość końcowa<br /><small>netto</small></th>
                 <th>Szczegóły</th>

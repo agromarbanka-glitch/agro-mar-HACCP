@@ -17,6 +17,7 @@ import {
   fifoLotMatchesMatchSpec
 } from './k03Engine'
 import { lotReceiptDate } from './fifoEngine'
+import { buildReportTitle } from './monthlyStockValueFromExcel'
 
 export const MONTHLY_STOCK_VALUE_VERSION = '1.3'
 
@@ -422,6 +423,7 @@ export function formatPlMoney(value) {
 export function buildR14PrintHtml(report, escapeHtml) {
   const esc = escapeHtml || (s => String(s ?? ''))
   const rows = report.rows || []
+  const title = report.reportTitle || buildReportTitle(report)
   const bodyRows = rows.map((r, i) => `
     <tr>
       <td>${i + 1}</td>
@@ -434,23 +436,23 @@ export function buildR14PrintHtml(report, escapeHtml) {
     </tr>
   `).join('')
 
-  return `<!DOCTYPE html><html lang="pl"><head><meta charset="utf-8"/><title>Raport ${esc(report.yearMonth)}</title>
+  return `<!DOCTYPE html><html lang="pl"><head><meta charset="utf-8"/><title>${esc(title)}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:11pt;margin:24px}
-h1{font-size:14pt;margin:0 0 8px}
-.meta{margin-bottom:16px;color:#333;font-size:10pt}
+h1{font-size:13pt;margin:0 0 16px;line-height:1.35;font-weight:700;text-align:center}
+.meta{margin-bottom:16px;color:#333;font-size:10pt;text-align:center}
 table{border-collapse:collapse;width:100%}
 th,td{border:1px solid #333;padding:6px 8px;text-align:left}
 th{background:#eee}
 .num{text-align:right;white-space:nowrap}
 tfoot td{font-weight:bold}
 </style></head><body>
-<h1>Zestawienie ilościowo-wartościowe magazynu</h1>
-<p class="meta">Stan na <b>${esc(report.monthEnd)}</b> · FIFO · sprzedaż wg daty WZ (nie przerobu) · wartość = ilość × cena netto PZ</p>
+<h1>${esc(title)}</h1>
+<p class="meta">FIFO · sprzedaż wg daty WZ · wartość netto = ilość × cena netto z PZ</p>
 <table>
 <thead><tr>
   <th>Lp.</th><th>Produkt</th>
-  <th>Przybyło kg (miesiąc)</th><th>Ubyło kg (miesiąc)</th><th>Ilość końcowa (FIFO)</th>
+  <th>Przybyło kg</th><th>Ubyło kg</th><th>Ilość końcowa</th>
   <th>Wartość zakupu netto</th><th>Wartość końcowa netto</th>
 </tr></thead>
 <tbody>${bodyRows || '<tr><td colspan="7">Brak danych</td></tr>'}</tbody>
@@ -467,11 +469,11 @@ tfoot td{font-weight:bold}
 }
 
 export function buildR14ExcelRows(report) {
+  const title = report.reportTitle || buildReportTitle(report)
   const header = [
-    ['Zestawienie ilościowo-wartościowe', report.yearMonth || ''],
-    [`Stan na ${report.monthEnd || ''} · FIFO · data WZ`],
+    [title],
     [],
-    ['Lp.', 'Produkt', 'Grupa', 'Przybyło kg', 'Ubyło kg', 'Ilość końcowa FIFO', 'Wartość zakupu netto', 'Wartość końcowa netto']
+    ['Lp.', 'Produkt', 'Grupa', 'Przybyło kg', 'Ubyło kg', 'Ilość końcowa', 'Wartość zakupu netto', 'Wartość końcowa netto']
   ]
   const data = (report.rows || []).map((r, i) => [
     i + 1, r.product_name, r.product_group || '',

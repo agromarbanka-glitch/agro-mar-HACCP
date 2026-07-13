@@ -735,7 +735,8 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .warning-text { color: #a33; }
 .stock-excel-panel { margin-bottom: 16px; }
 .stock-excel-panel h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 1rem; }
-.loaded-files b { margin-right: 4px; }
+.report-title-preview { font-size: 13px; margin-top: 8px; }
+.r14-controls .month-nav input[type="date"] { flex: 1; min-width: 140px; }
 .checkbox-inline { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 14px; }
 .file-input-hidden { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 

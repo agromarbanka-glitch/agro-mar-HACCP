@@ -10,7 +10,19 @@ import {
 } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
 
-export const EXCEL_REPORT_VERSION = '2.0'
+export const EXCEL_REPORT_VERSION = '2.1'
+
+export function formatReportTitleDate(isoDate) {
+  const d = String(isoDate || '').slice(0, 10)
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return ''
+  return `${m[3]}.${m[2]}.${m[1]}r.`
+}
+
+export function buildReportTitle(report) {
+  const dayLabel = formatReportTitleDate(report?.asOfDate || report?.monthEnd)
+  return `Zestawienie ilościowo-wartościowe magazynu w firmie AGRO-MAR Mariusz Bańka Sp. z o.o. na dzień ${dayLabel}`
+}
 
 function monthBounds(yearMonth) {
   const m = String(yearMonth || '').match(/^(\d{4})-(\d{2})$/)
@@ -23,6 +35,32 @@ function monthBounds(yearMonth) {
     yearMonth: `${year}-${String(month).padStart(2, '0')}`,
     monthStart: `${year}-${String(month).padStart(2, '0')}-01`,
     monthEnd: `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
+  }
+}
+
+/** RRRR-MM-DD lub RRRR-MM (wtedy ostatni dzień miesiąca). */
+export function parseAsOfDate(input) {
+  const raw = String(input || '').trim()
+  const full = raw.slice(0, 10)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(full)) {
+    const [y, m, d] = full.split('-').map(Number)
+    const last = new Date(y, m, 0).getDate()
+    if (d < 1 || d > last || m < 1 || m > 12) return null
+    const monthStart = `${y}-${String(m).padStart(2, '0')}-01`
+    return {
+      asOfDate: full,
+      monthStart,
+      periodEnd: full,
+      yearMonth: `${y}-${String(m).padStart(2, '0')}`
+    }
+  }
+  const mb = monthBounds(raw.slice(0, 7))
+  if (!mb) return null
+  return {
+    asOfDate: mb.monthEnd,
+    monthStart: mb.monthStart,
+    periodEnd: mb.monthEnd,
+    yearMonth: mb.yearMonth
   }
 }
 
@@ -42,8 +80,34 @@ function displayName(name) {
   return String(name || '').trim() || 'Produkt'
 }
 
-function inMonth(date, monthStart, monthEnd) {
-  return date && date >= monthStart && date <= monthEnd
+function inPeriod(date, periodStart, periodEnd) {
+  return date && date >= periodStart && date <= periodEnd
+}
+
+function simulateFifoExactName({ cutoffDate, lots, sales }) {
+  const sortedSales = [...sales].sort((a, b) =>
+    a.issueDate.localeCompare(b.issueDate) ||
+    a.documentNo.localeCompare(b.documentNo)
+  )
+
+  for (const sale of sortedSales) {
+    let left = sale.qty
+    const pool = lots
+      .filter(l => l.productKey === sale.productKey && l.remaining_qty > 0 && l.issueDate <= cutoffDate)
+      .sort((a, b) =>
+        a.issueDate.localeCompare(b.issueDate) ||
+        a.documentNo.localeCompare(b.documentNo) ||
+        a.lineId.localeCompare(b.lineId)
+      )
+
+    for (const lot of pool) {
+      if (left <= 0.0005) break
+      const take = Math.min(lot.remaining_qty, left)
+      if (take <= 0) continue
+      lot.remaining_qty -= take
+      left -= take
+    }
+  }
 }
 
 function normalizeExcelRows(rows) {
@@ -90,57 +154,35 @@ function ensureRow(map, key, label) {
   return map.get(key)
 }
 
-function simulateFifoExactName({ monthEnd, lots, sales }) {
-  const sortedSales = [...sales].sort((a, b) =>
-    a.issueDate.localeCompare(b.issueDate) ||
-    a.documentNo.localeCompare(b.documentNo)
-  )
-
-  for (const sale of sortedSales) {
-    let left = sale.qty
-    const pool = lots
-      .filter(l => l.productKey === sale.productKey && l.remaining_qty > 0 && l.issueDate <= monthEnd)
-      .sort((a, b) =>
-        a.issueDate.localeCompare(b.issueDate) ||
-        a.documentNo.localeCompare(b.documentNo) ||
-        a.lineId.localeCompare(b.lineId)
-      )
-
-    for (const lot of pool) {
-      if (left <= 0.0005) break
-      const take = Math.min(lot.remaining_qty, left)
-      if (take <= 0) continue
-      lot.remaining_qty -= take
-      left -= take
-    }
-  }
-}
-
 /**
- * @param {Array} excelRows – wynik readAgromarExcel().rows (można scalić wiele plików)
- * @param {string} yearMonth – RRRR-MM
+ * @param {Array} excelRows – wynik readAgromarExcel().rows
+ * @param {string} asOfDate – RRRR-MM-DD (lub RRRR-MM → ostatni dzień miesiąca)
  */
-export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { fileNames = [] } = {}) {
-  const bounds = monthBounds(yearMonth)
+export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { fileNames = [] } = {}) {
+  const bounds = parseAsOfDate(asOfDate)
   if (!bounds) {
     return {
       source: 'excel',
-      yearMonth: yearMonth || '',
+      asOfDate: asOfDate || '',
       rows: [],
       totals: { purchased_kg: 0, sold_kg: 0, remaining_kg: 0, purchased_value: 0, remaining_value: 0 },
-      message: 'Wybierz poprawny miesiąc (RRRR-MM).'
+      reportTitle: '',
+      message: 'Wybierz poprawną datę (RRRR-MM-DD).'
     }
   }
 
-  const { monthStart, monthEnd } = bounds
+  const { monthStart, periodEnd, yearMonth } = bounds
+  const cutoffDate = bounds.asOfDate
   const lines = normalizeExcelRows(excelRows)
 
   if (!lines.length) {
     return {
       source: 'excel',
-      yearMonth: bounds.yearMonth,
+      asOfDate: cutoffDate,
+      yearMonth,
       monthStart,
-      monthEnd,
+      monthEnd: cutoffDate,
+      periodEnd,
       fileNames,
       rows: [],
       totals: { purchased_kg: 0, sold_kg: 0, remaining_kg: 0, purchased_value: 0, remaining_value: 0 },
@@ -155,7 +197,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { 
   const salesForFifo = []
   let pzLines = 0
   let wzLines = 0
-  let wzAfterMonth = 0
+  let wzAfterCutoff = 0
   let linesWithPrice = 0
 
   lines.forEach((line, idx) => {
@@ -165,14 +207,14 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { 
       pzLines += 1
       if (unitPriceNet != null) linesWithPrice += 1
 
-      if (inMonth(issueDate, monthStart, monthEnd)) {
+      if (inPeriod(issueDate, monthStart, periodEnd)) {
         const row = ensureRow(periodMap, productKey, productName)
         row.purchased_kg += qty
         if (unitPriceNet != null) row.purchased_value += qty * unitPriceNet
         else row.purchased_missing_price_kg += qty
       }
 
-      if (issueDate <= monthEnd) {
+      if (issueDate <= cutoffDate) {
         lots.push({
           lineId: `pz-${idx}`,
           productKey,
@@ -186,18 +228,18 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { 
       }
     } else if (operation === 'sprzedaz') {
       wzLines += 1
-      if (inMonth(issueDate, monthStart, monthEnd)) {
+      if (inPeriod(issueDate, monthStart, periodEnd)) {
         ensureRow(periodMap, productKey, productName).sold_kg += qty
       }
-      if (issueDate <= monthEnd) {
+      if (issueDate <= cutoffDate) {
         salesForFifo.push({ ...line, qty })
       } else {
-        wzAfterMonth += 1
+        wzAfterCutoff += 1
       }
     }
   })
 
-  simulateFifoExactName({ monthEnd, lots, sales: salesForFifo })
+  simulateFifoExactName({ cutoffDate, lots, sales: salesForFifo })
 
   let missingPriceLines = 0
 
@@ -255,8 +297,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { 
   }
 
   let message = rows.length
-    ? `Przeliczono z Excela: na ${monthEnd} pozostało ${totals.remaining_kg.toLocaleString('pl-PL')} kg · ${totals.remaining_value.toLocaleString('pl-PL', { minimumFractionDigits: 2 })} zł netto.`
-    : `Brak danych za ${bounds.yearMonth} w wczytanym pliku.`
+    ? `Przeliczono z Excela: na dzień ${formatReportTitleDate(cutoffDate)} pozostało ${totals.remaining_kg.toLocaleString('pl-PL')} kg · ${totals.remaining_value.toLocaleString('pl-PL', { minimumFractionDigits: 2 })} zł netto.`
+    : `Brak danych do ${formatReportTitleDate(cutoffDate)} w wczytanym pliku.`
 
   if (linesWithPrice === 0 && pzLines > 0) {
     message += ' W pliku brak cen w ostatniej kolumnie „Cena netto” – użyj eksportu szczegółowego PZ/WZ (nie zestawienia zbiorczego).'
@@ -264,15 +306,18 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { 
     message += ` ${missingPriceLines} linii PZ bez ceny – sprawdź ostatnią kolumnę „Cena netto”.`
   }
 
-  if (wzAfterMonth > 0) {
-    message += ` Pominięto ${wzAfterMonth} WZ z datą po ${monthEnd} (sprzedaż lipcowa nie obniża stanu czerwca).`
+  if (wzAfterCutoff > 0) {
+    message += ` Pominięto ${wzAfterCutoff} WZ z datą po ${formatReportTitleDate(cutoffDate)} (nie obniżają stanu na ten dzień).`
   }
 
-  return {
+  const reportPayload = {
     source: 'excel',
-    yearMonth: bounds.yearMonth,
+    asOfDate: cutoffDate,
+    asOfDatePl: formatReportTitleDate(cutoffDate),
+    yearMonth,
     monthStart,
-    monthEnd,
+    monthEnd: cutoffDate,
+    periodEnd,
     fileNames,
     rows,
     totals,
@@ -283,11 +328,13 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, yearMonth, { 
       pzLines,
       wzLines,
       linesWithPrice,
-      wzAfterMonthEnd: wzAfterMonth,
+      wzAfterCutoff,
       lotsInScope: lots.length
     },
     message
   }
+  reportPayload.reportTitle = buildReportTitle(reportPayload)
+  return reportPayload
 }
 
 export async function parseExcelFilesForReport(files) {
