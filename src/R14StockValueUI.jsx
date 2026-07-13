@@ -116,9 +116,9 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
   return (
     <div className="stock-value-report">
       <p className="hint">
-        Zestawienie na koniec wybranego miesiąca: ile towaru pozostało niesprzedane (symulacja FIFO do ostatniego dnia miesiąca)
-        oraz jaka jest wartość netto. Wartość = <b>ilość × cena netto</b> z ostatniej kolumny „Cena netto” w pliku Excel
-        (nie używamy kolumny „Wartość netto”). Silnik: {MONTHLY_STOCK_VALUE_VERSION}.
+        Zestawienie jak w Fakturowni za wybrany miesiąc: <b>przybyło</b> (PZ) − <b>ubyło</b> (WZ) = <b>ilość końcowa</b>,
+        osobno dla każdej nazwy produktu z importu (np. Malina świeża 1 i Malina świeża PW).
+        Wartość netto = <b>ilość × cena netto</b> z ostatniej kolumny „Cena netto” w Excelu. Silnik: {MONTHLY_STOCK_VALUE_VERSION}.
       </p>
 
       <div className="form-grid compact r14-controls">
@@ -187,17 +187,18 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
 
       {report && (
         <div className="summary r14-summary">
-          <span>Stan na: <b>{report.monthEnd}</b></span>
-          <span>Zakupiono w miesiącu: <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.purchased_value)} zł netto</span>
-          <span>Pozostało: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.remaining_value)} zł netto</span>
+          <span>Okres: <b>{report.monthStart} – {report.monthEnd}</b></span>
+          <span>Przybyło: <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.purchased_value)} zł</span>
+          <span>Ubyło: <b>{Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')} kg</b></span>
+          <span>Ilość końcowa: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.remaining_value)} zł netto</span>
           {diag && (
-            <span className="hint">Baza: {diag.lotsInScope} partii do {report.monthEnd}, {diag.pzInMonth} poz. PZ w miesiącu</span>
+            <span className="hint">Dokumenty w miesiącu: {diag.pzInMonth} poz. PZ, {diag.wzInMonth} poz. WZ</span>
           )}
           {report.hasPriceColumn === false && (
             <span className="warning-text">Brak kolumny cen w bazie – uruchom migrację v44 w Supabase.</span>
           )}
-          {report.missingPriceLines > 0 && report.hasPriceColumn !== false && (
-            <span className="warning-text">Brak ceny: {report.missingPriceLines} partii – użyj uzupełniania z Excel powyżej.</span>
+          {(report.missingPriceLines > 0 || (report.totals?.purchased_kg > 0 && report.totals?.purchased_value === 0)) && report.hasPriceColumn !== false && (
+            <span className="warning-text">Brak ceny na pozycjach PZ – wskaż pliki Excel poniżej (Wybierz plik).</span>
           )}
         </div>
       )}
@@ -208,24 +209,26 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
             <thead>
               <tr>
                 <th>Produkt</th>
-                <th className="num">Zakupiono kg<br /><small>(w miesiącu)</small></th>
+                <th className="num">Przybyło kg</th>
+                <th className="num">Ubyło kg</th>
+                <th className="num">Ilość końcowa</th>
                 <th className="num">Wartość zakupu<br /><small>netto</small></th>
-                <th className="num">Pozostało kg<br /><small>(na koniec mies.)</small></th>
-                <th className="num">Wartość pozostała<br /><small>netto (obliczona)</small></th>
+                <th className="num">Wartość końcowa<br /><small>netto</small></th>
                 <th>Szczegóły</th>
               </tr>
             </thead>
             <tbody>
               {rows.map(row => {
-                const key = row.product_id || row.product_name
+                const key = row.product_key || row.product_id || row.product_name
                 const open = expanded.has(key)
                 return (
                   <React.Fragment key={key}>
                     <tr>
                       <td><b>{row.product_name}</b>{row.product_group ? <small className="hint"> · {row.product_group}</small> : null}</td>
                       <td className="num">{Number(row.purchased_kg || 0).toLocaleString('pl-PL')}</td>
-                      <td className="num">{formatPlMoney(row.purchased_value)}</td>
+                      <td className="num">{Number(row.sold_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.remaining_kg || 0).toLocaleString('pl-PL')}</td>
+                      <td className="num">{formatPlMoney(row.purchased_value)}</td>
                       <td className="num">
                         {formatPlMoney(row.remaining_value)}
                         {row.remaining_missing_price_kg > 0 && (
@@ -233,32 +236,32 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
                         )}
                       </td>
                       <td>
-                        {row.lot_lines?.length > 0 && (
+                        {row.pz_lines?.length > 0 && (
                           <button type="button" className="mini secondary" onClick={() => toggleExpand(key)}>
-                            {open ? 'Ukryj partie' : `${row.lot_lines.length} partii`}
+                            {open ? 'Ukryj PZ' : `${row.pz_lines.length} PZ`}
                           </button>
                         )}
                       </td>
                     </tr>
-                    {open && row.lot_lines?.length > 0 && (
+                    {open && row.pz_lines?.length > 0 && (
                       <tr className="r14-detail-row">
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <table className="r14-lot-table">
                             <thead>
                               <tr>
-                                <th>PZ / partia</th>
-                                <th>Data PZ</th>
-                                <th className="num">Pozostało kg</th>
+                                <th>Nr PZ</th>
+                                <th>Data</th>
+                                <th className="num">Ilość kg</th>
                                 <th className="num">Cena netto</th>
                                 <th className="num">Wartość netto</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {row.lot_lines.map(line => (
-                                <tr key={line.lot_id}>
-                                  <td>{line.pz_no} · {line.lot_no}</td>
+                              {row.pz_lines.map(line => (
+                                <tr key={`${line.item_id}-${line.pz_no}-${line.qty}`}>
+                                  <td>{line.pz_no}</td>
                                   <td>{line.pz_date}</td>
-                                  <td className="num">{Number(line.remaining_kg || 0).toLocaleString('pl-PL')}</td>
+                                  <td className="num">{Number(line.qty || 0).toLocaleString('pl-PL')}</td>
                                   <td className="num">{line.unit_price_net != null ? formatPlMoney(line.unit_price_net) : '—'}</td>
                                   <td className="num">{line.line_value != null ? formatPlMoney(line.line_value) : '—'}</td>
                                 </tr>
@@ -276,8 +279,9 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
               <tr>
                 <td><b>Razem</b></td>
                 <td className="num"><b>{Number(report?.totals?.purchased_kg || 0).toLocaleString('pl-PL')}</b></td>
-                <td className="num"><b>{formatPlMoney(report?.totals?.purchased_value)}</b></td>
+                <td className="num"><b>{Number(report?.totals?.sold_kg || 0).toLocaleString('pl-PL')}</b></td>
                 <td className="num"><b>{Number(report?.totals?.remaining_kg || 0).toLocaleString('pl-PL')}</b></td>
+                <td className="num"><b>{formatPlMoney(report?.totals?.purchased_value)}</b></td>
                 <td className="num"><b>{formatPlMoney(report?.totals?.remaining_value)}</b></td>
                 <td />
               </tr>

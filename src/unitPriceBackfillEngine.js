@@ -4,7 +4,7 @@
  */
 import { readAgromarExcel, normalizeDocumentNo, resolveDocumentIssueDate, classifyOperation } from './excelImport'
 
-export const UNIT_PRICE_BACKFILL_VERSION = '1.0'
+export const UNIT_PRICE_BACKFILL_VERSION = '1.1'
 
 function roundQty(qty) {
   return Math.round(Number(qty || 0) * 1000) / 1000
@@ -19,25 +19,55 @@ function monthFromDate(dateStr) {
   return d.length >= 7 ? d.slice(0, 7) : ''
 }
 
-function buildExcelPriceIndex(rows, { yearMonth, canonicalProductName } = {}) {
+function qtyKeys(qty) {
+  const q = roundQty(qty)
+  const keys = new Set([q])
+  keys.add(Math.round(q * 10) / 10)
+  keys.add(Math.round(q))
+  return [...keys]
+}
+
+function buildExcelPriceIndex(rows, { yearMonth } = {}) {
+  /** @type {Map<string, { price: number }>} */
   const index = new Map()
   let skipped = 0
+  let withPrice = 0
+
   for (const row of rows || []) {
-    if (classifyOperation(row.documentType, row.documentNo) !== 'przyjecie') continue
+    const opKind = classifyOperation(row.documentType, row.documentNo)
+    if (opKind !== 'przyjecie') continue
     const docNo = normalizeDocumentNo(row.documentNo)
     const qty = roundQty(row.qty)
     const price = Number(row.unitNetPrice)
-    if (!docNo || qty <= 0 || !(price > 0)) {
-      skipped += 1
-      continue
-    }
+    if (!docNo || qty <= 0) { skipped += 1; continue }
+    if (!(price > 0)) { skipped += 1; continue }
+
     const issueDate = resolveDocumentIssueDate(row.issueDate, docNo)
-    if (yearMonth && monthFromDate(issueDate) !== yearMonth) continue
-    const productName = canonicalProductName?.(row.productName) || row.productName || ''
-    const key = `${docNo}|${normalizeName(productName)}|${qty}`
-    index.set(key, { price, productName: row.productName, docNo, qty, issueDate })
+    if (yearMonth) {
+      const opMonth = monthFromDate(issueDate)
+      if (opMonth && opMonth !== yearMonth) continue
+    }
+
+    const rawName = String(row.productName || '').trim()
+    if (!rawName) { skipped += 1; continue }
+
+    for (const q of qtyKeys(qty)) {
+      index.set(`${docNo}|${normalizeName(rawName)}|${q}`, { price, rawName, docNo, qty })
+    }
+    withPrice += 1
   }
-  return { index, skipped }
+  return { index, skipped, withPrice }
+}
+
+function findExcelPrice(index, docNo, rawName, canonicalName, qty) {
+  const names = [...new Set([rawName, canonicalName].filter(Boolean).map(normalizeName))]
+  for (const q of qtyKeys(qty)) {
+    for (const name of names) {
+      const hit = index.get(`${docNo}|${name}|${q}`)
+      if (hit) return hit.price
+    }
+  }
+  return null
 }
 
 async function loadIncomingItemsWithOps(client) {
@@ -74,16 +104,16 @@ export async function backfillUnitPricesFromExcelFile(client, file, opts = {}) {
   }
 
   const { rows } = await readAgromarExcel(file)
-  const { index, skipped: skippedExcel } = buildExcelPriceIndex(rows, opts)
+  const { index, skipped: skippedExcel, withPrice } = buildExcelPriceIndex(rows, opts)
   if (!index.size) {
     return {
       updatedItems: 0,
       updatedLots: 0,
       matched: 0,
       skippedExcel,
-      message: opts.yearMonth
-        ? `W pliku nie znaleziono pozycji PZ z ceną netto za ${opts.yearMonth}.`
-        : 'W pliku nie znaleziono pozycji PZ z ceną netto.'
+      message: withPrice === 0
+        ? `Plik „${file.name}”: brak pozycji PZ z ceną netto${opts.yearMonth ? ` za ${opts.yearMonth}` : ''}. Sprawdź, czy Excel ma wypełnioną ostatnią kolumnę „Cena netto”.`
+        : `Plik „${file.name}”: brak dopasowania do miesiąca${opts.yearMonth ? ` ${opts.yearMonth}` : ''}.`
     }
   }
 
@@ -108,20 +138,18 @@ export async function backfillUnitPricesFromExcelFile(client, file, opts = {}) {
     if (!op) continue
     const docNo = normalizeDocumentNo(op.document_no)
     const qty = roundQty(item.qty)
-    const rawName = item.raw_product_name || ''
+    const rawName = String(item.raw_product_name || '').trim()
     const canonical = opts.canonicalProductName?.(rawName) || rawName
-    const key = `${docNo}|${normalizeName(canonical)}|${qty}`
-    let hit = index.get(key)
-    if (!hit && rawName !== canonical) {
-      hit = index.get(`${docNo}|${normalizeName(rawName)}|${qty}`)
-    }
-    if (!hit) continue
+
+    const price = findExcelPrice(index, docNo, rawName, canonical, qty)
+    if (price == null) continue
+
     if (opts.yearMonth && monthFromDate(op.operation_date) !== opts.yearMonth) continue
     if (!opts.overwrite && Number(item.unit_price_net) > 0) continue
 
     matched += 1
-    updates.push({ id: item.id, unit_price_net: hit.price, lot_id: item.lot_id })
-    if (item.lot_id) lotUpdates.set(item.lot_id, hit.price)
+    updates.push({ id: item.id, unit_price_net: price, lot_id: item.lot_id })
+    if (item.lot_id) lotUpdates.set(item.lot_id, price)
   }
 
   let updatedItems = 0
@@ -151,8 +179,8 @@ export async function backfillUnitPricesFromExcelFile(client, file, opts = {}) {
     skippedExcel,
     excelLines: index.size,
     message: matched
-      ? `Z pliku „${file.name}”: dopasowano ${matched} pozycji, zaktualizowano ${updatedItems} wpisów i ${updatedLots} partii.`
-      : `Plik „${file.name}” wczytany (${index.size} pozycji z ceną), ale brak dopasowania do zapisanych PZ${opts.yearMonth ? ` za ${opts.yearMonth}` : ''}. Sprawdź nr dokumentu / produkt / ilość.`
+      ? `Z pliku „${file.name}”: dopasowano ${matched} pozycji PZ, zaktualizowano ${updatedItems} wpisów i ${updatedLots} partii.`
+      : `Plik „${file.name}” ma ${withPrice} pozycji z ceną, ale brak dopasowania do zapisanych PZ${opts.yearMonth ? ` za ${opts.yearMonth}` : ''}. Sprawdź nr dokumentu / nazwę produktu / ilość.`
   }
 }
 
@@ -170,7 +198,7 @@ export async function backfillUnitPricesFromExcelFiles(client, files, opts = {})
   const messages = []
 
   for (const file of list) {
-    const r = await backfillUnitPricesFromExcelFile(client, file, opts)
+    const r = await backfillUnitPricesFromExcelFile(client, file, { ...opts, overwrite: true })
     updatedItems += r.updatedItems || 0
     updatedLots += r.updatedLots || 0
     matched += r.matched || 0
@@ -186,9 +214,6 @@ export async function backfillUnitPricesFromExcelFiles(client, files, opts = {})
   }
 }
 
-/**
- * Lista zapisanych importów (do podpowiedzi użytkownikowi).
- */
 export async function listImportedFilesForMonth(client, yearMonth) {
   if (!client) return []
   const { data, error } = await client
