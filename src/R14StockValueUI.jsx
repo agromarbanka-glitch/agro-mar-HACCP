@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react'
-import { Printer, RefreshCcw } from 'lucide-react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { Printer, RefreshCcw, Upload } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import {
   MONTHLY_STOCK_VALUE_VERSION,
@@ -8,6 +8,11 @@ import {
   buildR14PrintHtml,
   buildR14ExcelRows
 } from './monthlyStockValueEngine'
+import {
+  UNIT_PRICE_BACKFILL_VERSION,
+  backfillUnitPricesFromExcelFiles,
+  listImportedFilesForMonth
+} from './unitPriceBackfillEngine'
 
 function shiftMonth(ym, delta) {
   const [y, m] = String(ym || '').split('-').map(Number)
@@ -16,15 +21,19 @@ function shiftMonth(ym, delta) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 }
 
-export function R14StockValueSection({ supabase, escapeHtml, printHtmlInIframe, setMessage }) {
+export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIframe, setMessage, canonicalProductName }) {
   const [yearMonth, setYearMonth] = useState(() => new Date().toISOString().slice(0, 7))
   const [loading, setLoading] = useState(false)
+  const [backfilling, setBackfilling] = useState(false)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
+  const [importedFiles, setImportedFiles] = useState([])
+  const [filterBackfillMonth, setFilterBackfillMonth] = useState(true)
+  const fileInputRef = useRef(null)
 
   const loadReport = useCallback(async () => {
     if (!supabase) {
-      setMessage?.('R14: brak połączenia z bazą (Supabase).')
+      setMessage?.('Raporty: brak połączenia z bazą (Supabase).')
       return
     }
     setLoading(true)
@@ -34,17 +43,49 @@ export function R14StockValueSection({ supabase, escapeHtml, printHtmlInIframe, 
       setExpanded(new Set())
       setMessage?.(result.message || '')
     } catch (err) {
-      console.error('R14 load error', err)
+      console.error('Stock report load error', err)
       setReport(null)
-      setMessage?.(`R14: błąd wczytywania – ${err?.message || String(err)}`)
+      setMessage?.(`Raporty: błąd wczytywania – ${err?.message || String(err)}`)
     } finally {
       setLoading(false)
     }
   }, [supabase, yearMonth, setMessage])
 
+  const loadImports = useCallback(async () => {
+    if (!supabase) return
+    try {
+      const rows = await listImportedFilesForMonth(supabase, yearMonth)
+      setImportedFiles(rows)
+    } catch (err) {
+      console.error('Import list error', err)
+      setImportedFiles([])
+    }
+  }, [supabase, yearMonth])
+
   useEffect(() => {
     void loadReport()
-  }, [loadReport])
+    void loadImports()
+  }, [loadReport, loadImports])
+
+  async function handleBackfillFiles(fileList) {
+    const files = [...(fileList || [])].filter(Boolean)
+    if (!files.length || !supabase) return
+    setBackfilling(true)
+    try {
+      const result = await backfillUnitPricesFromExcelFiles(supabase, files, {
+        yearMonth: filterBackfillMonth ? yearMonth : undefined,
+        canonicalProductName,
+        overwrite: true
+      })
+      setMessage?.(result.message || 'Uzupełniono ceny.')
+      await loadReport()
+    } catch (err) {
+      setMessage?.(`Uzupełnianie cen: ${err?.message || String(err)}`)
+    } finally {
+      setBackfilling(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
 
   function toggleExpand(productId) {
     setExpanded(prev => {
@@ -65,14 +106,15 @@ export function R14StockValueSection({ supabase, escapeHtml, printHtmlInIframe, 
     const rows = buildR14ExcelRows(report)
     const ws = XLSX.utils.aoa_to_sheet(rows)
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'R14')
-    XLSX.writeFile(wb, `R14_${report.yearMonth || 'raport'}.xlsx`)
+    XLSX.utils.book_append_sheet(wb, ws, 'Magazyn')
+    XLSX.writeFile(wb, `Raport_magazyn_${report.yearMonth || 'raport'}.xlsx`)
   }
 
   const rows = report?.rows || []
+  const diag = report?.diagnostics
 
   return (
-    <div className="r14-stock-value">
+    <div className="stock-value-report">
       <p className="hint">
         Zestawienie na koniec wybranego miesiąca: ile towaru pozostało niesprzedane (symulacja FIFO do ostatniego dnia miesiąca)
         oraz jaka jest wartość netto. Wartość = <b>ilość × cena netto</b> z ostatniej kolumny „Cena netto” w pliku Excel
@@ -99,13 +141,63 @@ export function R14StockValueSection({ supabase, escapeHtml, printHtmlInIframe, 
         </div>
       </div>
 
+      <section className="card stock-backfill-panel">
+        <h3>Uzupełnij ceny netto z plików Excel</h3>
+        <p className="hint">
+          Wskaż ponownie te same pliki Excel, które już wcześniej wgrałaś (np. zestawienie za czerwiec).
+          Program dopasuje pozycje PZ po nr dokumentu, produkcie i ilości – <b>bez duplikowania importu</b> – i zapisze ceny netto.
+          Wersja: {UNIT_PRICE_BACKFILL_VERSION}.
+        </p>
+        <label className="checkbox-inline">
+          <input type="checkbox" checked={filterBackfillMonth} onChange={e => setFilterBackfillMonth(e.target.checked)} />
+          Tylko dokumenty z wybranego miesiąca ({yearMonth})
+        </label>
+        <div className="actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            multiple
+            className="file-input-hidden"
+            onChange={e => handleBackfillFiles(e.target.files)}
+          />
+          <button type="button" disabled={backfilling} onClick={() => fileInputRef.current?.click()}>
+            <Upload size={16} /> {backfilling ? 'Przypisywanie cen…' : 'Wybierz plik(i) Excel'}
+          </button>
+        </div>
+        {importedFiles.length > 0 && (
+          <div className="table-wrap small">
+            <p className="hint">Zapisane importy powiązane z {yearMonth} – wskaż te same pliki z dysku:</p>
+            <table>
+              <thead><tr><th>Plik</th><th>Data importu</th><th>Wiersze</th><th>Status</th></tr></thead>
+              <tbody>
+                {importedFiles.map(f => (
+                  <tr key={f.id}>
+                    <td><b>{f.filename || f.file_name || 'import.xlsx'}</b></td>
+                    <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '—'}</td>
+                    <td>{f.rows_count || f.row_count || '—'}</td>
+                    <td>{f.status || 'wczytany'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       {report && (
         <div className="summary r14-summary">
           <span>Stan na: <b>{report.monthEnd}</b></span>
           <span>Zakupiono w miesiącu: <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.purchased_value)} zł netto</span>
           <span>Pozostało: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.remaining_value)} zł netto</span>
-          {report.missingPriceLines > 0 && (
-            <span className="warning-text">Brak ceny: {report.missingPriceLines} partii (wgraj ponownie pliki z cenami lub uruchom migrację v44)</span>
+          {diag && (
+            <span className="hint">Baza: {diag.lotsInScope} partii do {report.monthEnd}, {diag.pzInMonth} poz. PZ w miesiącu</span>
+          )}
+          {report.hasPriceColumn === false && (
+            <span className="warning-text">Brak kolumny cen w bazie – uruchom migrację v44 w Supabase.</span>
+          )}
+          {report.missingPriceLines > 0 && report.hasPriceColumn !== false && (
+            <span className="warning-text">Brak ceny: {report.missingPriceLines} partii – użyj uzupełniania z Excel powyżej.</span>
           )}
         </div>
       )}
@@ -192,9 +284,12 @@ export function R14StockValueSection({ supabase, escapeHtml, printHtmlInIframe, 
             </tfoot>
           </table>
         </div>
-      ) : !loading && (
-        <p className="hint">Brak danych za wybrany miesiąc.</p>
+      ) : !loading && report && (
+        <p className="hint">{report.message || 'Brak danych za wybrany miesiąc.'}</p>
       )}
     </div>
   )
 }
+
+/** @deprecated alias */
+export const R14StockValueSection = StockValueReportSection

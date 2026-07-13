@@ -733,6 +733,10 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .r14-controls .month-nav { display: flex; align-items: center; gap: 6px; }
 .r14-controls .month-nav input[type="month"] { flex: 1; }
 .warning-text { color: #a33; }
+.stock-backfill-panel { margin: 16px 0; padding-top: 4px; border-top: 1px solid #e0e8e0; }
+.stock-backfill-panel h3 { margin: 0 0 8px; font-size: 1rem; }
+.checkbox-inline { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 14px; }
+.file-input-hidden { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 
 .login-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; background: linear-gradient(160deg, #f4f7f4 0%, #e8efe8 100%); }
 .login-card { width: 100%; max-width: 420px; background: #fff; border: 1px solid #d8e0d8; border-radius: 12px; padding: 28px 32px; box-shadow: 0 8px 32px rgba(0,0,0,.08); display: flex; flex-direction: column; gap: 14px; }

@@ -5,7 +5,60 @@
 import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
 import { lotReceiptDate } from './fifoEngine'
 
-export const MONTHLY_STOCK_VALUE_VERSION = '1.0'
+export const MONTHLY_STOCK_VALUE_VERSION = '1.1'
+
+async function queryTable(client, table, selectWithExtra, selectBasic, limit = 50000) {
+  let res = await client.from(table).select(selectWithExtra).limit(limit)
+  if (res.error && /unit_price_net|column/.test(String(res.error.message || ''))) {
+    res = await client.from(table).select(selectBasic).limit(limit)
+    if (res.error) throw res.error
+    return { data: res.data || [], hasPriceColumn: false }
+  }
+  if (res.error) throw res.error
+  return { data: res.data || [], hasPriceColumn: true }
+}
+
+async function loadDirectionItems(client, direction) {
+  const full = 'id, operation_id, product_id, qty, direction, raw_product_name, lot_id, unit_price_net'
+  const basic = 'id, operation_id, product_id, qty, direction, raw_product_name, lot_id'
+  let res = await client.from('operation_items').select(full).eq('direction', direction).limit(50000)
+  if (res.error && /unit_price_net|column/.test(String(res.error.message || ''))) {
+    res = await client.from('operation_items').select(basic).eq('direction', direction).limit(50000)
+    if (res.error) throw res.error
+    return { data: res.data || [], hasPriceColumn: false }
+  }
+  if (res.error) throw res.error
+  return { data: res.data || [], hasPriceColumn: true }
+}
+
+async function loadReportData(client) {
+  const [productsRes, lotsRes, opsRes, rozchodRes, przychodRes] = await Promise.all([
+    client.from('products').select('id, name, code, product_group').limit(10000),
+    queryTable(
+      client,
+      'lots',
+      'id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status, unit_price_net',
+      'id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'
+    ),
+    client.from('operations').select('id, operation_type, operation_date, document_no, contractor_id, created_at').limit(50000),
+    loadDirectionItems(client, 'rozchod'),
+    loadDirectionItems(client, 'przychod')
+  ])
+
+  if (productsRes.error) throw productsRes.error
+  if (opsRes.error) throw opsRes.error
+
+  const hasPriceColumn = lotsRes.hasPriceColumn && rozchodRes.hasPriceColumn && przychodRes.hasPriceColumn
+
+  return {
+    products: productsRes.data || [],
+    lotsRaw: lotsRes.data || [],
+    operations: opsRes.data || [],
+    rozchodItems: rozchodRes.data || [],
+    przychodItems: przychodRes.data || [],
+    hasPriceColumn
+  }
+}
 
 async function fetchInChunks(client, table, select, column, ids, chunkSize = 80) {
   const uniqueIds = Array.from(new Set((ids || []).filter(Boolean)))
@@ -53,11 +106,13 @@ function roundMoney(n) {
   return Math.round(Number(n || 0) * 100) / 100
 }
 
-function lotUnitPrice(lot, itemPriceByLotId) {
+function lotUnitPrice(lot, itemPriceByLotId, itemPriceByOpProduct) {
   const fromLot = Number(lot.unit_price_net)
   if (Number.isFinite(fromLot) && fromLot > 0) return fromLot
   const fromItem = Number(itemPriceByLotId.get(lot.id))
   if (Number.isFinite(fromItem) && fromItem > 0) return fromItem
+  const fromOp = Number(itemPriceByOpProduct.get(`${lot.source_operation_id}|${lot.product_id}`))
+  if (Number.isFinite(fromOp) && fromOp > 0) return fromOp
   return null
 }
 
@@ -124,40 +179,39 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
 
   const { monthStart, monthEnd } = bounds
 
-  const [
-    { data: products, error: productsErr },
-    { data: lotsRaw, error: lotsErr },
-    { data: operations, error: opsErr },
-    { data: rozchodItems, error: rozchodErr },
-    { data: przychodItems, error: przychodErr }
-  ] = await Promise.all([
-    client.from('products').select('id, name, code, product_group').limit(10000),
-    client.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status, unit_price_net').limit(50000),
-    client.from('operations').select('id, operation_type, operation_date, document_no, contractor_id, created_at').limit(50000),
-    client.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name, lot_id, unit_price_net').eq('direction', 'rozchod').limit(50000),
-    client.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name, lot_id, unit_price_net').eq('direction', 'przychod').limit(50000)
-  ])
-  if (productsErr) throw productsErr
-  if (lotsErr) throw lotsErr
-  if (opsErr) throw opsErr
-  if (rozchodErr) throw rozchodErr
-  if (przychodErr) throw przychodErr
+  const {
+    products,
+    lotsRaw,
+    operations,
+    rozchodItems,
+    przychodItems,
+    hasPriceColumn
+  } = await loadReportData(client)
 
-  const productMap = new Map((products || []).map(p => [p.id, p]))
-  const opMap = new Map((operations || []).map(o => [o.id, o]))
+  const productMap = new Map(products.map(p => [p.id, p]))
+  const opMap = new Map(operations.map(o => [o.id, o]))
   const itemPriceByLotId = new Map()
-  for (const item of przychodItems || []) {
-    if (!item.lot_id) continue
+  const itemPriceByOpProduct = new Map()
+  for (const item of przychodItems) {
     const price = Number(item.unit_price_net)
-    if (Number.isFinite(price) && price > 0) itemPriceByLotId.set(item.lot_id, price)
+    if (Number.isFinite(price) && price > 0) {
+      if (item.lot_id) itemPriceByLotId.set(item.lot_id, price)
+      if (item.operation_id && item.product_id) {
+        itemPriceByOpProduct.set(`${item.operation_id}|${item.product_id}`, price)
+      }
+    }
   }
 
+  let lotsInScope = 0
+  let pzInMonth = 0
+
   const purchasedInMonth = new Map()
-  for (const item of przychodItems || []) {
+  for (const item of przychodItems) {
     const op = opMap.get(item.operation_id)
     if (!op || !isIncomingLotOperation(op)) continue
     const opDate = String(op.operation_date || '').slice(0, 10)
     if (!opDate || opDate < monthStart || opDate > monthEnd) continue
+    pzInMonth += 1
     const qty = Math.abs(Number(item.qty || 0))
     if (qty <= 0) continue
     const product = productMap.get(item.product_id)
@@ -179,14 +233,15 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
   }
 
   const lotState = new Map()
-  for (const lot of lotsRaw || []) {
+  for (const lot of lotsRaw) {
     const srcOp = opMap.get(lot.source_operation_id)
     if (!isIncomingLotOperation(srcOp)) continue
     const receiptDate = lotReceiptDate(lot, opMap)
     if (!receiptDate || receiptDate === '0000-01-01' || receiptDate > monthEnd) continue
     const initial = Number(lot.initial_qty || 0)
     if (initial <= 0) continue
-    const unitPrice = lotUnitPrice(lot, itemPriceByLotId)
+    lotsInScope += 1
+    const unitPrice = lotUnitPrice(lot, itemPriceByLotId, itemPriceByOpProduct)
     lotState.set(lot.id, {
       ...lot,
       remaining_qty: initial,
@@ -343,11 +398,17 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
 
   const monthLabel = bounds.yearMonth
   let message = rows.length
-    ? `R14 za ${monthLabel}: na ${monthEnd} pozostało ${totals.remaining_kg.toLocaleString('pl-PL')} kg (wartość netto ${totals.remaining_value.toLocaleString('pl-PL', { minimumFractionDigits: 2 })} zł).`
-    : `R14 za ${monthLabel}: brak pozycji magazynowych do raportu.`
+    ? `Raport za ${monthLabel}: na ${monthEnd} pozostało ${totals.remaining_kg.toLocaleString('pl-PL')} kg (wartość netto ${totals.remaining_value.toLocaleString('pl-PL', { minimumFractionDigits: 2 })} zł).`
+    : lotsInScope > 0
+      ? `Raport za ${monthLabel}: ${lotsInScope} partii PZ w zakresie, ale po rozliczeniu WZ do ${monthEnd} nie ma pozostałości magazynowych.`
+      : pzInMonth > 0
+        ? `Raport za ${monthLabel}: znaleziono ${pzInMonth} pozycji PZ w miesiącu, ale brak partii magazynowych – sprawdź import i daty PZ.`
+        : `Raport za ${monthLabel}: brak partii PZ do tej daty w bazie.`
 
-  if (missingPriceLines > 0) {
-    message += ` Uwaga: ${missingPriceLines} partii bez ceny netto (stary import) – wartość częściowo niedostępna.`
+  if (!hasPriceColumn) {
+    message += ' Uruchom migrację supabase/2026-v44-unit-price-net.sql, potem uzupełnij ceny z plików Excel.'
+  } else if (missingPriceLines > 0) {
+    message += ` Uwaga: ${missingPriceLines} partii bez ceny netto – użyj „Uzupełnij ceny z Excel” poniżej.`
   }
 
   return {
@@ -357,6 +418,8 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
     rows,
     totals,
     missingPriceLines,
+    hasPriceColumn,
+    diagnostics: { lotsInScope, pzInMonth, lotsTotal: lotsRaw.length, operationsTotal: operations.length },
     message
   }
 }
@@ -390,7 +453,7 @@ th{background:#eee}
 .num{text-align:right;white-space:nowrap}
 tfoot td{font-weight:bold}
 </style></head><body>
-<h1>R14 – Zestawienie ilościowo-wartościowe pozostałości magazynowych</h1>
+<h1>Zestawienie ilościowo-wartościowe pozostałości magazynowych</h1>
 <p class="meta">Miesiąc: <b>${esc(report.yearMonth)}</b> · Stan na koniec: <b>${esc(report.monthEnd)}</b> · Wartość netto = ilość × cena netto z PZ (import Excel)</p>
 <table>
 <thead><tr>
@@ -412,7 +475,7 @@ tfoot td{font-weight:bold}
 
 export function buildR14ExcelRows(report) {
   const header = [
-    ['R14 – Zestawienie ilościowo-wartościowe', report.yearMonth || ''],
+    ['Zestawienie ilościowo-wartościowe', report.yearMonth || ''],
     ['Stan na koniec miesiąca', report.monthEnd || ''],
     [],
     ['Lp.', 'Produkt', 'Grupa', 'Zakupiono kg', 'Wartość zakupu netto', 'Pozostało kg', 'Wartość pozostała netto']
