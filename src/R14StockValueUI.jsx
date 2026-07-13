@@ -116,9 +116,10 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
   return (
     <div className="stock-value-report">
       <p className="hint">
-        Zestawienie jak w Fakturowni za wybrany miesiąc: <b>przybyło</b> (PZ) − <b>ubyło</b> (WZ) = <b>ilość końcowa</b>,
-        osobno dla każdej nazwy produktu z importu (np. Malina świeża 1 i Malina świeża PW).
-        Wartość netto = <b>ilość × cena netto</b> z ostatniej kolumny „Cena netto” w Excelu. Silnik: {MONTHLY_STOCK_VALUE_VERSION}.
+        Stan magazynu na koniec miesiąca (<b>FIFO</b>): przyjęcia wg <b>daty PZ</b>, sprzedaż wg <b>daty WZ</b> — nie daty przerobu K03.
+        WZ wystawione 01.07 z przerobem w czerwcu na stanie 30.06 nadal jest w magazynie.
+        <b>Ilość końcowa</b> = FIFO do ostatniego dnia miesiąca; <b>przybyło/ubyło</b> = ruch w samym miesiącu (informacyjnie).
+        Wartość = ilość × cena netto z PZ. Silnik: {MONTHLY_STOCK_VALUE_VERSION} (osobny od HACCP/FIFO).
       </p>
 
       <div className="form-grid compact r14-controls">
@@ -192,7 +193,10 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
           <span>Ubyło: <b>{Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')} kg</b></span>
           <span>Ilość końcowa: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · {formatPlMoney(report.totals?.remaining_value)} zł netto</span>
           {diag && (
-            <span className="hint">Dokumenty w miesiącu: {diag.pzInMonth} poz. PZ, {diag.wzInMonth} poz. WZ</span>
+            <span className="hint">
+              {diag.lotsInScope} partii PZ do {report.monthEnd} · {diag.pzInMonth} PZ / {diag.wzInMonth} WZ w miesiącu
+              {diag.wzAfterMonthEnd > 0 ? ` · ${diag.wzAfterMonthEnd} WZ po ${report.monthEnd} pominięte` : ''}
+            </span>
           )}
           {report.hasPriceColumn === false && (
             <span className="warning-text">Brak kolumny cen w bazie – uruchom migrację v44 w Supabase.</span>
@@ -211,7 +215,7 @@ export function StockValueReportSection({ supabase, escapeHtml, printHtmlInIfram
                 <th>Produkt</th>
                 <th className="num">Przybyło kg</th>
                 <th className="num">Ubyło kg</th>
-                <th className="num">Ilość końcowa</th>
+                <th className="num">Ilość końcowa<br /><small>(FIFO na {report?.monthEnd || '…'})</small></th>
                 <th className="num">Wartość zakupu<br /><small>netto</small></th>
                 <th className="num">Wartość końcowa<br /><small>netto</small></th>
                 <th>Szczegóły</th>
