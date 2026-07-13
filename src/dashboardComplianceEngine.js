@@ -221,33 +221,32 @@ function r01HalaCleanedDays(haccpDocs, yearMonth) {
 }
 
 function checkK07(ctx) {
-  const { mergedK07Docs, operations, haccpDocs, yearMonth } = ctx
+  const { mergedK07Docs, operations, yearMonth } = ctx
   const k07 = (mergedK07Docs || []).filter(d => inMonth(d.document_date, yearMonth))
   const prodOps = (operations || []).filter(o =>
     normalizeText(o.operation_type) === 'produkcja' && inMonth(o.operation_date, yearMonth)
   )
   const gaps = []
-  const opIds = new Set(k07.map(d => d.data?.operation_id || d.operation_id).filter(Boolean))
-  const missingOps = prodOps.filter(o => !opIds.has(o.id))
-  if (missingOps.length) gaps.push(`${missingOps.length} przerobów bez K07`)
-
-  const halaDays = r01HalaCleanedDays(haccpDocs, yearMonth)
-  for (const day of halaDays.slice(0, 3)) {
-    const times = k07.filter(d => String(d.document_date).slice(0, 10) === day).map(d => String(d.data?.godzina || '').slice(0, 5))
-    if (!times.includes('09:00')) gaps.push(`Brak K07 09:00 (${day}) – hala pulpy myta w R01`)
-    if (!times.includes('14:00')) gaps.push(`Brak K07 14:00 (${day}) – hala pulpy myta w R01`)
+  for (const op of prodOps) {
+    const rows = k07.filter(d => (d.data?.operation_id || d.operation_id) === op.id)
+    const hasPrzed = rows.some(d => d.data?.kontrola_etap === 'przed')
+    const hasPo = rows.some(d => d.data?.kontrola_etap === 'po')
+    const legacy = rows.some(d => !d.data?.kontrola_etap)
+    if (legacy && rows.length < 2) {
+      gaps.push(`Przerób ${String(op.operation_date).slice(0, 10)}: uzupełnij 2 wpisy (przed/po)`)
+    } else if (!legacy) {
+      if (!hasPrzed) gaps.push(`Brak K07 przed przerobem (${String(op.operation_date).slice(0, 10)})`)
+      if (!hasPo) gaps.push(`Brak K07 po przerobie (${String(op.operation_date).slice(0, 10)})`)
+    }
   }
-  if (halaDays.length > 3 && gaps.length) gaps.push(`… sprawdź ${halaDays.length} dni z myciem hali w R01`)
-
   const unsigned = k07.filter(d => !isDocSigned(d)).length
   if (unsigned) gaps.push(`${unsigned} bez podpisu`)
-
-  const required = prodOps.length + halaDays.length * 2
-  const status = !prodOps.length && !halaDays.length && !k07.length
+  const required = prodOps.length * 2
+  const status = !prodOps.length && !k07.length
     ? 'na'
-    : (missingOps.length || gaps.some(g => g.includes('09:00') || g.includes('14:00')) ? 'warn' : (k07.length ? 'ok' : 'missing'))
-  return item('K07', 'Kontrola sita CCP1', 'Przerób + 2× dziennie gdy hala myta (R01)', status,
-    k07.length ? `${k07.length} kontroli` : 'Brak wpisów K07', gaps)
+    : (gaps.length ? 'warn' : (k07.length >= required && required ? 'ok' : (k07.length ? 'warn' : 'missing')))
+  return item('K07', 'Kontrola sita CCP1', '2× na przerób (przed i po)', status,
+    k07.length ? `${k07.length} kontroli` : (prodOps.length ? 'Brak wpisów K07' : 'Brak przerobu w okresie'), gaps)
 }
 
 function checkMonthlyOnce(docs, type, name, rule, yearMonth) {

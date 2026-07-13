@@ -186,6 +186,25 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .k06-table .col-product .hint{display:block;font-size:11px;color:#64748b;margin-top:2px}
 .k06-actions .k06-delete-confirm{display:flex;flex-direction:column;gap:4px;align-items:stretch}
 .k06-actions .mini{font-size:11px;padding:3px 6px;white-space:normal;line-height:1.2}
+
+/* K07 – kontrola sita: przed/po przerobie + kolumny edycji */
+.k07-original{max-width:min(1480px,100%);overflow-x:auto}
+.k07-bulk-row{display:flex;align-items:flex-end;flex-wrap:wrap;gap:10px}
+.k07-table{min-width:980px}
+.k07-table .col-date{width:9%}
+.k07-table .col-etap{width:11%}
+.k07-table .col-time{width:9%;min-width:88px}
+.k07-table .col-product{width:22%;text-align:left!important}
+.k07-table .col-lot{width:12%}
+.k07-table .col-pn{width:8%}
+.k07-table .col-sign{width:14%;min-width:130px}
+.k07-table .col-actions{width:92px;min-width:92px}
+.k07-table tbody td{height:32px;vertical-align:middle}
+.k07-table .blank-row td{height:32px}
+.k07-table .col-sign .mini-select,.k07-table .col-pn .mini-select{min-width:72px;width:100%;max-width:120px;font-size:12px}
+.k07-table .cell-input.wide{width:100%;max-width:100%;min-width:120px;text-align:left}
+.k07-actions .k07-delete-confirm{display:flex;flex-direction:column;gap:4px;align-items:stretch}
+.k07-actions .mini{font-size:11px;padding:3px 6px;white-space:normal;line-height:1.2}
 @media print{
   @page{size:A4 landscape;margin:7mm}
   .k02-original,.k04-original,.k06-original,.k07-original{padding:0;max-width:none;overflow:visible;box-shadow:none!important;border-radius:0!important}

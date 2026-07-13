@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.5'
+export const HACCP_FORMS_VERSION = '1.6'
 
 function normalizeText(value) {
   return String(value || '')
@@ -193,17 +193,99 @@ function applyK07Override(doc, ov = {}) {
   }
 }
 
+export const K07_KONTROLA_ETAPY = [
+  { id: 'przed', label: 'Przed przerobem' },
+  { id: 'po', label: 'Po przerobie' }
+]
+
+export function k07SyntheticId(operationId, etap) {
+  return `K07-${operationId}-${etap}`
+}
+
+export function k07RowHideKey(doc) {
+  const opId = doc?.data?.operation_id || doc?.operation_id
+  const etap = doc?.data?.kontrola_etap || ''
+  if (opId && etap) return `${opId}|${etap}`
+  return String(doc?.id || '').trim()
+}
+
+export function isSyntheticK07Doc(doc) {
+  if (!doc || doc.document_type !== 'K07') return false
+  if (doc.synthetic) return true
+  const id = String(doc.id || '')
+  return id.startsWith('K07-') && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+}
+
+function k07CoverageForOp(haccpDocs, opId) {
+  const entries = (haccpDocs || []).filter(d =>
+    d.document_type === 'K07' && (d.data?.operation_id || d.operation_id) === opId
+  )
+  const etaps = new Set(entries.map(d => d.data?.kontrola_etap).filter(Boolean))
+  const legacy = entries.some(d => !d.data?.kontrola_etap)
+  return {
+    przed: etaps.has('przed') || legacy,
+    po: etaps.has('po')
+  }
+}
+
+function buildK07EntryFromProduction(op, etap, trace, overrides = {}) {
+  const { allocations = [], lots = [] } = trace
+  const lotMap = new Map(lots.map(l => [l.id, l]))
+  const date = String(op.operation_date || '').slice(0, 10)
+  const related = allocations.filter(a => a.operation_id === op.id)
+  const outputLots = related.map(a => lotMap.get(a.output_lot_id)).filter(Boolean)
+  const inputLots = related.map(a => lotMap.get(a.source_lot_id)).filter(Boolean)
+  const surowiec = Array.from(new Set(
+    inputLots.map(l => l.products?.name || l.product_name || '').filter(Boolean)
+  )).join(', ')
+  const outputLot = outputLots[0]
+  const numerPartii = outputLot?.lot_no || ''
+  const etapMeta = K07_KONTROLA_ETAPY.find(e => e.id === etap) || { id: etap, label: etap }
+  const id = k07SyntheticId(op.id, etap)
+  const ov = overrides[id] || {}
+  const base = {
+    id,
+    synthetic: true,
+    document_type: 'K07',
+    operation_id: op.id,
+    document_date: date,
+    product_name: surowiec || 'Przerób na pulę (CCP1)',
+    lot_no: numerPartii,
+    document_no: `K07/${op.document_no || date}/${etap}`,
+    chamber_code: 'CCP1',
+    qty: 0,
+    status: 'P',
+    data: {
+      godzina: '',
+      surowiec: surowiec || 'Przerób na pulę (CCP1)',
+      numer_partii: numerPartii,
+      stan_sita: 'P',
+      podpis_kontrolujacego: '',
+      operation_id: op.id,
+      kontrola_etap: etapMeta.id,
+      kontrola_label: etapMeta.label
+    },
+    signed_by_operator: '',
+    document_version: 'I/2024',
+    created_at: date
+  }
+  return applyK07Override(base, ov)
+}
+
 /** Pola K07 wg wzoru papierowego. */
 export function normalizeK07Data(data = {}, doc = {}) {
   const surowiec = data.surowiec || doc.product_name || data.rodzaj_surowca || ''
   const numerPartii = data.numer_partii || data.partia || doc.lot_no || ''
+  const etap = data.kontrola_etap || ''
   return {
-    godzina: data.godzina || '12:00',
+    godzina: data.godzina ?? '',
     surowiec,
     numer_partii: numerPartii,
     stan_sita: normalizePn(data.stan_sita || 'P'),
     podpis_kontrolujacego: data.podpis_kontrolujacego || '',
-    operation_id: data.operation_id || doc.operation_id || null
+    operation_id: data.operation_id || doc.operation_id || null,
+    kontrola_etap: etap,
+    kontrola_label: data.kontrola_label || (etap === 'przed' ? 'Przed przerobem' : etap === 'po' ? 'Po przerobie' : '')
   }
 }
 
@@ -360,64 +442,33 @@ export function buildSyntheticK04Docs(allDocs, overrides = {}) {
 }
 
 /**
- * K07 – wpis przy każdym przerobie (operacja produkcja): stan sita P, ręczna korekta.
+ * K07 – dwa wpisy na każdy przerób (przed i po): kontrola sita CCP1.
  */
 export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}, haccpDocs = []) {
-  const { operations = [], allocations = [], lots = [] } = trace
-  const lotMap = new Map(lots.map(l => [l.id, l]))
+  const { operations = [] } = trace
   const result = []
-  const existingOpIds = new Set(
-    (haccpDocs || [])
-      .filter(d => d.document_type === 'K07')
-      .map(d => d.data?.operation_id || d.operation_id)
-      .filter(Boolean)
-  )
+  const existingIds = new Set((haccpDocs || []).filter(d => d.document_type === 'K07').map(d => d.id))
 
   for (const op of operations) {
     if (normalizeText(op.operation_type) !== 'produkcja') continue
-    if (existingOpIds.has(op.id)) continue
     const date = String(op.operation_date || '').slice(0, 10)
     if (!date) continue
 
-    const related = allocations.filter(a => a.operation_id === op.id)
-    const outputLots = related.map(a => lotMap.get(a.output_lot_id)).filter(Boolean)
-    const inputLots = related.map(a => lotMap.get(a.source_lot_id)).filter(Boolean)
-    const surowiec = Array.from(new Set(
-      inputLots.map(l => l.products?.name || l.product_name || '').filter(Boolean)
-    )).join(', ')
-    const outputLot = outputLots[0]
-    const numerPartii = outputLot?.lot_no || ''
+    const coverage = k07CoverageForOp(haccpDocs, op.id)
 
-    const id = `K07-${op.id}`
-    const ov = overrides[id] || {}
-    const base = {
-      id,
-      synthetic: true,
-      document_type: 'K07',
-      operation_id: op.id,
-      document_date: date,
-      product_name: surowiec || 'Przerób na pulę (CCP1)',
-      lot_no: numerPartii,
-      document_no: `K07/${op.document_no || date}`,
-      chamber_code: 'CCP1',
-      qty: 0,
-      status: 'P',
-      data: {
-        godzina: '12:00',
-        surowiec: surowiec || 'Przerób na pulę (CCP1)',
-        numer_partii: numerPartii,
-        stan_sita: 'P',
-        podpis_kontrolujacego: '',
-        operation_id: op.id
-      },
-      signed_by_operator: '',
-      document_version: 'I/2024',
-      created_at: date
+    for (const etap of K07_KONTROLA_ETAPY) {
+      if (coverage[etap.id]) continue
+      const id = k07SyntheticId(op.id, etap.id)
+      if (existingIds.has(id)) continue
+      result.push(buildK07EntryFromProduction(op, etap.id, trace, overrides))
     }
-    result.push(applyK07Override(base, ov))
   }
 
-  return result.sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)))
+  return result.sort((a, b) =>
+    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    String(a.data?.operation_id || a.operation_id || '').localeCompare(String(b.data?.operation_id || b.operation_id || '')) ||
+    String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || ''))
+  )
 }
 
 export function buildSyntheticK07Docs(allDocs, overrides = {}) {
@@ -691,7 +742,8 @@ export const MANUAL_HACCP_FORMS = {
     title: 'Karta K07 - Karta kontroli stanu sita na linii do przerobu na pulpę (CCP1)',
     columns: [
       { key: 'document_date', label: 'Data', value: d => d.document_date || '' },
-      { key: 'godzina', label: 'Godzina', value: d => normalizeK07Data(d.data || {}, d).godzina || '12:00' },
+      { key: 'kontrola_etap', label: 'Etap', value: d => normalizeK07Data(d.data || {}, d).kontrola_label || normalizeK07Data(d.data || {}, d).kontrola_etap || '' },
+      { key: 'godzina', label: 'Godzina', value: d => normalizeK07Data(d.data || {}, d).godzina || '' },
       { key: 'surowiec', label: 'Rodzaj przerabianego surowca', value: d => normalizeK07Data(d.data || {}, d).surowiec || d.product_name || '' },
       { key: 'numer_partii', label: 'Produkowany numer partii', value: d => normalizeK07Data(d.data || {}, d).numer_partii || d.lot_no || '' },
       { key: 'stan_sita', label: 'Stan sita (P/N)', value: d => normalizePn(normalizeK07Data(d.data || {}, d).stan_sita) },
@@ -699,6 +751,7 @@ export const MANUAL_HACCP_FORMS = {
     ],
     fields: [
       { key: 'document_date', label: 'Data przerobu', type: 'date', required: true },
+      { key: 'kontrola_etap', label: 'Etap kontroli', type: 'select', data: true, required: true, options: [{ value: 'przed', label: 'Przed przerobem' }, { value: 'po', label: 'Po przerobie' }] },
       { key: 'godzina', label: 'Godzina', type: 'text', data: true, required: false },
       { key: 'surowiec', label: 'Rodzaj przerabianego surowca', type: 'text', data: true, required: true },
       { key: 'numer_partii', label: 'Produkowany numer partii', type: 'text', data: true, required: true },
