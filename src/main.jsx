@@ -51,6 +51,8 @@ import {
   HACCP_DOCS_LOAD_MAX, HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
 } from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
+import { R14StockValueSection } from './R14StockValueUI'
+import { MONTHLY_STOCK_VALUE_VERSION } from './monthlyStockValueEngine'
 import { LoginScreen } from './LoginScreen'
 import { HistorySection } from './HistorySection'
 import { PdfDocumentsSection } from './PdfDocumentsSection'
@@ -77,7 +79,7 @@ const PRODUCTS = [
 
 const DOCS_HUB_SECTIONS = [
   ['kartoteki', 'Kartoteki', 'K01–K07 karty kontrolne HACCP'],
-  ['raporty', 'Raporty', 'R00–R13'],
+  ['raporty', 'Raporty', 'R00–R14'],
   ['wykazy', 'Wykazy', 'W01–W10'],
   ['formularze', 'Formularze', 'F01–F03'],
   ['protokoly', 'Protokoły', 'PR01–PR08'],
@@ -107,7 +109,7 @@ const K03_SAVE_STEP_LABELS = {
 
 const DOCS = [
   ['Karty kontrolne', 'K01-K06', 'Przyjęcia, temperatury, identyfikacja partii, jakość'],
-  ['Raporty', 'R00-R13', 'Mycie, higiena, reklamacje, CCP, magnesy, szkło'],
+  ['Raporty', 'R00-R14', 'Mycie, higiena, reklamacje, CCP, magnesy, szkło, magazyn'],
   ['Formularze', 'F01-F03', 'Przeglądy, szkolenia, ocena dostawców'],
   ['Protokoły', 'PR01-PR08', 'Audyty, reklamacje, przeglądy, sytuacje kryzysowe'],
   ['Wykazy', 'W01-W10', 'Badania, mycie, dostawcy, audyty, procedury'],
@@ -2721,6 +2723,7 @@ function App() {
     if (code === 'R02') return buildR02PeriodGroups(hubManualDocsForFilter)
     if (code === 'R01') return buildR01PeriodGroups(hubManualDocsForFilter)
     if (code === 'R13') return buildR13PeriodGroups(hubManualDocsForFilter)
+    if (code === 'R09' || code === 'R14') return []
     if (isRMonthlyReport(code)) return buildRMonthlyPeriodGroups(code, hubManualDocsForFilter)
     return buildHubDocGroups(hubManualDocsForFilter, code, cfg)
   }, [hubManualDocsForFilter, docsHubSection, docsWykazFilter, docsRaportFilter, docsFormularzFilter, docsProtokolFilter, docsSpecFilter])
@@ -5274,6 +5277,13 @@ function App() {
           </div>
           {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section() : code === 'R09' ? (
             <R09TrendSection haccpDocs={haccpDocs} escapeHtml={escapeHtml} printHtmlInIframe={printHtmlInIframe} />
+          ) : code === 'R14' ? (
+            <R14StockValueSection
+              supabase={supabase}
+              escapeHtml={escapeHtml}
+              printHtmlInIframe={printHtmlInIframe}
+              setMessage={setMessage}
+            />
           ) : isRMonthlyReport(code) ? (
             <RMonthlyReportSection
               code={code}
@@ -6149,7 +6159,7 @@ function App() {
     try {
       const { rows: parsed, skippedMmCount } = await readAgromarExcel(file)
       setRows(parsed)
-      let loadMsg = `Wczytano ${parsed.length} wierszy. System pobiera tylko potrzebne dane: nr PZ/WZ/FV, datę, produkt i ilość.`
+      let loadMsg = `Wczytano ${parsed.length} wierszy. System pobiera: nr PZ/WZ/FV, datę, produkt, ilość i cenę netto (ostatnia kolumna „Cena netto”).`
       if (skippedMmCount > 0) {
         loadMsg += ` Pominięto ${skippedMmCount} wierszy MM (przesunięcia magazynowe).`
       }
@@ -7666,7 +7676,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           </p>
         )}
       </div>
-      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R13 {R13_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
+      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R13 {R13_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · R14 {MONTHLY_STOCK_VALUE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
     </header>
 
     <section className="warning">

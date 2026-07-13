@@ -79,6 +79,7 @@ create table if not exists lots (
   remaining_qty numeric(12,3) not null default 0,
   unit text not null default 'kg',
   status text not null default 'aktywna' check (status in ('aktywna','zuzyta','wycofana','zablokowana')),
+  unit_price_net numeric(12,4),
   created_at timestamptz not null default now()
 );
 
@@ -99,7 +100,8 @@ create table if not exists operation_items (
   lot_id uuid references lots(id),
   direction text not null check (direction in ('przychod','rozchod')),
   raw_product_name text,
-  notes text
+  notes text,
+  unit_price_net numeric(12,4)
 );
 
 create table if not exists fifo_allocations (

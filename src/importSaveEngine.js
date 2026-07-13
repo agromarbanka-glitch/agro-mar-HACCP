@@ -405,7 +405,7 @@ async function ensureContractorIds(client, contractorNames) {
 }
 
 /** Partie bez komory – przypisanie ręczne w zakładce Magazyn. */
-async function createIncomingLot(client, { productId, operationId, operationDate, qty, productName, deps }) {
+async function createIncomingLot(client, { productId, operationId, operationDate, qty, productName, unitNetPrice, deps }) {
   const { productGroupForName } = deps
 
   const { data: lotNo, error: lotNoErr } = await withImportRetry(() =>
@@ -414,6 +414,7 @@ async function createIncomingLot(client, { productId, operationId, operationDate
   if (lotNoErr) throw lotNoErr
 
   const productGroup = productGroupForName(productName)
+  const price = Number(unitNetPrice) > 0 ? Number(unitNetPrice) : null
 
   const { data: lot, error: lotErr } = await withImportRetry(() =>
     client.from('lots').insert({
@@ -425,7 +426,8 @@ async function createIncomingLot(client, { productId, operationId, operationDate
       remaining_qty: qty,
       unit: 'kg',
       product_group: productGroup,
-      storage_chamber_id: null
+      storage_chamber_id: null,
+      unit_price_net: price
     }).select('id').single()
   )
   if (lotErr) throw lotErr
@@ -448,7 +450,8 @@ async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
       operation_id: meta.opId,
       operation_date: meta.group.issueDate,
       qty: meta.itemQty,
-      product_group: deps.productGroupForName(meta.row.productName)
+      product_group: deps.productGroupForName(meta.row.productName),
+      unit_price_net: Number(meta.row.unitNetPrice) > 0 ? Number(meta.row.unitNetPrice) : null
     }))
     const { data, error } = await withImportRetry(() =>
       client.rpc('create_incoming_lots_batch', { p_items: payload })
@@ -491,6 +494,7 @@ async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
       operationDate: meta.group.issueDate,
       qty: meta.itemQty,
       productName: meta.row.productName,
+      unitNetPrice: meta.row.unitNetPrice,
       deps
     })),
     LOT_CONCURRENCY,
@@ -613,7 +617,8 @@ export async function saveImportToSupabase(client, {
         qty: itemQty,
         unit: 'kg',
         direction,
-        raw_product_name: row.productName
+        raw_product_name: row.productName,
+        unit_price_net: direction === 'przychod' && Number(row.unitNetPrice) > 0 ? Number(row.unitNetPrice) : null
       })
       allItemMeta.push({ direction, group, row, productId, itemQty, opId })
     }

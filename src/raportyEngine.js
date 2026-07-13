@@ -4,7 +4,7 @@
 import { normalizePn } from './haccpFormsEngine'
 import { col, dval, buildPeriodGroups, periodLabel, buildManualMonthlyHtml, buildManualExcelRows } from './haccpDocShared'
 
-export const RAPORTY_ENGINE_VERSION = '1.3'
+export const RAPORTY_ENGINE_VERSION = '1.4'
 
 export const RAPORTY_CARDS = [
   ['R00', 'R00 – Dopuszczenie do pracy', 'Raport dopuszczenia pracowników do pracy', 'register'],
@@ -18,7 +18,8 @@ export const RAPORTY_CARDS = [
   ['R08', 'R08 – Wzorcowanie urządzeń', 'Raport wzorcowania urządzeń kontrolno-pomiarowych', 'register'],
   ['R09', 'R09 – Trend szkodników', 'Trend aktywności szkodników', 'month'],
   ['R11', 'R11 – Kontrola magnesów', 'Raport kontroli magnesów', 'month'],
-  ['R13', 'R13 – Elementy szklane', 'Raport kontroli elementów szklanych – kartoteka miesięczna (dni robocze)', 'month']
+  ['R13', 'R13 – Elementy szklane', 'Raport kontroli elementów szklanych – kartoteka miesięczna (dni robocze)', 'month'],
+  ['R14', 'R14 – Pozostałości magazynowe', 'Zestawienie ilościowo-wartościowe towaru na koniec miesiąca (FIFO + cena netto z PZ)', 'computed']
 ]
 
 function cleaningFields(objectLabel) {

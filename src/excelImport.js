@@ -87,6 +87,39 @@ function isQtyColumnKey(key) {
   return /^ilo[sść]|ilosc|^qty$/.test(n)
 }
 
+function isNetUnitPriceColumnKey(key) {
+  const n = normalizeHeader(key)
+  if (/warto[sś]c.*netto|wartosc.*netto/.test(n)) return false
+  if (/cena.*netto|^netto$/.test(n)) return true
+  return false
+}
+
+function parseMoney(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0
+  const text = String(value ?? '').replace(/\s/g, '').replace(',', '.')
+  const n = Number.parseFloat(text)
+  return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * W eksporcie magazynowym są dwie kolumny „Cena netto”:
+ * – pierwsza (przed produktem): często 0 / suma dokumentu,
+ * – ostatnia (przy produkcie): cena jednostkowa pozycji.
+ * Nie używamy kolumny „Wartość netto” (błędnie zsumowana na dokumencie).
+ */
+export function pickLineUnitNetPrice(row, orderedColumnKeys = []) {
+  const priceKeys = (orderedColumnKeys.length ? orderedColumnKeys : Object.keys(row)).filter(isNetUnitPriceColumnKey)
+  if (!priceKeys.length) return parseMoney(pick(row, ['Cena netto', 'Cena netto.1', 'Cena netto.2']))
+
+  for (let i = priceKeys.length - 1; i >= 0; i -= 1) {
+    const raw = row[priceKeys[i]]
+    if (raw === '' || raw == null) continue
+    const n = parseMoney(raw)
+    if (n !== 0 || raw === 0 || raw === '0') return n
+  }
+  return 0
+}
+
 /**
  * W eksporcie magazynowym są dwie kolumny „Ilość”:
  * – pierwsza (przed produktem): suma całego PZ/WZ,
@@ -310,6 +343,7 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
       documentType = inferDocumentType(documentType, documentNo)
       const productName = String(pick(row, REQUIRED.productName)).trim()
       const qty = pickLineQty(row, columnKeys)
+      const unitNetPrice = pickLineUnitNetPrice(row, columnKeys)
 
       return {
         rowNo: headerRow + index + 2,
@@ -317,6 +351,7 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
         documentNo,
         issueDate: parseExcelDate(pick(row, REQUIRED.issueDate)),
         qty,
+        unitNetPrice,
         productName,
         contractorName: pickContractorFromRow(row, documentType, documentNo),
         nip: normalizeNip(pick(row, REQUIRED.nip)),
