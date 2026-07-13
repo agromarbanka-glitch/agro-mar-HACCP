@@ -52,7 +52,7 @@ import {
 } from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
 import { StockValueReportSection } from './R14StockValueUI'
-import { MONTHLY_STOCK_VALUE_VERSION } from './monthlyStockValueEngine'
+import { EXCEL_REPORT_VERSION } from './monthlyStockValueFromExcel'
 import { LoginScreen } from './LoginScreen'
 import { HistorySection } from './HistorySection'
 import { PdfDocumentsSection } from './PdfDocumentsSection'
@@ -7670,7 +7670,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           </p>
         )}
       </div>
-      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R13 {R13_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · Mag. {MONTHLY_STOCK_VALUE_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
+      <div className="badge"><ShieldCheck size={18}/> K03 {K03_ENGINE_VERSION} · WZ {K03_WZ_ENGINE_VERSION} · R13 {R13_ENGINE_VERSION} · R {RAPORTY_ENGINE_VERSION} · Rap. {EXCEL_REPORT_VERSION} · W {WYKAZY_ENGINE_VERSION} · F {FORMULARZE_ENGINE_VERSION} · PR {PROTOKOLY_ENGINE_VERSION} · S {SPECYFIKACJE_ENGINE_VERSION}</div>
     </header>
 
     <section className="warning">
@@ -7902,14 +7902,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'raporty' && canSeeTab(authProfile, 'raporty') && <>
     <section className="card">
-      <div className="section-title"><FileText/><div><h2>Raporty magazynowe</h2><p>Zestawienia ilościowo-wartościowe niezależne od dokumentacji HACCP. Wersja silnika: {MONTHLY_STOCK_VALUE_VERSION}.</p></div></div>
+      <div className="section-title"><FileText/><div><h2>Raporty magazynowe</h2><p>Zestawienie ilościowo-wartościowe z pliku Excel (FIFO, data PZ/WZ). Wersja: {EXCEL_REPORT_VERSION}.</p></div></div>
       {message && <p className="message">{message}</p>}
       <StockValueReportSection
-        supabase={supabase}
         escapeHtml={escapeHtml}
         printHtmlInIframe={printHtmlInIframe}
         setMessage={setMessage}
-        canonicalProductName={canonicalProductName}
       />
     </section>
     </>}

@@ -733,8 +733,9 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .r14-controls .month-nav { display: flex; align-items: center; gap: 6px; }
 .r14-controls .month-nav input[type="month"] { flex: 1; }
 .warning-text { color: #a33; }
-.stock-backfill-panel { margin: 16px 0; padding-top: 4px; border-top: 1px solid #e0e8e0; }
-.stock-backfill-panel h3 { margin: 0 0 8px; font-size: 1rem; }
+.stock-excel-panel { margin-bottom: 16px; }
+.stock-excel-panel h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 1rem; }
+.loaded-files b { margin-right: 4px; }
 .checkbox-inline { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 14px; }
 .file-input-hidden { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 
