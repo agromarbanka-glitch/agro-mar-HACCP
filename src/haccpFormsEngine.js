@@ -497,6 +497,17 @@ export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], over
   )
 }
 
+export function isSyntheticK06Doc(doc) {
+  if (!doc || doc.document_type !== 'K06') return false
+  if (doc.synthetic) return true
+  const id = String(doc.id || '')
+  return id.startsWith('K06-K03-') || id.startsWith('K06-syn-')
+}
+
+export function k06RowHideKey(doc) {
+  return String(doc?.data?.k03_key || doc?.id || '').trim()
+}
+
 export function buildK06InsertPayload(doc) {
   return {
     document_type: 'K06',

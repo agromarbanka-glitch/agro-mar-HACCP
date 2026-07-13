@@ -9,7 +9,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -347,6 +347,16 @@ function App() {
   const [k02Overrides, setK02Overrides] = useState({})
   const [k04Overrides, setK04Overrides] = useState({})
   const [k06Overrides, setK06Overrides] = useState({})
+  const [k06DeletePending, setK06DeletePending] = useState(null)
+  const K06_HIDDEN_STORAGE_KEY = 'agro-mar-k06-hidden-v1'
+  const [k06HiddenKeys, setK06HiddenKeys] = useState(() => {
+    try {
+      const raw = localStorage.getItem(K06_HIDDEN_STORAGE_KEY)
+      return new Set(JSON.parse(raw || '[]'))
+    } catch {
+      return new Set()
+    }
+  })
   const [defaultK02Employee, setDefaultK02Employee] = useState(() => {
     try { return localStorage.getItem(K02_DEFAULT_EMPLOYEE_KEY) || '' } catch { return '' }
   })
@@ -583,12 +593,14 @@ function App() {
   )
   const syntheticK07Docs = useMemo(() => buildSyntheticK07DocsFromTrace(formsTraceContext, k07Overrides, haccpDocs), [formsTraceContext, k07Overrides, haccpDocs])
   const syntheticK06FromK03 = useMemo(
-    () => buildSyntheticK06DocsFromK03(syntheticK03Docs, haccpDocs, k06Overrides),
-    [syntheticK03Docs, haccpDocs, k06Overrides]
+    () => buildSyntheticK06DocsFromK03(syntheticK03Docs, haccpDocs, k06Overrides)
+      .filter(d => !k06HiddenKeys.has(k06RowHideKey(d))),
+    [syntheticK03Docs, haccpDocs, k06Overrides, k06HiddenKeys]
   )
   const mergedK06Docs = useMemo(() => {
     const fromDb = (haccpDocs || []).filter(d => {
       if (d.document_type !== 'K06') return false
+      if (k06HiddenKeys.has(k06RowHideKey(d))) return false
       const src = d.data?.auto_source || ''
       if (d.lot_id && !d.data?.k03_key) return false
       if (src === 'magazyn_cp3' || src === 'produkcja') return false
@@ -2375,21 +2387,21 @@ function App() {
   }
 
   async function setEmployeeForVisibleK06Group(group, employeeName, onlyEmpty = false) {
-    if (!group || !employeeName) return
-    const docs = (group.docs || []).filter(d => !onlyEmpty || !d.signed_by_operator)
-    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K06.' : 'Brak wpisów K06.'); return }
+    if (!employeeName?.trim()) { setMessage('Wybierz pracownika z listy.'); return }
+    const name = employeeName.trim()
+    const docs = (group?.docs || []).map(d => getLiveK06Doc(d, k06Overrides))
+    const targets = onlyEmpty
+      ? docs.filter(d => !(d.signed_by_operator || normalizeK06Data(d.data || {}).podpis))
+      : docs
+    if (!targets.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K06.' : 'Brak wpisów K06.'); return }
     if (!supabase) { setMessage('Brak bazy – podpis K06 wymaga Supabase.'); return }
+    if (!onlyEmpty && !window.confirm(`Ustawić podpis „${name}" dla ${targets.length} pozycji K06?`)) return
     try {
-      for (const doc of docs) {
-        if (doc.synthetic || String(doc.id).startsWith('K06-syn-')) {
-          const { error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload({ ...doc, signed_by_operator: employeeName, data: { ...normalizeK06Data(doc.data || {}), podpis: employeeName } }))
-          if (error) throw error
-        } else {
-          await supabase.from('haccp_documents').update({ signed_by_operator: employeeName, updated_at: new Date().toISOString() }).eq('id', doc.id)
-        }
+      for (const doc of targets) {
+        await saveK06DocumentField(doc, { podpis: name })
       }
       await loadHaccpDocs()
-      setMessage(`Ustawiono podpis K06 dla ${docs.length} pozycji.`)
+      setMessage(`Ustawiono podpis K06 dla ${targets.length} pozycji.`)
     } catch (err) {
       setMessage(`Błąd podpisu K06: ${err.message}`)
     }
@@ -2470,38 +2482,170 @@ function App() {
     }))
   }
 
-  async function commitK06Override(doc, field, value) {
-    if (!doc?.id || !supabase) return
-    setK06Override(doc, field, value)
-    const ov = { ...(k06Overrides[doc.id] || {}), [field]: value }
-    const live = getLiveK06Doc(doc, { [doc.id]: ov })
+  function hideK06Row(doc) {
+    const key = k06RowHideKey(doc)
+    if (!key) return
+    setK06HiddenKeys(prev => {
+      const next = new Set(prev)
+      next.add(key)
+      try {
+        localStorage.setItem(K06_HIDDEN_STORAGE_KEY, JSON.stringify([...next]))
+      } catch { /* ignore quota */ }
+      return next
+    })
+  }
+
+  async function saveK06DocumentField(doc, patch = {}) {
+    if (!supabase || !doc) return null
     try {
-      if (doc.synthetic || String(doc.id).startsWith('K06-K03-') || String(doc.id).startsWith('K06-syn-')) {
-        const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(live)).select('id').single()
+      const mergedPatch = { ...patch }
+      if (patch.podpis_kontrolujacego !== undefined && patch.podpis === undefined) {
+        mergedPatch.podpis = patch.podpis_kontrolujacego
+      }
+      const ov = { ...(k06Overrides[doc.id] || {}), ...mergedPatch }
+      const live = getLiveK06Doc(doc, { [doc.id]: ov })
+      const k03Key = live.data?.k03_key
+      const existing = k03Key
+        ? (haccpDocs || []).find(d => d.document_type === 'K06' && d.data?.k03_key === k03Key && isPersistedHaccpDoc(d))
+        : (isPersistedHaccpDoc(doc) ? doc : null)
+
+      const signed = mergedPatch.podpis ?? mergedPatch.podpis_kontrolujacego ?? live.signed_by_operator ?? live.data?.podpis ?? ''
+      let workingDoc = existing || doc
+
+      if (!existing && isSyntheticK06Doc(doc)) {
+        const nextData = normalizeK06Data({ ...(live.data || {}), ...mergedPatch, podpis: signed })
+        const payload = buildK06InsertPayload({
+          ...live,
+          signed_by_operator: signed,
+          data: nextData,
+          status: ['barwa', 'zapach', 'twardosc_jablko', 'brak_plesni'].some(k => nextData[k] === 'N') ? 'N' : 'P'
+        })
+        const { data: inserted, error } = await supabase.from('haccp_documents').insert(payload).select('*').single()
         if (error) throw error
+        workingDoc = inserted
         setK06Overrides(prev => {
           const next = { ...prev }
           delete next[doc.id]
           return next
         })
-        await loadHaccpDocs()
-        setMessage('K06: zapisano wpis.')
-        return
+      } else {
+        const base = existing || doc
+        const nextData = normalizeK06Data({ ...(base.data || {}), ...mergedPatch, podpis: signed })
+        const rowPatch = {}
+        if (mergedPatch.document_date !== undefined || mergedPatch.przerob_date !== undefined) {
+          rowPatch.document_date = mergedPatch.document_date ?? mergedPatch.przerob_date ?? base.document_date
+        }
+        if (mergedPatch.lot_no !== undefined) rowPatch.lot_no = mergedPatch.lot_no
+        if (mergedPatch.product_name !== undefined) rowPatch.product_name = mergedPatch.product_name
+        const payload = {
+          ...rowPatch,
+          data: nextData,
+          status: ['barwa', 'zapach', 'twardosc_jablko', 'brak_plesni'].some(k => nextData[k] === 'N') ? 'N' : 'P',
+          signed_by_operator: signed || null,
+          updated_at: new Date().toISOString()
+        }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', base.id)
+        if (error) throw error
+        workingDoc = { ...base, ...payload }
+        if (doc.id !== base.id) {
+          setK06Overrides(prev => {
+            const next = { ...prev }
+            delete next[doc.id]
+            return next
+          })
+        }
       }
-      const patch = {}
-      if (field === 'document_date' || field === 'przerob_date') patch.document_date = value
-      if (field === 'lot_no') patch.lot_no = value
-      if (field === 'product_name') patch.product_name = value
-      const k06Data = normalizeK06Data({ ...(live.data || {}), ...(field.startsWith('barwa') || field === 'zapach' || field === 'twardosc_jablko' || field === 'brak_plesni' ? { [field]: value } : {}), przerob_date: field === 'przerob_date' ? value : live.data?.przerob_date })
-      const { error } = await supabase.from('haccp_documents').update({
-        ...patch,
-        data: k06Data,
-        updated_at: new Date().toISOString()
-      }).eq('id', doc.id)
-      if (error) throw error
-      await loadHaccpDocs()
+      mergeHaccpDoc(workingDoc.id, workingDoc)
+      return workingDoc
     } catch (err) {
       setMessage(`K06: błąd zapisu – ${err.message}`)
+      return null
+    }
+  }
+
+  async function setK06DocumentEmployee(doc, employeeName) {
+    const name = String(employeeName || '').trim()
+    if (!name) return
+    const result = await saveK06DocumentField(doc, { podpis: name })
+    if (result) {
+      await loadHaccpDocs()
+      setMessage('K06: zapisano podpis.')
+    }
+  }
+
+  async function deleteK06Row(doc) {
+    if (!doc) return
+    const label = [doc.product_name, doc.lot_no, doc.document_date].filter(Boolean).join(' · ')
+    if (isPersistedHaccpDoc(doc)) {
+      if (!ensureCanDelete()) return
+      if (!confirmDelete(`Wpis K06: ${label}.\n\nWpis trafi do historii.`)) {
+        setK06DeletePending(null)
+        return
+      }
+      if (!window.confirm('Ostateczne potwierdzenie: usunąć ten wiersz K06? Bez przywrócenia przez administratora zniknie na stałe.')) {
+        setK06DeletePending(null)
+        return
+      }
+      try {
+        await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
+        hideK06Row(doc)
+        setK06DeletePending(null)
+        if (selectedHaccpDoc?.groupPreview) {
+          setSelectedHaccpDoc(prev => prev ? {
+            ...prev,
+            group: {
+              ...prev.group,
+              docs: (prev.group.docs || []).filter(d => d.id !== doc.id)
+            }
+          } : prev)
+        }
+        await loadHaccpDocs()
+        setMessage('K06: usunięto wpis (zapis w historii).')
+      } catch (err) {
+        setMessage(`K06: błąd usuwania – ${err.message}`)
+      }
+      return
+    }
+    if (!window.confirm(`Ukryć wiersz K06: ${label}?\n\nWpis zniknie z kartoteki. Powiązanie z K03 pozostaje – wiersz nie wróci, dopóki nie usuniesz ukrycia.`)) {
+      setK06DeletePending(null)
+      return
+    }
+    if (!window.confirm('Potwierdź ukrycie wiersza K06.')) {
+      setK06DeletePending(null)
+      return
+    }
+    hideK06Row(doc)
+    setK06DeletePending(null)
+    if (selectedHaccpDoc?.groupPreview) {
+      setSelectedHaccpDoc(prev => prev ? {
+        ...prev,
+        group: {
+          ...prev.group,
+          docs: (prev.group.docs || []).filter(d => d.id !== doc.id && k06RowHideKey(d) !== k06RowHideKey(doc))
+        }
+      } : prev)
+    }
+    setMessage('K06: ukryto wiersz w kartotece.')
+  }
+
+  async function commitK06Override(doc, field, value) {
+    if (!doc?.id || !supabase) return
+    setK06Override(doc, field, value)
+    const patch = {}
+    if (field === 'document_date' || field === 'przerob_date') {
+      patch.document_date = value
+      patch.przerob_date = value
+    } else if (field === 'lot_no') {
+      patch.lot_no = value
+    } else if (field === 'product_name') {
+      patch.product_name = value
+    } else if (['barwa', 'zapach', 'twardosc_jablko', 'brak_plesni', 'podpis'].includes(field)) {
+      patch[field] = value
+    }
+    const result = await saveK06DocumentField(doc, patch)
+    if (result) {
+      await loadHaccpDocs()
+      if (field !== 'podpis') setMessage('K06: zapisano wpis.')
     }
   }
 
@@ -2997,12 +3141,10 @@ function App() {
   async function editHaccpDataField(doc, field, label, currentValue, options = {}) {
     if (!supabase || !doc) return
     let workingDoc = doc
-    if (doc.synthetic && doc.document_type === 'K06') {
-      const live = getLiveK06Doc(doc, k06Overrides[doc.id] ? { [doc.id]: k06Overrides[doc.id] } : {})
-      const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(live)).select('id').single()
-      if (error) { setMessage(`K06: nie udało się zapisać wpisu auto: ${error.message}`); return }
-      workingDoc = { ...live, id: inserted.id, synthetic: false }
-      await loadHaccpDocs()
+    if (isSyntheticK06Doc(doc) && doc.document_type === 'K06') {
+      const result = await saveK06DocumentField(doc, {})
+      if (!result) return
+      workingDoc = result
     }
     if ((doc.synthetic || String(doc.id).startsWith('K07-')) && doc.document_type === 'K07') {
       const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK07InsertPayload(getLiveK07Doc(doc, k07Overrides[doc.id] || {}))).select('id').single()
@@ -3296,6 +3438,10 @@ function App() {
   }
 
   async function setDocumentEmployeeFromGroup(doc, employeeName) {
+    if (doc?.document_type === 'K06') {
+      await setK06DocumentEmployee(getLiveK06Doc(doc, k06Overrides), employeeName)
+      return
+    }
     await setDocumentEmployee(doc, employeeName)
   }
 
@@ -3517,8 +3663,8 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, false)}>Zastosuj do wszystkich</button>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, true)}>Uzupełnij puste</button>
+          <button className="secondary" disabled={!defaultK06Employee} onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" disabled={!defaultK06Employee} onClick={() => setEmployeeForVisibleK06Group(group, defaultK06Employee, true)}>Uzupełnij puste</button>
         </div>
         <table className="k02-head"><tbody>
           <tr>
@@ -3529,11 +3675,11 @@ function App() {
           <tr><td></td><td className="k02-version">Wersja I/2024</td></tr>
         </tbody></table>
         <table className="k02-table"><thead><tr>
-          <th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br/>(P/N)*</th><th>Zapach<br/>(P/N)*</th><th>Twardość (jabłko)<br/>(P/N)*</th><th>Brak oznak pleśni<br/>(P/N)*</th><th>Podpis kontrolującego</th>
+          <th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br/>(P/N)*</th><th>Zapach<br/>(P/N)*</th><th>Twardość (jabłko)<br/>(P/N)*</th><th>Brak oznak pleśni<br/>(P/N)*</th><th>Podpis kontrolującego</th><th className="no-print">Akcje</th>
         </tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
             const baseDoc = docs[i]
-            if (!baseDoc) return <tr className="blank-row" key={`k06-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+            if (!baseDoc) return <tr className="blank-row" key={`k06-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="no-print"></td></tr>
             const doc = getLiveK06Doc(baseDoc, k06Overrides)
             const d = normalizeK06Data(doc.data || {})
             const pnCell = (field, label) => {
@@ -3561,13 +3707,23 @@ function App() {
               {pnCell('twardosc_jablko', 'Twardość (jabłko)')}
               {pnCell('brak_plesni', 'Brak oznak pleśni')}
               <td>
-                <select className="mini-select no-print" value={signed} onChange={e => setDocumentEmployeeFromGroup(doc, e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                <select className="mini-select no-print" value={signed} onChange={e => void setK06DocumentEmployee(doc, e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
                 <span className="print-only">{signed}</span>
+              </td>
+              <td className="no-print k06-actions">
+                {k06DeletePending === doc.id ? (
+                  <span className="k06-delete-confirm">
+                    <button type="button" className="mini danger" onClick={() => void deleteK06Row(doc)}>Potwierdź usunięcie</button>
+                    <button type="button" className="mini secondary" onClick={() => setK06DeletePending(null)}>Anuluj</button>
+                  </span>
+                ) : (
+                  <button type="button" className="mini danger" onClick={() => setK06DeletePending(doc.id)} title="Usuń wiersz (wymaga potwierdzenia)">Usuń</button>
+                )}
               </td>
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K06: jedna kartoteka miesięczna – wpisy z K03 (WZ), nazwa towaru = produkt gotowy z faktury. Po przerobie i bez przerobu na jednej liście. Domyślnie P we wszystkich polach oceny.</p>
+        <p className="hint no-print">K06: jedna kartoteka miesięczna – wpisy z K03 (WZ), nazwa towaru = produkt gotowy z faktury. U góry: podpis zbiorczy dla wszystkich wierszy. Usuwanie wiersza wymaga dwóch kliknięć (Usuń → Potwierdź).</p>
       </div>
     }
 
