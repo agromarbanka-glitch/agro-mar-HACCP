@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.4'
+export const HACCP_FORMS_VERSION = '1.5'
 
 function normalizeText(value) {
   return String(value || '')
@@ -96,8 +96,48 @@ export function normalizeK06Data(data = {}) {
     brak_plesni: normalizePn(data.brak_plesni ?? 'P'),
     uwagi: data.uwagi ?? '',
     podpis: data.podpis ?? data.podpis_kontrolujacego ?? '',
-    auto_source: data.auto_source || ''
+    auto_source: data.auto_source || '',
+    k03_key: data.k03_key || '',
+    k03_mode: data.k03_mode || '',
+    tryb_label: data.tryb_label || '',
+    wz_no: data.wz_no || '',
+    wz_date: data.wz_date || '',
+    przerob_date: data.przerob_date || ''
   }
+}
+
+/** Nazwa produktu gotowego z K03 (linia WZ), nie surowca z PZ. */
+export function finishedProductNameFromK03(k03) {
+  return String(k03?.product_name || k03?.data?.gotowy_produkt || '').trim() || 'Produkt gotowy'
+}
+
+export function k06EvaluationDateFromK03(k03) {
+  const wf = k03?.data?.k03_workflow || {}
+  const mode = wf.mode || ''
+  if (mode === 'przerob') {
+    return String(wf.przerob_date || wf.fifo_cutoff_date || k03.document_date || '').slice(0, 10)
+  }
+  if (mode === 'bez_przerobu') {
+    return String(k03.data?.wz_date || k03.document_date || '').slice(0, 10)
+  }
+  return String(k03.document_date || '').slice(0, 10)
+}
+
+function k06LotNoFromK03(k03, ov = {}) {
+  return String(
+    ov.lot_no ??
+    k03.lot_no ??
+    k03.data?.k03_workflow?.lot_no ??
+    ''
+  ).trim()
+}
+
+export function shouldIncludeK03InK06(k03) {
+  if (!k03?.product_name) return false
+  const mode = k03.data?.k03_workflow?.mode
+  if (!mode || !['przerob', 'bez_przerobu'].includes(mode)) return false
+  const evalDate = k06EvaluationDateFromK03(k03)
+  return Boolean(evalDate && evalDate !== '0000-01-01')
 }
 
 function isCp3Chamber(chamber) {
@@ -385,52 +425,16 @@ export function buildSyntheticK07Docs(allDocs, overrides = {}) {
 }
 
 /**
- * K06 – ocena jakości towaru gotowego (CP3 / produkcja). Bez jabłka przemysłowego.
+ * K06 – ocena jakości produktu gotowego wyłącznie z K03 (WZ: po przerobie lub bez przerobu).
+ * Nie używa partii surowca z CP2 / magazynu PZ.
+ * @deprecated Zachowane dla kompatybilności – zwraca pustą listę.
  */
-export function buildSyntheticK06DocsFromTrace(trace = {}, haccpDocs = []) {
-  const { lots = [], operations = [] } = trace
-  const prodOpIds = new Set(operations.filter(o => normalizeText(o.operation_type) === 'produkcja').map(o => o.id))
-  const existingLotIds = new Set((haccpDocs || []).filter(d => d.document_type === 'K06' && d.lot_id).map(d => d.lot_id))
-  const existingLotNos = new Set((haccpDocs || []).filter(d => d.document_type === 'K06' && d.lot_no).map(d => d.lot_no))
-
-  const result = []
-  for (const lot of lots) {
-    if (!isFinishedGoodLot(lot, prodOpIds)) continue
-    if (existingLotIds.has(lot.id)) continue
-    if (lot.lot_no && existingLotNos.has(lot.lot_no)) continue
-
-    const productName = lot.products?.name || lot.product_name || ''
-    result.push({
-      id: `K06-syn-${lot.id}`,
-      synthetic: true,
-      document_type: 'K06',
-      document_date: String(lot.production_date || lot.created_at || '').slice(0, 10),
-      product_name: productName,
-      lot_no: lot.lot_no || '',
-      lot_id: lot.id,
-      document_no: `K06/${lot.lot_no || lot.id}`,
-      chamber_code: lot.chamber?.code || 'CP3',
-      qty: Number(lot.initial_qty || lot.remaining_qty || 0),
-      status: 'P',
-      data: normalizeK06Data({
-        barwa: 'P',
-        zapach: 'P',
-        twardosc_jablko: 'P',
-        brak_plesni: 'P',
-        uwagi: '',
-        podpis: '',
-        auto_source: lot.source_operation_id && prodOpIds.has(lot.source_operation_id) ? 'produkcja' : 'magazyn_cp3'
-      }),
-      signed_by_operator: '',
-      document_version: 'I/2024',
-      created_at: lot.created_at || lot.production_date
-    })
-  }
-  return result.sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)))
+export function buildSyntheticK06DocsFromTrace(_trace = {}, _haccpDocs = []) {
+  return []
 }
 
 /**
- * K06 – ocena jakości produktu gotowego na podstawie K03 (produkt i partia z WZ).
+ * K06 – jeden wiersz na każdy K03 z decyzją przerób / bez przerobu (produkt gotowy z WZ).
  */
 export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], overrides = {}) {
   const dbK06 = (haccpDocs || []).filter(d => d.document_type === 'K06')
@@ -439,34 +443,26 @@ export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], over
 
   const result = []
   for (const k03 of k03Forms || []) {
-    if (!k03?.product_name) continue
-    if (k03.data?.k03_source === 'excel' || k03.data?.k03_source === 'import') continue
+    if (!shouldIncludeK03InK06(k03)) continue
+
     const k03Key = k03.id
     const id = `K06-K03-${k03Key}`
     if (existingK03Keys.has(k03Key) || existingIds.has(id)) continue
 
-    const productName = k03.product_name
-    const productGroup = k03.product_group || k03.data?.product_group || productGroupForName(productName)
-    if (isDirectToSaleProduct(productName, productGroup)) continue
-
+    const wf = k03.data?.k03_workflow || {}
     const ov = overrides[id] || {}
-    const przerobDate = String(
-      ov.przerob_date ||
-      ov.document_date ||
-      k03.data?.k03_workflow?.przerob_date ||
-      k03.data?.k03_workflow?.fifo_cutoff_date ||
-      k03.document_date ||
-      ''
-    ).slice(0, 10)
-    if (!przerobDate) continue
+    const productName = finishedProductNameFromK03(k03)
+    const evalDate = k06EvaluationDateFromK03(k03)
+    const lotNo = k06LotNoFromK03(k03, ov)
+    const mode = wf.mode || 'bez_przerobu'
 
     const base = {
       id,
       synthetic: true,
       document_type: 'K06',
-      document_date: przerobDate,
+      document_date: evalDate,
       product_name: productName,
-      lot_no: ov.lot_no ?? k03.lot_no ?? '',
+      lot_no: lotNo,
       lot_id: null,
       document_no: `K06/WZ-${k03.document_no || k03Key.replace(/^K03-/, '')}`,
       chamber_code: 'CP3',
@@ -481,17 +477,24 @@ export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], over
         podpis: '',
         auto_source: 'k03',
         k03_key: k03Key,
+        k03_mode: mode,
+        tryb_label: mode === 'przerob' ? 'Po przerobie' : 'Bez przerobu',
         wz_no: k03.document_no || k03.data?.wz_no || '',
         wz_date: String(k03.data?.wz_date || k03.document_date || '').slice(0, 10),
-        przerob_date: String(k03.data?.k03_workflow?.przerob_date || przerobDate).slice(0, 10)
+        przerob_date: mode === 'przerob'
+          ? String(wf.przerob_date || wf.fifo_cutoff_date || evalDate).slice(0, 10)
+          : ''
       }),
       signed_by_operator: '',
       document_version: 'I/2024',
-      created_at: przerobDate
+      created_at: evalDate
     }
     result.push(applyK06Override(base, ov))
   }
-  return result
+  return result.sort((a, b) =>
+    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    String(a.product_name || '').localeCompare(String(b.product_name || ''))
+  )
 }
 
 export function buildK06InsertPayload(doc) {

@@ -2,7 +2,7 @@
  * Status uzupełnienia formularzy HACCP na zakładce Start (wg rozpiski użytkownika).
  */
 import { calendarDaysInMonth, isSundayDate } from './r13Engine'
-import { isDirectToSaleProduct, productGroupForName } from './haccpFormsEngine'
+import { isDirectToSaleProduct, productGroupForName, shouldIncludeK03InK06, k06EvaluationDateFromK03 } from './haccpFormsEngine'
 import { r01CleaningForDoc, r01ColumnsFromDocs, R01_DEFAULT_COLUMNS } from './r01Engine'
 import { w06DedupeKey } from './w06Engine'
 
@@ -194,24 +194,22 @@ function checkK04(ctx) {
 }
 
 function checkK06(ctx) {
-  const { mergedK06Docs, wzQueueLines, yearMonth } = ctx
+  const { mergedK06Docs, syntheticK03Docs, yearMonth } = ctx
   const k06 = (mergedK06Docs || []).filter(d => inMonth(d.document_date, yearMonth))
-  const bezPrzerobu = (wzQueueLines || []).filter(l =>
-    inMonth(l.wz_date, yearMonth) && (l.workflow?.mode === 'bez_przerobu' || l.data?.workflow?.mode === 'bez_przerobu')
-  )
-  const prodOps = (ctx.operations || []).filter(o =>
-    normalizeText(o.operation_type) === 'produkcja' && inMonth(o.operation_date, yearMonth)
-  )
-  const expected = prodOps.length + bezPrzerobu.length
+  const expectedK03 = (syntheticK03Docs || []).filter(k03 => {
+    if (!shouldIncludeK03InK06(k03)) return false
+    return inMonth(k06EvaluationDateFromK03(k03), yearMonth)
+  })
   const gaps = []
-  if (bezPrzerobu.length && k06.length < bezPrzerobu.length) {
-    gaps.push(`${bezPrzerobu.length} sprzedaży „bez przerobu” – sprawdź K06`)
+  if (expectedK03.length && k06.length < expectedK03.length) {
+    gaps.push(`${expectedK03.length - k06.length} brakujących ocen K06 (sprawdź K03: przerób / bez przerobu)`)
   }
   const unsigned = k06.filter(d => !isDocSigned(d)).length
   if (unsigned) gaps.push(`${unsigned} bez podpisu`)
+  const expected = expectedK03.length
   const status = !expected && !k06.length ? 'na' : ratioStatus(k06.length, Math.max(expected, k06.length || 1))
-  return item('K06', 'Ocena produktu gotowego', 'Produkt gotowy + sprzedaż bez przerobu', status,
-    k06.length ? `${k06.length} ocen` : (expected ? 'Brak wpisów K06' : 'Brak produkcji / bez przerobu'), gaps)
+  return item('K06', 'Ocena produktu gotowego', 'Produkt gotowy z WZ (przerób i bez przerobu)', status,
+    k06.length ? `${k06.length} ocen` : (expected ? 'Brak wpisów K06' : 'Brak WZ z decyzją K03'), gaps)
 }
 
 function r01HalaCleanedDays(haccpDocs, yearMonth) {

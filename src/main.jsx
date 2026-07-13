@@ -9,7 +9,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -582,22 +582,26 @@ function App() {
     [formsTraceContext, k04Overrides, syntheticK03Docs]
   )
   const syntheticK07Docs = useMemo(() => buildSyntheticK07DocsFromTrace(formsTraceContext, k07Overrides, haccpDocs), [formsTraceContext, k07Overrides, haccpDocs])
-  const syntheticK06Docs = useMemo(() => buildSyntheticK06DocsFromTrace(formsTraceContext, haccpDocs), [formsTraceContext, haccpDocs])
   const syntheticK06FromK03 = useMemo(
     () => buildSyntheticK06DocsFromK03(syntheticK03Docs, haccpDocs, k06Overrides),
     [syntheticK03Docs, haccpDocs, k06Overrides]
   )
   const mergedK06Docs = useMemo(() => {
-    const fromDb = (haccpDocs || []).filter(d => d.document_type === 'K06')
+    const fromDb = (haccpDocs || []).filter(d => {
+      if (d.document_type !== 'K06') return false
+      const src = d.data?.auto_source || ''
+      if (d.lot_id && !d.data?.k03_key) return false
+      if (src === 'magazyn_cp3' || src === 'produkcja') return false
+      return true
+    })
     const dbK03Keys = new Set(fromDb.map(d => d.data?.k03_key).filter(Boolean))
-    const dbLotIds = new Set(fromDb.map(d => d.lot_id).filter(Boolean))
-    const extraFromLots = syntheticK06Docs.filter(d => d.lot_id && !dbLotIds.has(d.lot_id))
     const extraFromK03 = syntheticK06FromK03.filter(d => !dbK03Keys.has(d.data?.k03_key))
-    return [...fromDb, ...extraFromLots, ...extraFromK03].sort((a, b) =>
+    return [...fromDb, ...extraFromK03].sort((a, b) =>
       String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+      String(a.product_name || '').localeCompare(String(b.product_name || '')) ||
       String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
     )
-  }, [haccpDocs, syntheticK06Docs, syntheticK06FromK03])
+  }, [haccpDocs, syntheticK06FromK03])
   const mergedK07Docs = useMemo(() => {
     const fromDb = (haccpDocs || []).filter(d => d.document_type === 'K07')
     const dbOpIds = new Set(fromDb.map(d => d.data?.operation_id || d.operation_id).filter(Boolean))
@@ -623,12 +627,13 @@ function App() {
       syntheticK04Docs,
       mergedK06Docs,
       mergedK07Docs,
+      syntheticK03Docs,
       wzQueueLines,
       stockRows,
       operations: formsTrace.operations || [],
       auxCount: auxRows.filter(r => String(r.delivery_date || '').slice(0, 4) === year).length
     })
-  }, [dashboardMonth, haccpDocs, dashboardSyntheticK02, syntheticK04Docs, mergedK06Docs, mergedK07Docs, wzQueueLines, stockRows, formsTrace, auxRows])
+  }, [dashboardMonth, haccpDocs, dashboardSyntheticK02, syntheticK04Docs, mergedK06Docs, mergedK07Docs, syntheticK03Docs, wzQueueLines, stockRows, formsTrace, auxRows])
 
   function matchesDocsDateRange(dateStr, from = docsDateFrom, to = docsDateTo) {
     const date = String(dateStr || '').slice(0, 10)
@@ -2661,7 +2666,7 @@ function App() {
               : doc.document_type === 'K04'
                 ? `${doc.document_type}|${period}|${chamber}|${productGroup}`
                 : `${doc.document_type}|${period}|${product}|${chamber}`
-      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K04' ? productGroup : product, chamber, docs: [] })
+      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K04' ? productGroup : (doc.document_type === 'K06' ? 'Produkt gotowy' : product), chamber, docs: [] })
       map.get(key).docs.push(doc)
     }
     return Array.from(map.values()).map(g => {
@@ -2671,6 +2676,8 @@ function App() {
         ...g,
         product: g.type === 'K04'
           ? (products.length === 1 ? products[0] : (docs[0]?.data?.produkty || g.product))
+          : g.type === 'K06'
+            ? (products.length <= 1 ? (products[0] || 'Produkt gotowy') : `${products.length} asortymentów`)
           : g.type === 'K01'
             ? (products.length === 1 ? products[0] : 'według wpisów w tabeli')
             : g.product,
@@ -3537,10 +3544,11 @@ function App() {
               </td>
             }
             const signed = doc.signed_by_operator || d.podpis || ''
-            const wzHint = d.wz_no ? ` · WZ ${d.wz_no}` : ''
+            const modeHint = d.tryb_label ? ` · ${d.tryb_label}` : ''
+            const wzHint = d.wz_no ? ` · WZ ${d.wz_no}${modeHint}` : modeHint
             return <tr key={doc.id}>
               <td>
-                <input className="cell-input no-print" type="date" defaultValue={doc.document_date} key={`k06-date-${doc.id}-${doc.document_date}`} title="Data przerobu / oceny" onBlur={e => { if (e.target.value && e.target.value !== doc.document_date) void commitK06Override(doc, 'przerob_date', e.target.value) }} />
+                <input className="cell-input no-print" type="date" defaultValue={doc.document_date} key={`k06-date-${doc.id}-${doc.document_date}`} title="Data oceny (przerób lub WZ bez przerobu)" onBlur={e => { if (e.target.value && e.target.value !== doc.document_date) void commitK06Override(doc, 'przerob_date', e.target.value) }} />
                 <span className="print-only">{doc.document_date}</span>
               </td>
               <td className="left">{doc.product_name}{wzHint ? <small className="hint no-print">{wzHint}</small> : null}</td>
@@ -3559,7 +3567,7 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K06: auto z K03/WZ – produkt gotowy i partia z faktury WZ, data przerobu z K03 (możesz poprawić ręcznie). Domyślnie P we wszystkich polach oceny.</p>
+        <p className="hint no-print">K06: jedna kartoteka miesięczna – wpisy z K03 (WZ), nazwa towaru = produkt gotowy z faktury. Po przerobie i bez przerobu na jednej liście. Domyślnie P we wszystkich polach oceny.</p>
       </div>
     }
 
@@ -6696,9 +6704,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           if (op?.id) opById.set(op.id, op)
         }
         setFormsTrace({ allocations: traceAllocations || [], operations: Array.from(opById.values()) })
-        const { data: k06Existing } = await supabase.from('haccp_documents').select('id, document_type, lot_id, lot_no').eq('document_type', 'K06')
         const traceOps = Array.from(opById.values())
-        const k06Added = await syncAutoK06Documents(lotsData, traceOps, k06Existing || [])
+        const k06Added = await syncAutoK06Documents()
         const { data: k07Existing } = await supabase.from('haccp_documents').select('id, document_type, operation_id, data').eq('document_type', 'K07')
         const k07Added = await syncAutoK07Documents(lotsData, traceOps, traceAllocations || [], k07Existing || [])
         const k01Added = await syncAutoK01Documents(lotsData)
@@ -7435,17 +7442,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     return inserted
   }
 
-  async function syncAutoK06Documents(lotsData, operations, currentDocs) {
-    if (!supabase) return 0
-    const trace = { lots: lotsData, operations }
-    const pending = buildSyntheticK06DocsFromTrace(trace, currentDocs)
-    if (!pending.length) return 0
-    let inserted = 0
-    for (const doc of pending) {
-      const { error } = await supabase.from('haccp_documents').insert(buildK06InsertPayload(doc))
-      if (!error) inserted += 1
-    }
-    return inserted
+  async function syncAutoK06Documents() {
+    // K06 pochodzi z K03 (produkt gotowy z WZ) – bez auto-insertu z partii surowca w CP3.
+    return 0
   }
 
   async function loadHaccpDocs(options = {}) {
