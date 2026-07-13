@@ -326,8 +326,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   return (
     <div className="stock-value-report">
       <p className="hint">
-        Raport z pliku Excel · FIFO · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION}.
-        <b> Sposób liczenia nie zmienia się</b> — wynik zależy wyłącznie od wierszy zapisanych w pamięci.
+        Raport z pliku Excel · FIFO (te same reguły wariantów co K03) · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION}.
         {storageBackend ? ` Magazyn danych: ${storageBackend === 'indexeddb' ? 'IndexedDB' : 'localStorage'}.` : null}
       </p>
 

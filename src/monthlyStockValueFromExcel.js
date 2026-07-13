@@ -8,9 +8,9 @@ import {
   normalizeDocumentNo,
   isMmDocument
 } from './excelImport'
-import { resolveFifoProductGroup } from './k03Engine'
+import { resolveFifoProductGroup, normalizeFifoProductKey, resolveFifoMatchSpec } from './k03Engine'
 
-export const EXCEL_REPORT_VERSION = '2.3'
+export const EXCEL_REPORT_VERSION = '2.4'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -72,8 +72,14 @@ function roundMoney(n) {
   return Math.round(Number(n || 0) * 100) / 100
 }
 
-function normalizeKey(name) {
-  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
+function normalizeDisplayKey(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ł/g, 'l')
+    .replace(/\s+/g, ' ')
 }
 
 function displayName(name) {
@@ -84,16 +90,33 @@ function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
 
-function simulateFifoExactName({ cutoffDate, lots, sales }) {
+function lotMatchesSaleSpec(lot, sale) {
+  const spec = sale.matchSpec
+  if (!spec) return lot.productKey === sale.productKey
+  if (spec.mode === 'variant') {
+    return spec.sourceKeys.has(lot.fifoVariantKey)
+  }
+  const group = resolveFifoProductGroup(null, lot.productName)
+  return spec.sourceKeys?.has(group)
+}
+
+/** FIFO z tymi samymi regułami wariantów co K03/magazyn (np. WZ truskawka → PZ truskawka + z szypułką). */
+function simulateFifoWithMatchSpec({ cutoffDate, lots, sales }) {
   const sortedSales = [...sales].sort((a, b) =>
     a.issueDate.localeCompare(b.issueDate) ||
     a.documentNo.localeCompare(b.documentNo)
   )
 
+  let unmatchedWzKg = 0
+
   for (const sale of sortedSales) {
     let left = sale.qty
     const pool = lots
-      .filter(l => l.productKey === sale.productKey && l.remaining_qty > 0 && l.issueDate <= cutoffDate)
+      .filter(l =>
+        l.remaining_qty > 0 &&
+        l.issueDate <= cutoffDate &&
+        lotMatchesSaleSpec(l, sale)
+      )
       .sort((a, b) =>
         a.issueDate.localeCompare(b.issueDate) ||
         a.documentNo.localeCompare(b.documentNo) ||
@@ -107,7 +130,10 @@ function simulateFifoExactName({ cutoffDate, lots, sales }) {
       lot.remaining_qty -= take
       left -= take
     }
+    if (left > 0.0005) unmatchedWzKg += left
   }
+
+  return { unmatchedWzKg: roundKg(unmatchedWzKg) }
 }
 
 function normalizeExcelRows(rows) {
@@ -127,7 +153,8 @@ function normalizeExcelRows(rows) {
       documentNo,
       issueDate,
       productName: displayName(row.productName),
-      productKey: normalizeKey(row.productName),
+      productKey: normalizeDisplayKey(row.productName),
+      fifoVariantKey: normalizeFifoProductKey(row.productName),
       qty: Math.abs(Number(row.qty) || 0),
       unitPriceNet: unitPrice > 0 ? unitPrice : null
     })
@@ -199,9 +226,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   let wzLines = 0
   let wzAfterCutoff = 0
   let linesWithPrice = 0
+  let unmatchedWzKg = 0
 
   lines.forEach((line, idx) => {
-    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo } = line
+    const { operation, issueDate, productName, productKey, fifoVariantKey, qty, unitPriceNet, documentNo } = line
 
     if (operation === 'przyjecie') {
       pzLines += 1
@@ -218,6 +246,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
         lots.push({
           lineId: `pz-${idx}`,
           productKey,
+          fifoVariantKey,
           productName,
           documentNo,
           issueDate,
@@ -232,14 +261,19 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
         ensureRow(periodMap, productKey, productName).sold_kg += qty
       }
       if (issueDate <= cutoffDate) {
-        salesForFifo.push({ ...line, qty })
+        salesForFifo.push({
+          ...line,
+          qty,
+          matchSpec: resolveFifoMatchSpec(null, productName)
+        })
       } else {
         wzAfterCutoff += 1
       }
     }
   })
 
-  simulateFifoExactName({ cutoffDate, lots, sales: salesForFifo })
+  const fifoResult = simulateFifoWithMatchSpec({ cutoffDate, lots, sales: salesForFifo })
+  unmatchedWzKg = fifoResult.unmatchedWzKg
 
   let missingPriceLines = 0
 
@@ -309,6 +343,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzAfterCutoff > 0) {
     message += ` Pominięto ${wzAfterCutoff} WZ z datą po ${formatReportTitleDate(cutoffDate)} (nie obniżają stanu na ten dzień).`
   }
+  if (unmatchedWzKg > 0.5) {
+    message += ` ${unmatchedWzKg.toLocaleString('pl-PL')} kg WZ bez pokrycia w PZ (sprawdź wariant produktu lub brakujące PZ).`
+  }
 
   const reportPayload = {
     source: 'excel',
@@ -329,7 +366,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzLines,
       linesWithPrice,
       wzAfterCutoff,
-      lotsInScope: lots.length
+      lotsInScope: lots.length,
+      unmatchedWzKg
     },
     message
   }
@@ -341,7 +379,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
 export function auditProductFifoBalance(excelRows, productName, asOfDate) {
   const bounds = parseAsOfDate(asOfDate)
   if (!bounds) return null
-  const targetKey = normalizeKey(productName)
+  const targetKey = normalizeDisplayKey(productName)
   const cutoff = bounds.asOfDate
   const lines = normalizeExcelRows(excelRows).filter(l => l.productKey === targetKey)
   let pzKg = 0

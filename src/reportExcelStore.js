@@ -9,6 +9,7 @@ import {
   normalizeDocumentNo,
   isMmDocument
 } from './excelImport'
+import { normalizeFifoProductKey } from './k03Engine'
 
 export const REPORT_EXCEL_STORE_VERSION = 2
 const LS_KEY = 'agro-mar-report-excel-v1'
