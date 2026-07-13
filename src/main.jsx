@@ -3674,17 +3674,17 @@ function App() {
           </tr>
           <tr><td></td><td className="k02-version">Wersja I/2024</td></tr>
         </tbody></table>
-        <table className="k02-table"><thead><tr>
-          <th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br/>(P/N)*</th><th>Zapach<br/>(P/N)*</th><th>Twardość (jabłko)<br/>(P/N)*</th><th>Brak oznak pleśni<br/>(P/N)*</th><th>Podpis kontrolującego</th><th className="no-print">Akcje</th>
+        <table className="k06-table"><thead><tr>
+          <th className="col-date">Data</th><th className="col-product">Nazwa towaru</th><th className="col-lot">Numer partii</th><th className="col-pn">Barwa<br/>(P/N)*</th><th className="col-pn">Zapach<br/>(P/N)*</th><th className="col-pn">Twardość (jabłko)<br/>(P/N)*</th><th className="col-pn">Brak oznak pleśni<br/>(P/N)*</th><th className="col-sign">Podpis kontrolującego</th><th className="col-actions no-print">Akcje</th>
         </tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
             const baseDoc = docs[i]
-            if (!baseDoc) return <tr className="blank-row" key={`k06-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="no-print"></td></tr>
+            if (!baseDoc) return <tr className="blank-row" key={`k06-blank-${i}`}><td className="col-date"></td><td className="col-product"></td><td className="col-lot"></td><td className="col-pn"></td><td className="col-pn"></td><td className="col-pn"></td><td className="col-pn"></td><td className="col-sign"></td><td className="col-actions no-print"></td></tr>
             const doc = getLiveK06Doc(baseDoc, k06Overrides)
             const d = normalizeK06Data(doc.data || {})
             const pnCell = (field, label) => {
               const val = formNormalizePn(d[field] || 'P')
-              return <td className={val==='N'?'pn-n':''} key={field}>
+              return <td className={`col-pn${val==='N'?' pn-n':''}`} key={field}>
                 <select className="mini-select no-print" value={val} onChange={e => editHaccpRowField(doc, field, label, val, { directValue: e.target.value, pn: true })}><option value="P">P</option><option value="N">N</option></select>
                 <span className="print-only">{val}</span>
               </td>
@@ -3693,12 +3693,12 @@ function App() {
             const modeHint = d.tryb_label ? ` · ${d.tryb_label}` : ''
             const wzHint = d.wz_no ? ` · WZ ${d.wz_no}${modeHint}` : modeHint
             return <tr key={doc.id}>
-              <td>
+              <td className="col-date">
                 <input className="cell-input no-print" type="date" defaultValue={doc.document_date} key={`k06-date-${doc.id}-${doc.document_date}`} title="Data oceny (przerób lub WZ bez przerobu)" onBlur={e => { if (e.target.value && e.target.value !== doc.document_date) void commitK06Override(doc, 'przerob_date', e.target.value) }} />
                 <span className="print-only">{doc.document_date}</span>
               </td>
-              <td className="left">{doc.product_name}{wzHint ? <small className="hint no-print">{wzHint}</small> : null}</td>
-              <td>
+              <td className="col-product left">{doc.product_name}{wzHint ? <small className="hint no-print">{wzHint}</small> : null}</td>
+              <td className="col-lot">
                 <input className="cell-input no-print" type="text" defaultValue={doc.lot_no || ''} key={`k06-lot-${doc.id}-${doc.lot_no}`} onBlur={e => { if (e.target.value !== (doc.lot_no || '')) void commitK06Override(doc, 'lot_no', e.target.value.trim()) }} />
                 <span className="print-only">{doc.lot_no}</span>
               </td>
@@ -3706,11 +3706,11 @@ function App() {
               {pnCell('zapach', 'Zapach')}
               {pnCell('twardosc_jablko', 'Twardość (jabłko)')}
               {pnCell('brak_plesni', 'Brak oznak pleśni')}
-              <td>
-                <select className="mini-select no-print" value={signed} onChange={e => void setK06DocumentEmployee(doc, e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+              <td className="col-sign">
+                <select className="mini-select no-print" value={signed} onChange={e => void setK06DocumentEmployee(doc, e.target.value)} title="Podpis kontrolującego"><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
                 <span className="print-only">{signed}</span>
               </td>
-              <td className="no-print k06-actions">
+              <td className="col-actions no-print k06-actions">
                 {k06DeletePending === doc.id ? (
                   <span className="k06-delete-confirm">
                     <button type="button" className="mini danger" onClick={() => void deleteK06Row(doc)}>Potwierdź usunięcie</button>
