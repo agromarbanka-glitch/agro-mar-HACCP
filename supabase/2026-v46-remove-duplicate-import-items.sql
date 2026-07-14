@@ -55,11 +55,15 @@ BEGIN
     DELETE FROM pz_fifo_change_log WHERE lot_id = ANY(v_lot_ids);
     DELETE FROM lot_location_history WHERE lot_id = ANY(v_lot_ids);
     DELETE FROM lot_change_history WHERE lot_id = ANY(v_lot_ids);
+
+    -- Najpierw pozycje (FK lot_id), potem partie
+    DELETE FROM operation_items WHERE id = ANY(v_item_ids);
     DELETE FROM lots WHERE id = ANY(v_lot_ids);
     v_lots := array_length(v_lot_ids, 1);
+  ELSE
+    DELETE FROM operation_items WHERE id = ANY(v_item_ids);
   END IF;
 
-  DELETE FROM operation_items WHERE id = ANY(v_item_ids);
   v_items := array_length(v_item_ids, 1);
 
   RETURN jsonb_build_object(

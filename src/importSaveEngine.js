@@ -264,6 +264,7 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
   let unchangedDocuments = 0
   const changedDocuments = []
   const allIncomingItems = []
+  const mergedOpIds = new Set()
 
   for (const group of existingGroups) {
     const meta = details.get(operationImportKey(group))
@@ -288,6 +289,7 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
     }
 
     mergedDocuments += 1
+    mergedOpIds.add(opId)
     for (const row of diff.newItems) {
       const canonicalName = deps.canonicalProductName?.(row.productName) || row.productName || 'Produkt do dopasowania'
       const productId = productMap.get(deps.normalizeText(canonicalName))
@@ -328,7 +330,7 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
     createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
   }
 
-  return { importedItems, createdLots, mergedDocuments, unchangedDocuments, changedDocuments }
+  return { importedItems, createdLots, mergedDocuments, unchangedDocuments, changedDocuments, mergedOperationIds: [...mergedOpIds] }
 }
 
 /** Pobiera zapis operacji + pozycje — do wykrywania zmian na rozpisanych PZ/WZ. */
@@ -940,76 +942,41 @@ export async function estimateMergeNewItems(client, existingGroups, details, dep
   return total
 }
 
+async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
+  const unique = [...new Set((lotIds || []).filter(Boolean))]
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize)
+    await withImportRetry(() => client.from('fifo_allocations').delete().in('source_lot_id', chunk))
+    await withImportRetry(() => client.from('fifo_allocations').delete().in('output_lot_id', chunk))
+  }
+}
+
 /**
  * Usuwa zduplikowane pozycje przyjęć (ta sama operacja + produkt + kg).
- * Zachowuje najstarszy wpis (min id). Kasuje powiązane partie i K01.
+ * Wymaga funkcji SQL remove_duplicate_incoming_items (v46) — trwa sekundy.
  */
-export async function removeDuplicateIncomingOperationItems(client) {
+export async function removeDuplicateIncomingOperationItems(client, { onProgress } = {}) {
   if (!client) throw new Error('Brak Supabase.')
+
+  const notify = msg => onProgress?.(msg)
+  notify('Usuwanie duplikatów w bazie (RPC)…')
 
   const { data: rpcData, error: rpcErr } = await withImportRetry(() =>
     client.rpc('remove_duplicate_incoming_items')
   )
   if (!rpcErr) {
-    return rpcData || { items_removed: 0, lots_removed: 0, k01_removed: 0 }
-  }
-  if (!/function.*does not exist/i.test(String(rpcErr.message || ''))) throw rpcErr
-
-  const { data: items, error } = await withImportRetry(() =>
-    client.from('operation_items')
-      .select('id, operation_id, product_id, qty, lot_id, direction')
-      .eq('direction', 'przychod')
-      .order('id', { ascending: true })
-      .limit(50000)
-  )
-  if (error) throw error
-
-  const groups = new Map()
-  for (const item of items || []) {
-    const qty = Math.round(Number(item.qty || 0) * 1000) / 1000
-    const key = `${item.operation_id}|${item.product_id}|${qty}`
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(item)
+    return { ...(rpcData || { items_removed: 0, lots_removed: 0, k01_removed: 0 }), mode: 'rpc' }
   }
 
-  const toDelete = []
-  for (const list of groups.values()) {
-    if (list.length <= 1) continue
-    for (let i = 1; i < list.length; i += 1) toDelete.push(list[i])
-  }
-  if (!toDelete.length) return { items_removed: 0, lots_removed: 0, k01_removed: 0, mode: 'client' }
-
-  const lotIds = [...new Set(toDelete.map(i => i.lot_id).filter(Boolean))]
-  const itemIds = toDelete.map(i => i.id)
-
-  if (lotIds.length) {
-    const { data: k01Docs } = await withImportRetry(() =>
-      client.from('haccp_documents').select('id').eq('document_type', 'K01').in('lot_id', lotIds)
+  if (/function.*does not exist/i.test(String(rpcErr.message || ''))) {
+    throw new Error(
+      'Brak funkcji remove_duplicate_incoming_items w Supabase. ' +
+      'Uruchom jednorazowo w SQL Editor plik supabase/2026-v46-remove-duplicate-import-items.sql (ok. 10 s), ' +
+      'potem kliknij „Usuń zduplikowane PZ” ponownie. ' +
+      'Bez tego czyszczenie z przeglądarki trwa bardzo długo.'
     )
-    const k01Ids = (k01Docs || []).map(d => d.id)
-    if (k01Ids.length) {
-      await deleteRowsInChunks(client, 'haccp_document_history', 'document_id', k01Ids)
-      await deleteRowsInChunks(client, 'haccp_documents', 'id', k01Ids)
-    }
-    for (const lotId of lotIds) {
-      await withImportRetry(() =>
-        client.from('fifo_allocations').delete().or(`source_lot_id.eq.${lotId},output_lot_id.eq.${lotId}`)
-      )
-    }
-    await deleteRowsInChunks(client, 'pz_fifo_change_log', 'lot_id', lotIds)
-    await deleteRowsInChunks(client, 'lot_location_history', 'lot_id', lotIds)
-    await deleteRowsInChunks(client, 'lot_change_history', 'lot_id', lotIds)
-    await deleteRowsInChunks(client, 'lots', 'id', lotIds)
   }
-
-  await deleteRowsInChunks(client, 'operation_items', 'id', itemIds)
-
-  return {
-    items_removed: itemIds.length,
-    lots_removed: lotIds.length,
-    k01_removed: lotIds.length,
-    mode: 'client'
-  }
+  throw rpcErr
 }
 
 export function formatImportNetworkError(err) {

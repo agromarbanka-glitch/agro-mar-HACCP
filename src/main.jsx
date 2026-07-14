@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, partitionImportGroups, appendNewItemsFromExistingDocuments, estimateMergeNewItems, removeDuplicateIncomingOperationItems, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, removeDuplicateIncomingOperationItems, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -313,6 +313,7 @@ function App() {
   const [importRows, setImportRows] = useState([])
   const [importPreview, setImportPreview] = useState([])
   const [importDuplicates, setImportDuplicates] = useState([])
+  const [importNewDocCount, setImportNewDocCount] = useState(0)
   const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
   const [importOrphanCount, setImportOrphanCount] = useState(0)
   const [haccpDocs, setHaccpDocs] = useState([])
@@ -1258,7 +1259,7 @@ function App() {
           <h2>Odmrożenie K03 po imporcie ({k03UnfreezeSuggestions.length})</h2>
           <p>
             Tylko gdy import zmienia <b>PZ lub WZ już rozpisane</b> w zamrożonym K03 (inna data lub ilość).
-            Nowe przyjęcia po 6 lipca <b>nie wymagają</b> odmrożenia — trafiają do K01 i FIFO automatycznie.
+            Całkiem <b>nowe numery</b> dokumentów nie wymagają odmrożenia — trafiają do K01 i FIFO automatycznie.
           </p>
         </div></div>
         <div className="k03-unfreeze-toolbar">
@@ -6513,8 +6514,9 @@ function App() {
           .filter(r => r.operation !== 'pominiete_mm')
         const groups = groupImportRows(classified)
         const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
-        const { duplicates } = splitImportGroupsByExisting(groups, keys)
+        const { duplicates, fresh } = splitImportGroupsByExisting(groups, keys)
         setImportDuplicates(duplicates)
+        setImportNewDocCount(fresh.length)
         setImportDuplicateDetails(details)
         setImportOrphanCount(orphanCount)
         importCheckCacheRef.current = { fileName: file.name, groupsCount: groups.length, keys, details, orphanCount }
@@ -6526,7 +6528,12 @@ function App() {
             const det = details.get(`${d.operation}|${normalizeDocumentNo(d.documentNo)}`)
             return `${d.documentNo}${det?.importFilename ? ` (${det.importFilename})` : ''}`
           }).join(', ')
-          loadMsg += ` W bazie jest już ${duplicates.length} dokumentów – przy zapisie dokleimy nowe pozycje; zupełnie nowe numery PZ/WZ zapiszą się osobno. Np.: ${examples}${duplicates.length > 5 ? '…' : ''}.`
+          loadMsg += ` Pominięto ${duplicates.length} dokumentów już w bazie (nie zostaną zapisane).`
+          if (fresh.length) loadMsg += ` Do zapisu: ${fresh.length} nowych dokumentów (dowolna data, np. uzupełniające PZ z 02.07).`
+          else loadMsg += ` Brak nowych dokumentów — nic nie zostanie zapisane.`
+          loadMsg += ` Np. duplikat: ${examples}${duplicates.length > 5 ? '…' : ''}.`
+        } else if (fresh.length) {
+          loadMsg += ` Do zapisu: ${fresh.length} nowych dokumentów.`
         }
         void suggestFrozenK03UnfreezeAfterImport(supabase, groups, {
           existingDetails: details,
@@ -7398,24 +7405,21 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       'Użyj przed ponownym importem tego samego pliku Excel.'
     )) return
     setImportDeduping(true)
+    setMessage('Usuwanie duplikatów w bazie… (zwykle kilka sekund po migracji v46)')
     try {
-      const result = await removeDuplicateIncomingOperationItems(supabase)
+      const result = await removeDuplicateIncomingOperationItems(supabase, {
+        onProgress: msg => setMessage(msg)
+      })
       const items = result?.items_removed ?? 0
       const lots = result?.lots_removed ?? 0
       const k01 = result?.k01_removed ?? 0
       setMessage(
         items
-          ? `Usunięto duplikaty: ${items} pozycji, ${lots} partii, ${k01} kart K01. Możesz wgrać plik Excel od nowa.`
+          ? `Usunięto duplikaty: ${items} pozycji, ${lots} partii, ${k01} kart K01. Odświeżam listę K01…`
           : 'Nie znaleziono zduplikowanych pozycji przyjęć.'
       )
       if (items > 0) {
-        await Promise.all([
-          loadImports(),
-          loadFifoData(),
-          loadHaccpDocs({ syncK01: true }),
-          loadK03TraceData(),
-          loadPzManagementData()
-        ])
+        await loadHaccpDocs()
       }
     } catch (err) {
       setMessage(`Błąd usuwania duplikatów: ${err?.message || err}. Uruchom w Supabase SQL: supabase/2026-v46-remove-duplicate-import-items.sql`)
@@ -7953,8 +7957,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     try {
       const groups = groupImportRows(filteredRows)
-      setImportProgress('Przygotowanie bazy (sprzątanie pozostałości)…')
-      const prep = await runFullImportLotCleanup(supabase, fileName)
+      setImportProgress('Przygotowanie zapisu…')
+      const prep = await prepareImportExcelSave(supabase, fileName)
       const prepMsg = formatPrepareImportResult(prep)
       if (prepMsg) setMessage(prepMsg)
 
@@ -7981,15 +7985,26 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       }
 
       const { duplicates, fresh: groupsToImport } = splitImportGroupsByExisting(groups, keys)
-      const { existing: existingGroups } = partitionImportGroups(groups, keys)
+      const duplicateCount = duplicates.length
       setImportDuplicates(duplicates)
+      setImportNewDocCount(groupsToImport.length)
       setImportDuplicateDetails(details)
       setImportOrphanCount(orphanCount)
+
+      if (!groupsToImport.length) {
+        setMessage(
+          duplicateCount
+            ? `Brak nowych dokumentów do zapisu. W pliku ${duplicateCount} numerów PZ/WZ jest już w bazie — pominięto. ` +
+              `Jeśli chcesz je nadpisać, usuń odpowiedni import z rejestru poniżej i wgraj plik ponownie.`
+            : 'Brak dokumentów do zapisu w wczytanym pliku.'
+        )
+        return
+      }
+
       groupsToImport.sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
-      const duplicateCount = duplicates.length
 
       const importDeps = { normalizeText, productGroupForName, baseCodeForProduct, canonicalProductName }
-      const { importedFileId, importedOperations, importedItems, createdLots, rozchodItems } = await saveImportToSupabase(supabase, {
+      const { importedFileId, importedOperations, importedItems, createdLots } = await saveImportToSupabase(supabase, {
         groupsToImport,
         rowsCount: rows.length,
         fileName,
@@ -7998,42 +8013,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         onProgress: setImportProgress
       })
 
-      setImportProgress('Doklejanie pozycji do istniejących dokumentów…')
-      const pendingMerge = existingGroups.length
-        ? await estimateMergeNewItems(supabase, existingGroups, details, importDeps)
-        : 0
-      const mergeResult = pendingMerge > 0
-        ? await appendNewItemsFromExistingDocuments(supabase, existingGroups, details, importDeps, {
-          onProgress: setImportProgress
-        })
-        : { importedItems: 0, createdLots: 0, mergedDocuments: 0, unchangedDocuments: existingGroups.length, changedDocuments: [] }
-
-      const totalOps = importedOperations
-      const totalItems = importedItems + mergeResult.importedItems
-      const totalLots = createdLots + mergeResult.createdLots
-      const mergeNote = mergeResult.mergedDocuments
-        ? ` Doklejono pozycje do ${mergeResult.mergedDocuments} dokumentów (+${mergeResult.importedItems} linii, +${mergeResult.createdLots} partii).`
-        : (duplicateCount && pendingMerge === 0
-          ? ` ${duplicateCount} dokumentów już w bazie — bez duplikowania pozycji.`
-          : '')
-
       const importMsgBase =
-        `Import zapisany. Nowych dokumentów: ${totalOps}, pozycji: ${totalItems}, partii: ${totalLots}.${mergeNote}` +
+        `Import zapisany: ${importedOperations} nowych dokumentów, ${importedItems} pozycji, ${createdLots} partii.` +
+        (duplicateCount ? ` Pominięto duplikatów: ${duplicateCount}.` : '') +
         (orphanCount ? ` Wyczyszczono osierocone wpisy z usuniętych importów.` : '')
 
-      if (mergeResult.changedDocuments?.length) {
-        void suggestFrozenK03UnfreezeAfterImport(supabase, groups, {
-          existingDetails: details,
-          deps: importDeps
-        }).then(suggestions => {
-          setK03UnfreezeSuggestions(suggestions)
-          setK03UnfreezeBannerHidden(false)
-          setK03UnfreezeBannerOpen(suggestions.length > 0 && suggestions.length <= 3)
-        }).catch(() => {})
-      } else {
-        setK03UnfreezeSuggestions([])
-        setK03UnfreezeBannerOpen(false)
-      }
+      setK03UnfreezeSuggestions([])
+      setK03UnfreezeBannerOpen(false)
 
       setMessage(`${importMsgBase} Trwa tworzenie kart K01…`)
       importCheckCacheRef.current = null
@@ -8042,9 +8028,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       void (async () => {
         let k01Msg = ''
         try {
-          const k01FromImport = await syncAutoK01ForImportFile(importedFileId)
-          const k01FromMerge = mergeResult.createdLots > 0 ? await syncAutoK01Documents() : 0
-          const k01Added = k01FromImport + k01FromMerge
+          const k01Added = await syncAutoK01ForImportFile(importedFileId)
           if (k01Added > 0) {
             k01Msg = ` Utworzono ${k01Added} kart K01 — sprawdź Dokumentacja HACCP → K01.`
             await loadHaccpDocs()
@@ -8163,6 +8147,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <span>Przyjęcia/PZ: <b>{pzCount}</b></span>
           <span>Sprzedaż/WZ/FV: <b>{salesCount}</b></span>
           <span>Suma ilości: <b>{qtySum.toLocaleString('pl-PL')}</b></span>
+          {importNewDocCount > 0 && <span>Do zapisu: <b>{importNewDocCount}</b> dokumentów</span>}
+          {importDuplicates.length > 0 && <span>Pominięte duplikaty: <b>{importDuplicates.length}</b></span>}
         </div>
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
@@ -8178,7 +8164,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {activeTab === 'importy' && canSeeTab(authProfile, 'importy') && <>
     {renderK03UnfreezeBanner()}
     <section className="card">
-      <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
+      <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj plik z operacjami magazynowymi. <b>Nowe numery</b> PZ/WZ zapisują się (dowolna data w miesiącu). Numery <b>już w bazie</b> są pomijane — lista duplikatów poniżej.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
       <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
@@ -8188,6 +8174,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <span>Przyjęcia/PZ: <b>{pzCount}</b></span>
           <span>Sprzedaż/WZ/FV: <b>{salesCount}</b></span>
           <span>Suma ilości: <b>{qtySum.toLocaleString('pl-PL')}</b></span>
+          {importNewDocCount > 0 && <span>Do zapisu: <b>{importNewDocCount}</b> dokumentów</span>}
+          {importDuplicates.length > 0 && <span>Pominięte duplikaty: <b>{importDuplicates.length}</b></span>}
         </div>
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
@@ -8197,8 +8185,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </table></div>
       </>}
       {importDuplicates.length > 0 && <>
-        <h3>Duplikaty w bazie ({importDuplicates.length} dokumentów)</h3>
-        <p className="hint">Te numery PZ/WZ są już w aktywnych operacjach magazynowych. Przy zapisie zostaną pominięte. Jeśli usunąłeś importy, a lista nadal się pokazuje – odśwież stronę i wgraj plik ponownie.</p>
+        <h3>Duplikaty — nie zostaną zapisane ({importDuplicates.length})</h3>
+        <p className="hint">Te numery PZ/WZ są już w bazie. Program <b>odrzuca</b> je przy zapisie (bez doklejania). Nowe numery z pliku — np. uzupełniające PZ z wcześniejszą datą — zapisują się normalnie. Aby nadpisać dokument, usuń go z rejestru importów poniżej.</p>
         {importOrphanCount > 0 && <p className="hint">Wykryto {importOrphanCount} operacji z usuniętych importów – przy zapisie zostaną automatycznie wyczyszczone (migracja v40).</p>}
         <div className="table-wrap small"><table>
           <thead><tr><th>Typ</th><th>Nr dokumentu</th><th>Data w pliku</th><th>Pozycji</th><th>Źródło w bazie</th></tr></thead>
