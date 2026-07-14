@@ -6502,13 +6502,21 @@ function App() {
     return runFifoIncremental(showConfirm)
   }
 
-  function importFreshDateSummary(freshGroups) {
-    const dates = (freshGroups || [])
+  function importGroupDateRange(groups) {
+    const dates = (groups || [])
       .map(g => String(g.issueDate || '').slice(0, 10))
       .filter(Boolean)
       .sort()
     if (!dates.length) return ''
     return dates.length === 1 ? dates[0] : `${dates[0]} … ${dates[dates.length - 1]}`
+  }
+
+  function importDateRangeAfter(isoDate) {
+    if (!isoDate) return ''
+    const d = new Date(`${isoDate}T12:00:00`)
+    if (Number.isNaN(d.getTime())) return ''
+    d.setDate(d.getDate() + 1)
+    return d.toISOString().slice(0, 10)
   }
 
   async function handleFile(e) {
@@ -6542,6 +6550,8 @@ function App() {
           })
           .filter(r => r.operation !== 'pominiete_mm')
         const groups = groupImportRows(classified)
+        const rowsInGroups = groups.reduce((s, g) => s + (g.items?.length || 0), 0)
+        const fileDateRange = importGroupDateRange(groups)
         const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
         const { duplicates, fresh } = splitImportGroupsByExisting(groups, keys)
         setImportDuplicates(duplicates)
@@ -6549,6 +6559,10 @@ function App() {
         setImportDuplicateDetails(details)
         setImportOrphanCount(orphanCount)
         importCheckCacheRef.current = { fileName: file.name, groupsCount: groups.length, keys, details, orphanCount }
+
+        loadMsg += ` W pliku: ${groups.length} dokumentów (${rowsInGroups} wierszy operacyjnych).`
+        if (fileDateRange) loadMsg += ` Zakres dat w całym pliku: ${fileDateRange}.`
+
         if (orphanCount > 0) {
           loadMsg += ` Wykryto ${orphanCount} operacji z usuniętych importów – zostaną wyczyszczone przed zapisem.`
         }
@@ -6557,17 +6571,28 @@ function App() {
             const det = details.get(`${d.operation}|${normalizeDocumentNo(d.documentNo)}`)
             return `${d.documentNo}${det?.importFilename ? ` (${det.importFilename})` : ''}`
           }).join(', ')
-          loadMsg += ` Pominięto ${duplicates.length} dokumentów już w bazie (nie zostaną zapisane).`
-          const dupRange = importFreshDateSummary(duplicates)
-          if (dupRange) loadMsg += ` Daty pominiętych: ${dupRange}.`
-          if (fresh.length) loadMsg += ` Do zapisu: ${fresh.length} nowych dokumentów (dowolna data, np. uzupełniające PZ z 02.07).`
-          else loadMsg += ` Brak nowych dokumentów — nic nie zostanie zapisane.`
-          loadMsg += ` Np. duplikat: ${examples}${duplicates.length > 5 ? '…' : ''}.`
+          const dupRange = importGroupDateRange(duplicates)
+          loadMsg += ` Już w bazie (pominięte): ${duplicates.length} dokumentów`
+          if (dupRange) loadMsg += `, daty ${dupRange}`
+          loadMsg += '.'
+          if (fresh.length) {
+            loadMsg += ` Do zapisu: ${fresh.length} nowych.`
+            const freshRange = importGroupDateRange(fresh)
+            if (freshRange) loadMsg += ` Daty nowych: ${freshRange}.`
+          } else {
+            loadMsg += ` Brak nowych — nic nie zostanie zapisane.`
+          }
+          const fileMax = fileDateRange.split(' … ').pop()
+          const freshMax = importGroupDateRange(fresh).split(' … ').pop()
+          if (fresh.length && fileMax && freshMax && fileMax > freshMax) {
+            loadMsg += ` Dokumenty od ${importDateRangeAfter(freshMax)} do ${fileMax} są już w bazie — usuń stary import lub duplikaty poniżej, aby wgrać je ponownie.`
+          }
+          loadMsg += ` Np. w bazie: ${examples}${duplicates.length > 5 ? '…' : ''}.`
         } else if (fresh.length) {
           loadMsg += ` Do zapisu: ${fresh.length} nowych dokumentów.`
+          const freshRange = importGroupDateRange(fresh)
+          if (freshRange) loadMsg += ` Daty: ${freshRange}.`
         }
-        const freshRange = importFreshDateSummary(fresh)
-        if (freshRange) loadMsg += ` Daty nowych dokumentów: ${freshRange}.`
         const freshPz = fresh.filter(g => g.operation === 'przyjecie').length
         if (fresh.length === 0 && groups.some(g => g.operation === 'przyjecie')) {
           loadMsg += ` Jeśli brakuje K01 po 06.07: kliknij Zapisz (uzupełni brakujące K01) lub Kartoteki → Odśwież.`

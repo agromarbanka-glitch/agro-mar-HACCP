@@ -312,10 +312,18 @@ export function inferDateFromDocumentNo(documentNo) {
   return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
 }
 
-/** Data dokumentu: numer PZ/WZ (gdy ma dzień) → Excel → numer bez dnia. */
+/** Czy numer ma miesiąc/rok na końcu (np. WZ/009/07/2026), bez dnia. */
+export function documentNoHasMonthYear(documentNo) {
+  const norm = normalizeDocumentNo(documentNo)
+  if (documentNoHasExplicitDate(norm)) return false
+  return /\/(\d{1,2})\/(\d{4})$/.test(norm)
+}
+
+/** Data dokumentu: numer PZ (dzień) → numer WZ/PZ (miesiąc/rok) → Excel → numer. */
 export function resolveDocumentIssueDate(issueDate, documentNo) {
   const fromDocNo = inferDateFromDocumentNo(documentNo)
   if (fromDocNo && documentNoHasExplicitDate(documentNo)) return fromDocNo
+  if (fromDocNo && documentNoHasMonthYear(documentNo)) return fromDocNo
   const parsed = parseExcelDate(issueDate)
   if (parsed) return parsed
   return fromDocNo
