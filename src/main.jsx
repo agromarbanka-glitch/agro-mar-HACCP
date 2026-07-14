@@ -6492,6 +6492,15 @@ function App() {
     return runFifoIncremental(showConfirm)
   }
 
+  function importFreshDateSummary(freshGroups) {
+    const dates = (freshGroups || [])
+      .map(g => String(g.issueDate || '').slice(0, 10))
+      .filter(Boolean)
+      .sort()
+    if (!dates.length) return ''
+    return dates.length === 1 ? dates[0] : `${dates[0]} … ${dates[dates.length - 1]}`
+  }
+
   async function handleFile(e) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -6534,6 +6543,14 @@ function App() {
           loadMsg += ` Np. duplikat: ${examples}${duplicates.length > 5 ? '…' : ''}.`
         } else if (fresh.length) {
           loadMsg += ` Do zapisu: ${fresh.length} nowych dokumentów.`
+        }
+        const freshRange = importFreshDateSummary(fresh)
+        if (freshRange) loadMsg += ` Daty nowych dokumentów: ${freshRange}.`
+        const freshPz = fresh.filter(g => g.operation === 'przyjecie').length
+        if (fresh.length === 0 && groups.some(g => g.operation === 'przyjecie')) {
+          loadMsg += ` Jeśli brakuje K01 po 06.07: kliknij Zapisz (uzupełni brakujące K01) lub Kartoteki → Odśwież.`
+        } else if (freshPz === 0 && fresh.length > 0) {
+          loadMsg += ` (same WZ/FV — bez nowych PZ.)`
         }
         void suggestFrozenK03UnfreezeAfterImport(supabase, groups, {
           existingDetails: details,
@@ -7784,11 +7801,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (!pending.length) return 0
 
     let inserted = 0
+    const insertErrors = []
     const payloads = pending.map(doc => buildK01InsertPayload(doc))
     for (let i = 0; i < payloads.length; i += 50) {
       const chunk = payloads.slice(i, i + 50)
       const { error } = await supabase.from('haccp_documents').insert(chunk)
-      if (!error) inserted += chunk.length
+      if (error) insertErrors.push(error.message || String(error))
+      else inserted += chunk.length
+    }
+    if (insertErrors.length && !inserted) {
+      throw new Error(`K01: zapis do bazy odrzucony (${insertErrors[0]})`)
+    }
+    if (insertErrors.length) {
+      console.warn('K01 partial insert errors', insertErrors)
     }
     return inserted
   }
@@ -7992,10 +8017,26 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setImportOrphanCount(orphanCount)
 
       if (!groupsToImport.length) {
+        setImportProgress('Sprawdzanie brakujących kart K01…')
+        let k01Added = 0
+        try {
+          k01Added = await syncAutoK01Documents()
+          if (k01Added > 0) await loadHaccpDocs()
+        } catch (k01Err) {
+          setMessage(
+            (duplicateCount
+              ? `Brak nowych dokumentów do zapisu (${duplicateCount} duplikatów w pliku). `
+              : 'Brak dokumentów do zapisu. ') +
+            `K01: błąd uzupełniania — ${k01Err?.message || k01Err}`
+          )
+          return
+        }
         setMessage(
           duplicateCount
-            ? `Brak nowych dokumentów do zapisu. W pliku ${duplicateCount} numerów PZ/WZ jest już w bazie — pominięto. ` +
-              `Jeśli chcesz je nadpisać, usuń odpowiedni import z rejestru poniżej i wgraj plik ponownie.`
+            ? `Brak nowych dokumentów do zapisu. W pliku ${duplicateCount} numerów PZ/WZ jest już w bazie.` +
+              (k01Added
+                ? ` Uzupełniono ${k01Added} brakujących kart K01 — sprawdź listę (wyczyść filtr dat Od/Do).`
+                : ` K01 bez zmian. Jeśli nadal brak wpisów po 06.07 — w Magazynie sprawdź, czy są partie PZ z lipca.`)
             : 'Brak dokumentów do zapisu w wczytanym pliku.'
         )
         return
@@ -8028,15 +8069,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       void (async () => {
         let k01Msg = ''
         try {
-          const k01Added = await syncAutoK01ForImportFile(importedFileId)
+          const k01FromFile = await syncAutoK01ForImportFile(importedFileId)
+          const k01FromMissing = await syncAutoK01Documents()
+          const k01Added = k01FromFile + k01FromMissing
           if (k01Added > 0) {
-            k01Msg = ` Utworzono ${k01Added} kart K01 — sprawdź Dokumentacja HACCP → K01.`
+            k01Msg = ` Utworzono/uzupełniono ${k01Added} kart K01 — sprawdź Dokumentacja HACCP → K01 (wyczyść filtr dat Od/Do).`
             await loadHaccpDocs()
           } else {
-            k01Msg = ' K01: wszystkie karty już istnieją lub brak nowych partii PZ.'
+            k01Msg = ' K01: brak nowych partii PZ do kart — jeśli spodziewasz się wpisów po 06.07, sprawdź komunikat „Do zapisu” przy wczytaniu pliku.'
           }
         } catch (k01Err) {
-          k01Msg = ` K01: błąd synchronizacji (${k01Err?.message || k01Err}) – wejdź w Kartoteki → Odśwież.`
+          k01Msg = ` K01: błąd synchronizacji (${k01Err?.message || k01Err}) – Kartoteki → Odśwież.`
         }
         setMessage(`${importMsgBase}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
       })()
