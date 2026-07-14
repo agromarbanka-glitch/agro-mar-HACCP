@@ -2,17 +2,17 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * WZ rozlicza PZ o tej samej nazwie produktu co w Excelu (po normalizacji
- * spacji i polskich znaków — ta sama co przy deduplikacji importu).
+ * Silnik v2.5: WZ rozlicza PZ o tej samej nazwie produktu z importu (normalizeKey).
+ * Kolejność wierszy = jak w Excelu (rowNo), forward-fill dat w obrębie dokumentu.
  */
 import {
   classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
-  isMmDocument
+  isMmDocument,
+  forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
-import { normalizeProductKey } from './reportExcelStore'
 
 export const EXCEL_REPORT_VERSION = '2.5'
 
@@ -76,31 +76,12 @@ function roundMoney(n) {
   return Math.round(Number(n || 0) * 100) / 100
 }
 
+function normalizeKey(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
 function displayName(name) {
   return String(name || '').trim() || 'Produkt'
-}
-
-function productKey(name) {
-  return normalizeProductKey(name)
-}
-
-/** Stabilna kolejność wierszy — ta sama przy Excelu i po odczycie z Supabase. */
-export function sortExcelRowsForReport(rows) {
-  return [...(rows || [])].sort((a, b) => {
-    const docA = normalizeDocumentNo(a.documentNo) || ''
-    const docB = normalizeDocumentNo(b.documentNo) || ''
-    const dateA = resolveDocumentIssueDate(a.issueDate, docA) || ''
-    const dateB = resolveDocumentIssueDate(b.issueDate, docB) || ''
-    const rowA = Number(a.rowNo)
-    const rowB = Number(b.rowNo)
-    return (
-      dateA.localeCompare(dateB) ||
-      docA.localeCompare(docB) ||
-      (Number.isFinite(rowA) ? rowA : 0) - (Number.isFinite(rowB) ? rowB : 0) ||
-      productKey(a.productName).localeCompare(productKey(b.productName)) ||
-      String(a._lineId || '').localeCompare(String(b._lineId || ''))
-    )
-  })
 }
 
 function inPeriod(date, periodStart, periodEnd) {
@@ -110,8 +91,7 @@ function inPeriod(date, periodStart, periodEnd) {
 function simulateFifoExactName({ cutoffDate, lots, sales }) {
   const sortedSales = [...sales].sort((a, b) =>
     a.issueDate.localeCompare(b.issueDate) ||
-    a.documentNo.localeCompare(b.documentNo) ||
-    String(a.lineId || '').localeCompare(String(b.lineId || ''))
+    a.documentNo.localeCompare(b.documentNo)
   )
 
   for (const sale of sortedSales) {
@@ -121,7 +101,7 @@ function simulateFifoExactName({ cutoffDate, lots, sales }) {
       .sort((a, b) =>
         a.issueDate.localeCompare(b.issueDate) ||
         a.documentNo.localeCompare(b.documentNo) ||
-        String(a.lineId || '').localeCompare(String(b.lineId || ''))
+        a.lineId.localeCompare(b.lineId)
       )
 
     for (const lot of pool) {
@@ -146,15 +126,12 @@ function normalizeExcelRows(rows) {
     const issueDate = resolveDocumentIssueDate(row.issueDate, documentNo)
     if (!issueDate) continue
     const unitPrice = Number(row.unitNetPrice)
-    const key = productKey(row.productName)
     out.push({
       operation,
       documentNo,
       issueDate,
       productName: displayName(row.productName),
-      productKey: key,
-      rowNo: row.rowNo ?? null,
-      lineId: row._lineId || `${operation}|${documentNo}|${key}|${row.rowNo ?? out.length}`,
+      productKey: normalizeKey(row.productName),
       qty: Math.abs(Number(row.qty) || 0),
       unitPriceNet: unitPrice > 0 ? unitPrice : null
     })
@@ -166,7 +143,7 @@ function ensureRow(map, key, label) {
   if (!map.has(key)) {
     map.set(key, {
       product_key: key,
-      product_name: displayName(label),
+      product_name: label,
       product_group: resolveFifoProductGroup(null, label),
       purchased_kg: 0,
       sold_kg: 0,
@@ -200,8 +177,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
 
   const { monthStart, periodEnd, yearMonth } = bounds
   const cutoffDate = bounds.asOfDate
-  const sortedInput = sortExcelRowsForReport(excelRows)
-  const lines = normalizeExcelRows(sortedInput)
+  const filled = forwardFillExcelRows(excelRows || [])
+  const lines = normalizeExcelRows(filled)
 
   if (!lines.length) {
     return {
@@ -229,14 +206,14 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   let linesWithPrice = 0
 
   lines.forEach((line, idx) => {
-    const { operation, issueDate, productName, productKey: pKey, qty, unitPriceNet, documentNo, lineId } = line
+    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo } = line
 
     if (operation === 'przyjecie') {
       pzLines += 1
       if (unitPriceNet != null) linesWithPrice += 1
 
       if (inPeriod(issueDate, monthStart, periodEnd)) {
-        const row = ensureRow(periodMap, pKey, productName)
+        const row = ensureRow(periodMap, productKey, productName)
         row.purchased_kg += qty
         if (unitPriceNet != null) row.purchased_value += qty * unitPriceNet
         else row.purchased_missing_price_kg += qty
@@ -244,8 +221,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
 
       if (issueDate <= cutoffDate) {
         lots.push({
-          lineId: lineId || `pz-${idx}`,
-          productKey: pKey,
+          lineId: `pz-${idx}`,
+          productKey,
           productName,
           documentNo,
           issueDate,
@@ -257,10 +234,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     } else if (operation === 'sprzedaz') {
       wzLines += 1
       if (inPeriod(issueDate, monthStart, periodEnd)) {
-        ensureRow(periodMap, pKey, productName).sold_kg += qty
+        ensureRow(periodMap, productKey, productName).sold_kg += qty
       }
       if (issueDate <= cutoffDate) {
-        salesForFifo.push({ ...line, qty, lineId: lineId || `wz-${idx}` })
+        salesForFifo.push({ ...line, qty })
       } else {
         wzAfterCutoff += 1
       }
@@ -352,7 +329,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     missingPriceLines,
     hasPriceColumn: true,
     diagnostics: {
-      inputRows: sortedInput.length,
+      inputRows: (excelRows || []).length,
+      filledRows: filled.length,
       excelLines: lines.length,
       pzLines,
       wzLines,
@@ -366,7 +344,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   return reportPayload
 }
 
-/** Porównanie raportu z pliku vs z bazy — do weryfikacji po imporcie. */
+/** Porównanie raportu z pliku vs z bazy — weryfikacja po imporcie. */
 export function compareStockValueReports(a, b) {
   const fields = ['remaining_kg', 'remaining_value', 'purchased_kg', 'sold_kg']
   const diffs = []

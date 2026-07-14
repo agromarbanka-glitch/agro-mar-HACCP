@@ -167,7 +167,8 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         onProgress: (loaded, total) => setLoadProgress({ loaded, total })
       })
       setExcelRows(rows)
-      const skipped = rows.length - (computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current).diagnostics?.excelLines || 0)
+      const probe = computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current)
+      const skipped = rows.length - (probe.diagnostics?.excelLines || 0)
       setIntegrityNote(
         rows.length !== meta.lineCount
           ? `Uwaga: w bazie ${meta.lineCount} wierszy, wczytano ${rows.length} — odśwież ponownie.`
@@ -246,6 +247,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         fetchAllWarehouseValueLines(supabase, { forceRefresh: true }),
         fetchWarehouseValueStats(supabase)
       ])
+      const dbLineCount = computeMonthlyStockValueReportFromExcel(dbRows, asOfDateRef.current).diagnostics?.excelLines || 0
       const dbReport = computeMonthlyStockValueReportFromExcel(dbRows, asOfDateRef.current, {
         fileNames: (stats.batches || []).map(b => b.file_name).filter(Boolean)
       })
@@ -255,10 +257,12 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const linesWithPrice = flatRows.filter(r => Number(r.unitNetPrice) > 0).length
       const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
       const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
-      const fileHint = `Plik: ${fileLineCount} linii raportowych`
+      const fileHint = `Plik: ${fileLineCount} linii raportowych · baza: ${dbRows.length} wierszy (${dbLineCount} do FIFO)`
       const verifyHint = !verify.ok && totalAdded > 0
         ? ' · UWAGA: wynik z bazy różni się od pliku — wyczyść magazyn wartości i wgraj Excel ponownie.'
-        : ''
+        : totalAdded > 0 && dbLineCount < fileLineCount - 1
+          ? ` · UWAGA: w bazie mniej linii niż w pliku (${dbLineCount} vs ${fileLineCount}) — wyczyść i wgraj od nowa.`
+          : ''
       setMessage?.(
         `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${priceHint}. ${fileHint}${verifyHint}. ` +
         (totalAdded === 0 ? 'Wszystkie wiersze były już w bazie.' : 'Kolejne miesiące doklejaj — nie trzeba wgrywać historii od nowa.')
@@ -363,7 +367,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. FIFO {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w Excelu (normalizacja spacji i polskich znaków). Silnik {EXCEL_REPORT_VERSION} — identyczny wynik z pliku i z Supabase. Importy się <b>doklejają</b>.
+        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w Excelu. Silnik {EXCEL_REPORT_VERSION} — ten sam wynik z pliku i z Supabase (każda linia Excel osobno). Po aktualizacji deduplikacji: <b>wyczyść magazyn wartości i wgraj Excel od nowa</b>.
       </p>
 
       {!isSupabaseConfigured && (

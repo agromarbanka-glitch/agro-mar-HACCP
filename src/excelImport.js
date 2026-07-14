@@ -206,7 +206,7 @@ function pickContractorFromRow(row, documentType, documentNo) {
   return ''
 }
 
-function forwardFillExcelRows(rows) {
+export function forwardFillExcelRows(rows) {
   const out = []
   let last = { documentType: '', documentNo: '', contractorName: '', nip: '', issueDate: '' }
 

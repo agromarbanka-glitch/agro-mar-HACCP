@@ -2,7 +2,7 @@
  * Magazyn wartości (raport Excel FIFO) — trwały zapis w Supabase.
  * Osobne od HACCP: operations, lots, fifo_allocations.
  */
-import { excelRowDedupKey } from './reportExcelStore'
+import { warehouseValueDedupKey } from './reportExcelStore'
 import {
   classifyOperation,
   resolveDocumentIssueDate,
@@ -11,7 +11,7 @@ import {
 } from './excelImport'
 import { EXCEL_REPORT_VERSION } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.1'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.2'
 const INSERT_CHUNK = 400
 const FETCH_PAGE_SIZE = 3000
 const FETCH_CONCURRENCY = 4
@@ -44,7 +44,7 @@ function lineToExcelRow(stored) {
 }
 
 function excelRowToInsert(row, batchId) {
-  const dedupKey = excelRowDedupKey(row)
+  const dedupKey = warehouseValueDedupKey(row)
   if (!dedupKey) return null
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
   const issueDate = resolveDocumentIssueDate(row.issueDate, documentNo) || String(row.issueDate || '').slice(0, 10)
@@ -106,8 +106,8 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
       .from('warehouse_value_lines')
       .select(LINE_SELECT)
       .order('issue_date', { ascending: true })
-      .order('document_no', { ascending: true })
       .order('row_no', { ascending: true, nullsFirst: false })
+      .order('document_no', { ascending: true })
       .range(from, to)
     if (error) throw error
     loaded += data?.length || 0
