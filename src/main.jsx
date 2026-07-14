@@ -7854,7 +7854,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     ['importy', 'Importy Excel', Upload],
     ['pz', 'PZ / FIFO', Database],
     ['stany', 'Stany', BarChart3],
-    ['raporty', 'Raporty', FileText],
+    ['raporty', 'Wartość magazynu', Warehouse],
     ['magazyn', 'Magazyn', Warehouse],
     ['kartoteki', 'Dokumentacja HACCP', ClipboardList],
     ['archiwum-pdf', 'Archiwum PDF', FolderOpen],
@@ -8220,9 +8220,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'raporty' && canSeeTab(authProfile, 'raporty') && <>
     <section className="card">
-      <div className="section-title"><FileText/><div><h2>Raporty magazynowe</h2><p>Zestawienie ilościowo-wartościowe z pliku Excel (FIFO, data PZ/WZ). Wersja: {EXCEL_REPORT_VERSION}.</p></div></div>
+      <div className="section-title"><Warehouse/><div><h2>Wartość magazynu</h2><p>Zestawienie ilościowo-wartościowe z Excela (FIFO, data PZ/WZ) — zapis w Supabase, osobno od magazynu HACCP. Silnik: {EXCEL_REPORT_VERSION}.</p></div></div>
       {message && <p className="message">{message}</p>}
       <StockValueReportSection
+        supabase={supabase}
+        savedBy={authDisplayName(authProfile, authSession)}
         escapeHtml={escapeHtml}
         printHtmlInIframe={printHtmlInIframe}
         setMessage={setMessage}

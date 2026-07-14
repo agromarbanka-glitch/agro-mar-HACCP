@@ -1,7 +1,7 @@
 /**
  * Raport ilościowo-wartościowy magazynu na koniec miesiąca.
  *
- * Tylko dla zakładki Raporty – nie zmienia silnika HACCP/FIFO.
+ * Tylko dla zakładki Wartość magazynu – nie zmienia silnika HACCP/FIFO.
  *
  * Zasady:
  * - Przyjęcia: data PZ (operation_date dokumentu PZ / data partii).

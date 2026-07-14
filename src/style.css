@@ -770,6 +770,9 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
 .warning-text { color: #a33; }
 .stock-excel-panel { margin-bottom: 16px; }
 .stock-excel-panel h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 1rem; }
+.warehouse-batch-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.warehouse-batch-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #eee; }
+.warehouse-batch-list li:last-child { border-bottom: none; }
 .report-title-preview { font-size: 13px; margin-top: 8px; }
 .r14-controls .month-nav input[type="date"] { flex: 1; min-width: 140px; }
 .report-date-picker { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Printer, RefreshCcw, Upload, FileSpreadsheet } from 'lucide-react'
+import { Printer, RefreshCcw, Upload, FileSpreadsheet, Save, Trash2, Database } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import {
   formatPlMoney,
@@ -13,9 +13,20 @@ import {
   formatReportTitleDate,
   buildReportTitle
 } from './monthlyStockValueFromExcel'
-import { clearReportExcelStore } from './reportExcelStore'
-
-const SESSION_KEY = 'agro-mar-report-session-v2.5'
+import {
+  fetchAllWarehouseValueLines,
+  fetchWarehouseValueStats,
+  appendWarehouseValueFromParsedFiles,
+  deleteWarehouseValueBatch,
+  saveWarehouseValueSnapshot,
+  fetchWarehouseValueSnapshots,
+  deleteWarehouseValueSnapshot,
+  clearAllWarehouseValueData,
+  summarizeBatchRow,
+  WAREHOUSE_VALUE_STORE_VERSION
+} from './warehouseValueStore'
+import { isSupabaseConfigured } from './supabaseClient'
+import { confirmDelete } from './authEngine'
 
 function defaultAsOfDate() {
   const d = new Date()
@@ -23,32 +34,6 @@ function defaultAsOfDate() {
   const m = d.getMonth() + 1
   const last = new Date(y, m, 0).getDate()
   return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`
-}
-
-function loadSession() {
-  try {
-    const raw = localStorage.getItem(SESSION_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    if (parsed?.engineVersion !== EXCEL_REPORT_VERSION) return null
-    if (!Array.isArray(parsed.rows) || !parsed.rows.length) return null
-    return parsed
-  } catch {
-    return null
-  }
-}
-
-function saveSession(rows, fileNames) {
-  try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({
-      engineVersion: EXCEL_REPORT_VERSION,
-      savedAt: new Date().toISOString(),
-      rows,
-      fileNames
-    }))
-  } catch (err) {
-    console.warn('saveSession failed', err)
-  }
 }
 
 function parseIsoDate(iso) {
@@ -125,14 +110,18 @@ function ReportDatePicker({ value, onChange, disabled }) {
   )
 }
 
-export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMessage }) {
+export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, printHtmlInIframe, setMessage }) {
   const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
   const [loading, setLoading] = useState(false)
+  const [storeLoading, setStoreLoading] = useState(false)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
-  const [fileNames, setFileNames] = useState([])
+  const [batches, setBatches] = useState([])
+  const [snapshots, setSnapshots] = useState([])
   const fileInputRef = useRef(null)
+
+  const fileNames = useMemo(() => batches.map(b => b.file_name).filter(Boolean), [batches])
 
   const recalculate = useCallback((rows, names, date) => {
     const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
@@ -141,15 +130,44 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
     return result
   }, [])
 
-  useEffect(() => {
-    clearReportExcelStore().catch(() => {})
-    const session = loadSession()
-    if (session) {
-      setExcelRows(session.rows)
-      setFileNames(session.fileNames || [])
-      setMessage?.(`Przywrócono ostatni wczytany Excel (${session.rows.length} wierszy). Wgraj plik ponownie, jeśli wynik się nie zgadza.`)
+  const reloadFromSupabase = useCallback(async (silent = false) => {
+    if (!supabase) {
+      setExcelRows([])
+      setBatches([])
+      setReport(null)
+      return
     }
-  }, [setMessage])
+    setStoreLoading(true)
+    try {
+      const [rows, stats, snaps] = await Promise.all([
+        fetchAllWarehouseValueLines(supabase),
+        fetchWarehouseValueStats(supabase),
+        fetchWarehouseValueSnapshots(supabase)
+      ])
+      setExcelRows(rows)
+      setBatches(stats.batches || [])
+      setSnapshots(snaps)
+      if (!silent && rows.length) {
+        setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${stats.batchCount} importów).`)
+      }
+    } catch (err) {
+      console.error('warehouse value load', err)
+      const msg = String(err?.message || err)
+      if (/warehouse_value|relation.*does not exist|42P01/i.test(msg)) {
+        setMessage?.('Brak tabel magazynu wartości w Supabase. Uruchom SQL: supabase/2026-v45-warehouse-value-magazyn.sql')
+      } else if (/permission denied|row-level security|42501/i.test(msg)) {
+        setMessage?.('Brak dostępu do magazynu wartości — zaloguj się lub uruchom polityki RLS.')
+      } else {
+        setMessage?.(`Błąd wczytywania z Supabase: ${msg}`)
+      }
+    } finally {
+      setStoreLoading(false)
+    }
+  }, [supabase, setMessage])
+
+  useEffect(() => {
+    void reloadFromSupabase(true)
+  }, [reloadFromSupabase])
 
   useEffect(() => {
     if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
@@ -159,25 +177,97 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
     if (!files.length) return
+    if (!supabase) {
+      setMessage?.('Brak Supabase — skonfiguruj .env i uruchom migrację SQL magazynu wartości.')
+      return
+    }
     setLoading(true)
     try {
-      const { rows, fileNames: names, skippedMm } = await parseExcelFilesForReport(files)
-      setExcelRows(rows)
-      setFileNames(names)
-      saveSession(rows, names)
-      const result = recalculate(rows, names, asOfDate)
-      const priceHint = result.diagnostics?.linesWithPrice
-        ? ` · ${result.diagnostics.linesWithPrice} linii PZ z ceną netto`
-        : ''
+      const parsedFiles = []
+      let skippedMm = 0
+      for (const file of files) {
+        const part = await parseExcelFilesForReport([file])
+        parsedFiles.push({ fileName: file.name, rows: part.rows })
+        skippedMm += part.skippedMm || 0
+      }
+      const { totalAdded, totalDuplicates } = await appendWarehouseValueFromParsedFiles(
+        supabase,
+        parsedFiles,
+        { uploadedBy: savedBy }
+      )
+      await reloadFromSupabase(true)
+      const linesWithPrice = parsedFiles.flatMap(f => f.rows).filter(r => Number(r.unitNetPrice) > 0).length
+      const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
+      const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
       setMessage?.(
-        `Wczytano ${rows.length} wierszy z ${names.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${priceHint}. ${result.message || ''}`
+        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${priceHint}. ` +
+        (totalAdded === 0 ? 'Wszystkie wiersze były już w bazie.' : 'Kolejne miesiące doklejaj — nie trzeba wgrywać historii od nowa.')
       )
     } catch (err) {
-      console.error('Excel report error', err)
-      setMessage?.(`Błąd wczytywania Excel: ${err?.message || String(err)}`)
+      console.error('Excel report upload', err)
+      setMessage?.(`Błąd importu do Supabase: ${err?.message || String(err)}`)
     } finally {
       setLoading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  async function handleDeleteBatch(batchId) {
+    if (!supabase || !batchId) return
+    const batch = batches.find(b => b.id === batchId)
+    if (!confirmDelete(`Import: ${batch?.file_name || batchId}\n\nUsunie ${batch?.row_count || 0} wierszy z magazynu wartości (nie dotyka HACCP).`)) return
+    setLoading(true)
+    try {
+      await deleteWarehouseValueBatch(supabase, batchId)
+      await reloadFromSupabase(true)
+      setMessage?.('Usunięto import z magazynu wartości.')
+    } catch (err) {
+      setMessage?.(`Błąd usuwania: ${err?.message || String(err)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleSaveSnapshot() {
+    if (!supabase || !report?.rows?.length) return
+    setLoading(true)
+    try {
+      await saveWarehouseValueSnapshot(supabase, report, { savedBy })
+      const snaps = await fetchWarehouseValueSnapshots(supabase)
+      setSnapshots(snaps)
+      setMessage?.(`Zapisano snapshot stanu na ${formatReportTitleDate(report.asOfDate)} w Supabase.`)
+    } catch (err) {
+      setMessage?.(`Błąd zapisu snapshotu: ${err?.message || String(err)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handleDeleteSnapshot(snap) {
+    if (!supabase || !snap?.id) return
+    if (!confirmDelete(`Snapshot stanu na ${formatReportTitleDate(snap.as_of_date)}.`)) return
+    try {
+      await deleteWarehouseValueSnapshot(supabase, snap.id)
+      setSnapshots(await fetchWarehouseValueSnapshots(supabase))
+      setMessage?.('Usunięto snapshot.')
+    } catch (err) {
+      setMessage?.(`Błąd: ${err?.message || String(err)}`)
+    }
+  }
+
+  async function handleClearAll() {
+    if (!supabase) return
+    if (!confirmDelete('CAŁY magazyn wartości (wszystkie importy Excel i snapshoty).\n\nNie dotyka magazynu HACCP / FIFO partii.')) return
+    if (!window.confirm('Ostateczne potwierdzenie: wyczyścić wszystkie dane magazynu wartości?')) return
+    setLoading(true)
+    try {
+      await clearAllWarehouseValueData(supabase)
+      await reloadFromSupabase(true)
+      setMessage?.('Wyczyszczono magazyn wartości w Supabase.')
+    } catch (err) {
+      setMessage?.(`Błąd: ${err?.message || String(err)}`)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -212,14 +302,49 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
   return (
     <div className="stock-value-report">
       <p className="hint">
-        Raport z pliku Excel · FIFO · data PZ / data WZ · wersja {EXCEL_REPORT_VERSION} (silnik oryginalny 2.1).
-        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w imporcie. Możesz wskazać <b>kilka plików naraz</b> (np. dwie paczki po 1000 wierszy).
+        <b>Wartość magazynu</b> — osobne narzędzie od HACCP. FIFO {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
+        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w Excelu. Importy się <b>doklejają</b> — reszta z poprzedniego miesiąca wchodzi w stan automatycznie.
       </p>
 
+      {!isSupabaseConfigured && (
+        <p className="hint inline-warning">Brak Supabase w .env — raport wymaga bazy. Skopiuj .env.example i uruchom migrację SQL.</p>
+      )}
+
       <section className="card stock-excel-panel">
-        <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel</h3>
+        <h3><Database size={18} /> Magazyn danych (Supabase)</h3>
         <p className="hint">
-          Eksport szczegółowy PZ/WZ z ostatnią kolumną „Cena netto”. Każde wgrywanie <b>zastępuje</b> poprzednie dane — tak jak na początku, gdy raport działał poprawnie.
+          {storeLoading ? 'Wczytywanie…' : (
+            excelRows.length
+              ? <><b>{excelRows.length}</b> wierszy PZ/WZ · <b>{batches.length}</b> import(ów)</>
+              : 'Brak danych — wgraj pierwszy Excel poniżej.'
+          )}
+        </p>
+        {batches.length > 0 && (
+          <ul className="warehouse-batch-list hint">
+            {batches.map(b => (
+              <li key={b.id}>
+                {summarizeBatchRow(b)}
+                <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
+                  <Trash2 size={12} /> Usuń
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="actions">
+          <button type="button" className="secondary" disabled={!supabase || storeLoading} onClick={() => void reloadFromSupabase()}>
+            <RefreshCcw size={16} /> Odśwież z bazy
+          </button>
+          <button type="button" className="secondary danger" disabled={!supabase || !excelRows.length || loading} onClick={() => void handleClearAll()}>
+            Wyczyść cały magazyn wartości
+          </button>
+        </div>
+      </section>
+
+      <section className="card stock-excel-panel">
+        <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel (doklej do bazy)</h3>
+        <p className="hint">
+          Eksport szczegółowy PZ/WZ z kolumną „Cena netto”. Pierwszy raz — pełna historia. Kolejne miesiące — tylko nowy export; duplikaty są pomijane.
         </p>
         <div className="actions">
           <input
@@ -228,18 +353,12 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             accept=".xlsx,.xls"
             multiple
             className="file-input-hidden"
-            onChange={e => handleExcelUpload(e.target.files)}
+            onChange={e => void handleExcelUpload(e.target.files)}
           />
-          <button type="button" disabled={loading} onClick={() => fileInputRef.current?.click()}>
-            <Upload size={16} /> {loading ? 'Wczytywanie…' : 'Wybierz plik Excel i przelicz'}
+          <button type="button" disabled={loading || !supabase} onClick={() => fileInputRef.current?.click()}>
+            <Upload size={16} /> {loading ? 'Zapisuję…' : 'Wybierz Excel i zapisz w Supabase'}
           </button>
         </div>
-        {fileNames.length > 0 && (
-          <p className="hint loaded-files">
-            Wczytane: <b>{fileNames.join(', ')}</b> · {excelRows.length} wierszy
-            {diag ? <> · {diag.pzLines} PZ, {diag.wzLines} WZ</> : null}
-          </p>
-        )}
       </section>
 
       <section className="card stock-excel-panel">
@@ -247,7 +366,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
         <div className="form-grid compact r14-controls">
           <label>
             Stan na dzień
-            <ReportDatePicker value={asOfDate} onChange={setAsOfDate} disabled={!excelRows.length} />
+            <ReportDatePicker value={asOfDate} onChange={setAsOfDate} disabled={!excelRows.length || loading} />
           </label>
           <div className="actions">
             <button
@@ -258,10 +377,13 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
             >
               <RefreshCcw size={16} /> Przelicz
             </button>
-            <button type="button" className="secondary" onClick={printReport} disabled={!rows.length}>
+            <button type="button" className="secondary" disabled={!rows.length} onClick={printReport}>
               <Printer size={16} /> Drukuj
             </button>
-            <button type="button" className="secondary" onClick={exportExcel} disabled={!rows.length}>Excel</button>
+            <button type="button" className="secondary" disabled={!rows.length} onClick={exportExcel}>Excel</button>
+            <button type="button" className="secondary" disabled={!rows.length || !supabase || loading} onClick={() => void handleSaveSnapshot()}>
+              <Save size={16} /> Zapisz snapshot
+            </button>
           </div>
         </div>
         {excelRows.length > 0 && (
@@ -269,8 +391,24 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
         )}
       </section>
 
-      {!excelRows.length && !loading && (
-        <p className="hint">Wgraj plik Excel, aby zobaczyć zestawienie ilościowo-wartościowe.</p>
+      {snapshots.length > 0 && (
+        <section className="card stock-excel-panel">
+          <h3>Zapisane snapshoty (archiwum)</h3>
+          <ul className="warehouse-batch-list hint">
+            {snapshots.map(s => (
+              <li key={s.id}>
+                {formatReportTitleDate(s.as_of_date)} · {Number(s.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg · {formatPlMoney(s.totals?.remaining_value)} zł
+                {s.saved_at ? ` · ${new Date(s.saved_at).toLocaleString('pl-PL')}` : ''}
+                <button type="button" className="mini secondary" onClick={() => setAsOfDate(String(s.as_of_date).slice(0, 10))}>Pokaż datę</button>
+                <button type="button" className="mini danger" onClick={() => void handleDeleteSnapshot(s)}><Trash2 size={12} /></button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {!excelRows.length && !loading && !storeLoading && (
+        <p className="hint">Wgraj plik Excel — dane zostaną w Supabase i będą dostępne przy kolejnych logowaniach.</p>
       )}
 
       {report && excelRows.length > 0 && (
@@ -281,7 +419,7 @@ export function StockValueReportSection({ escapeHtml, printHtmlInIframe, setMess
           <span>Ilość końcowa FIFO: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
           {diag && (
             <span className="hint">
-              {diag.pzLines} PZ, {diag.wzLines} WZ w pliku · {diag.linesWithPrice} z ceną
+              {diag.pzLines} PZ, {diag.wzLines} WZ w bazie · {diag.linesWithPrice} z ceną
               {diag.wzAfterCutoff > 0 ? ` · ${diag.wzAfterCutoff} WZ po dacie stanu pominięte` : ''}
             </span>
           )}
