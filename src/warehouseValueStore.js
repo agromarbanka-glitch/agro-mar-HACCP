@@ -11,8 +11,23 @@ import {
 } from './excelImport'
 import { EXCEL_REPORT_VERSION } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.0'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.1'
 const INSERT_CHUNK = 400
+const FETCH_PAGE_SIZE = 3000
+const FETCH_CONCURRENCY = 4
+const LINE_SELECT =
+  'id, batch_id, document_type, document_no, issue_date, qty, unit_net_price, product_name, row_no'
+
+/** Cache sesji — unika ponownego pobierania tysięcy wierszy przy powrocie na zakładkę. */
+let sessionLinesCache = null
+
+export function invalidateWarehouseValueLinesCache() {
+  sessionLinesCache = null
+}
+
+function cacheKey(lineCount, batchCount) {
+  return `${lineCount}:${batchCount}`
+}
 
 function lineToExcelRow(stored) {
   return {
@@ -48,25 +63,71 @@ function excelRowToInsert(row, batchId) {
   }
 }
 
-export async function fetchAllWarehouseValueLines(client) {
+export async function fetchAllWarehouseValueLines(client, { onProgress, forceRefresh = false } = {}) {
   if (!client) return []
-  const all = []
-  let from = 0
-  const pageSize = 2000
-  while (true) {
+
+  const { count, error: countErr } = await client
+    .from('warehouse_value_lines')
+    .select('id', { count: 'exact', head: true })
+  if (countErr) throw countErr
+
+  const total = count || 0
+  onProgress?.(0, total)
+  if (total === 0) {
+    sessionLinesCache = { key: '0:0', rows: [], fetchedAt: Date.now() }
+    return []
+  }
+
+  const batchCountRes = await client
+    .from('warehouse_value_batches')
+    .select('id', { count: 'exact', head: true })
+  if (batchCountRes.error) throw batchCountRes.error
+  const batchCount = batchCountRes.count || 0
+  const key = cacheKey(total, batchCount)
+
+  if (
+    !forceRefresh &&
+    sessionLinesCache?.key === key &&
+    sessionLinesCache.rows?.length === total &&
+    Date.now() - sessionLinesCache.fetchedAt < 120_000
+  ) {
+    onProgress?.(total, total)
+    return sessionLinesCache.rows
+  }
+
+  const pageCount = Math.ceil(total / FETCH_PAGE_SIZE)
+  const pages = new Array(pageCount)
+  let loaded = 0
+
+  async function fetchPage(pageIndex) {
+    const from = pageIndex * FETCH_PAGE_SIZE
+    const to = from + FETCH_PAGE_SIZE - 1
     const { data, error } = await client
       .from('warehouse_value_lines')
-      .select('id, batch_id, document_type, document_no, issue_date, qty, unit_net_price, product_name, row_no')
+      .select(LINE_SELECT)
       .order('issue_date', { ascending: true })
       .order('document_no', { ascending: true })
-      .range(from, from + pageSize - 1)
+      .range(from, to)
     if (error) throw error
-    if (!data?.length) break
-    all.push(...data)
-    if (data.length < pageSize) break
-    from += pageSize
+    loaded += data?.length || 0
+    onProgress?.(loaded, total)
+    return { pageIndex, data: data || [] }
   }
-  return all.map(lineToExcelRow)
+
+  for (let start = 0; start < pageCount; start += FETCH_CONCURRENCY) {
+    const chunk = []
+    for (let p = start; p < Math.min(start + FETCH_CONCURRENCY, pageCount); p++) {
+      chunk.push(fetchPage(p))
+    }
+    const results = await Promise.all(chunk)
+    for (const { pageIndex, data } of results) {
+      pages[pageIndex] = data
+    }
+  }
+
+  const rows = pages.flat().map(lineToExcelRow)
+  sessionLinesCache = { key, rows, fetchedAt: Date.now() }
+  return rows
 }
 
 export async function fetchWarehouseValueBatches(client) {
@@ -79,6 +140,20 @@ export async function fetchWarehouseValueBatches(client) {
   return data || []
 }
 
+export async function fetchWarehouseValueMeta(client) {
+  if (!client) {
+    return { batchCount: 0, lineCount: 0, batches: [], snapshots: [] }
+  }
+  const [stats, snapshots] = await Promise.all([
+    fetchWarehouseValueStats(client),
+    fetchWarehouseValueSnapshots(client)
+  ])
+  return {
+    batchCount: stats.batchCount,
+    lineCount: stats.lineCount,
+    batches: stats.batches,
+    snapshots
+  }
 export async function fetchWarehouseValueStats(client) {
   const [batches, lineCountRes] = await Promise.all([
     fetchWarehouseValueBatches(client),
@@ -147,6 +222,7 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
 
   const totalAdded = results.reduce((s, r) => s + r.added, 0)
   const totalDup = results.reduce((s, r) => s + r.duplicates, 0)
+  if (totalAdded > 0) invalidateWarehouseValueLinesCache()
   return { results, totalAdded, totalDuplicates: totalDup }
 }
 
@@ -154,12 +230,14 @@ export async function deleteWarehouseValueBatch(client, batchId) {
   if (!client || !batchId) return
   const { error } = await client.from('warehouse_value_batches').delete().eq('id', batchId)
   if (error) throw error
+  invalidateWarehouseValueLinesCache()
 }
 
 export async function clearAllWarehouseValueData(client) {
   if (!client) throw new Error('Brak połączenia z Supabase.')
   await client.from('warehouse_value_snapshots').delete().neq('id', '00000000-0000-0000-0000-000000000000')
   await client.from('warehouse_value_batches').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+  invalidateWarehouseValueLinesCache()
 }
 
 export async function saveWarehouseValueSnapshot(client, report, { savedBy = '' } = {}) {
@@ -183,6 +261,17 @@ export async function saveWarehouseValueSnapshot(client, report, { savedBy = '' 
     .upsert(payload, { onConflict: 'as_of_date' })
     .select('id, as_of_date, saved_at')
     .single()
+  if (error) throw error
+  return data
+}
+
+export async function fetchWarehouseValueSnapshotByDate(client, asOfDate) {
+  if (!client || !asOfDate) return null
+  const { data, error } = await client
+    .from('warehouse_value_snapshots')
+    .select('id, as_of_date, year_month, report_title, totals, rows, diagnostics, saved_at, saved_by')
+    .eq('as_of_date', String(asOfDate).slice(0, 10))
+    .maybeSingle()
   if (error) throw error
   return data
 }

@@ -15,14 +15,16 @@ import {
 } from './monthlyStockValueFromExcel'
 import {
   fetchAllWarehouseValueLines,
-  fetchWarehouseValueStats,
+  fetchWarehouseValueMeta,
   appendWarehouseValueFromParsedFiles,
   deleteWarehouseValueBatch,
   saveWarehouseValueSnapshot,
   fetchWarehouseValueSnapshots,
+  fetchWarehouseValueSnapshotByDate,
   deleteWarehouseValueSnapshot,
   clearAllWarehouseValueData,
   summarizeBatchRow,
+  invalidateWarehouseValueLinesCache,
   WAREHOUSE_VALUE_STORE_VERSION
 } from './warehouseValueStore'
 import { isSupabaseConfigured } from './supabaseClient'
@@ -110,16 +112,40 @@ function ReportDatePicker({ value, onChange, disabled }) {
   )
 }
 
+function reportFromSnapshot(snap, fileNames = []) {
+  if (!snap?.as_of_date) return null
+  const date = String(snap.as_of_date).slice(0, 10)
+  const payload = {
+    source: 'snapshot',
+    asOfDate: date,
+    asOfDatePl: formatReportTitleDate(date),
+    yearMonth: snap.year_month || date.slice(0, 7),
+    fileNames,
+    rows: snap.rows || [],
+    totals: snap.totals || {},
+    diagnostics: snap.diagnostics || {},
+    reportTitle: snap.report_title || buildReportTitle({ asOfDate: date, totals: snap.totals }),
+    message: 'Podgląd ze snapshotu — przeliczam na świeżych danych z bazy…'
+  }
+  if (!payload.reportTitle) payload.reportTitle = buildReportTitle(payload)
+  return payload
+}
+
 export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, printHtmlInIframe, setMessage }) {
   const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
   const [loading, setLoading] = useState(false)
   const [storeLoading, setStoreLoading] = useState(false)
+  const [calcLoading, setCalcLoading] = useState(false)
+  const [loadProgress, setLoadProgress] = useState({ loaded: 0, total: 0 })
+  const [lineCountHint, setLineCountHint] = useState(0)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
   const [snapshots, setSnapshots] = useState([])
   const fileInputRef = useRef(null)
+  const asOfDateRef = useRef(asOfDate)
+  asOfDateRef.current = asOfDate
 
   const fileNames = useMemo(() => batches.map(b => b.file_name).filter(Boolean), [batches])
 
@@ -130,25 +156,39 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     return result
   }, [])
 
-  const reloadFromSupabase = useCallback(async (silent = false) => {
+  const reloadFromSupabase = useCallback(async (silent = false, { forceRefresh = false } = {}) => {
     if (!supabase) {
       setExcelRows([])
       setBatches([])
       setReport(null)
+      setLineCountHint(0)
       return
     }
     setStoreLoading(true)
+    setLoadProgress({ loaded: 0, total: 0 })
     try {
-      const [rows, stats, snaps] = await Promise.all([
-        fetchAllWarehouseValueLines(supabase),
-        fetchWarehouseValueStats(supabase),
-        fetchWarehouseValueSnapshots(supabase)
-      ])
+      const meta = await fetchWarehouseValueMeta(supabase)
+      setBatches(meta.batches || [])
+      setSnapshots(meta.snapshots || [])
+      setLineCountHint(meta.lineCount || 0)
+
+      if (!meta.lineCount) {
+        setExcelRows([])
+        setReport(null)
+        return
+      }
+
+      const names = (meta.batches || []).map(b => b.file_name).filter(Boolean)
+      const previewSnap = await fetchWarehouseValueSnapshotByDate(supabase, asOfDateRef.current)
+      if (previewSnap) setReport(reportFromSnapshot(previewSnap, names))
+
+      const rows = await fetchAllWarehouseValueLines(supabase, {
+        forceRefresh,
+        onProgress: (loaded, total) => setLoadProgress({ loaded, total })
+      })
       setExcelRows(rows)
-      setBatches(stats.batches || [])
-      setSnapshots(snaps)
       if (!silent && rows.length) {
-        setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${stats.batchCount} importów).`)
+        setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${meta.batchCount} importów).`)
       }
     } catch (err) {
       console.error('warehouse value load', err)
@@ -162,6 +202,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       }
     } finally {
       setStoreLoading(false)
+      setLoadProgress({ loaded: 0, total: 0 })
     }
   }, [supabase, setMessage])
 
@@ -170,8 +211,19 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   }, [reloadFromSupabase])
 
   useEffect(() => {
-    if (excelRows.length) recalculate(excelRows, fileNames, asOfDate)
-    else setReport(null)
+    if (!excelRows.length) {
+      setReport(null)
+      setCalcLoading(false)
+      return
+    }
+    setCalcLoading(true)
+    const timer = window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        recalculate(excelRows, fileNames, asOfDate)
+        setCalcLoading(false)
+      })
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [asOfDate, excelRows, fileNames, recalculate])
 
   async function handleExcelUpload(fileList) {
@@ -195,7 +247,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         parsedFiles,
         { uploadedBy: savedBy }
       )
-      await reloadFromSupabase(true)
+      await reloadFromSupabase(true, { forceRefresh: true })
       const linesWithPrice = parsedFiles.flatMap(f => f.rows).filter(r => Number(r.unitNetPrice) > 0).length
       const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
       const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
@@ -219,7 +271,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     setLoading(true)
     try {
       await deleteWarehouseValueBatch(supabase, batchId)
-      await reloadFromSupabase(true)
+      await reloadFromSupabase(true, { forceRefresh: true })
       setMessage?.('Usunięto import z magazynu wartości.')
     } catch (err) {
       setMessage?.(`Błąd usuwania: ${err?.message || String(err)}`)
@@ -262,7 +314,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     setLoading(true)
     try {
       await clearAllWarehouseValueData(supabase)
-      await reloadFromSupabase(true)
+      await reloadFromSupabase(true, { forceRefresh: true })
       setMessage?.('Wyczyszczono magazyn wartości w Supabase.')
     } catch (err) {
       setMessage?.(`Błąd: ${err?.message || String(err)}`)
@@ -313,7 +365,15 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       <section className="card stock-excel-panel">
         <h3><Database size={18} /> Magazyn danych (Supabase)</h3>
         <p className="hint">
-          {storeLoading ? 'Wczytywanie…' : (
+          {storeLoading ? (
+            loadProgress.total > 0
+              ? <>Wczytywanie wierszy z Supabase… <b>{loadProgress.loaded.toLocaleString('pl-PL')}</b> / {loadProgress.total.toLocaleString('pl-PL')}</>
+              : lineCountHint > 0
+                ? <>Łączenie z Supabase… <b>{lineCountHint.toLocaleString('pl-PL')}</b> wierszy do pobrania</>
+                : 'Wczytywanie…'
+          ) : calcLoading ? (
+            <>Przeliczam FIFO… {lineCountHint ? `(${lineCountHint.toLocaleString('pl-PL')} wierszy)` : ''}</>
+          ) : (
             excelRows.length
               ? <><b>{excelRows.length}</b> wierszy PZ/WZ · <b>{batches.length}</b> import(ów)</>
               : 'Brak danych — wgraj pierwszy Excel poniżej.'
@@ -332,7 +392,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           </ul>
         )}
         <div className="actions">
-          <button type="button" className="secondary" disabled={!supabase || storeLoading} onClick={() => void reloadFromSupabase()}>
+          <button type="button" className="secondary" disabled={!supabase || storeLoading} onClick={() => { invalidateWarehouseValueLinesCache(); void reloadFromSupabase(false, { forceRefresh: true }) }}>
             <RefreshCcw size={16} /> Odśwież z bazy
           </button>
           <button type="button" className="secondary danger" disabled={!supabase || !excelRows.length || loading} onClick={() => void handleClearAll()}>
@@ -407,11 +467,11 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         </section>
       )}
 
-      {!excelRows.length && !loading && !storeLoading && (
+      {!excelRows.length && !loading && !storeLoading && !lineCountHint && (
         <p className="hint">Wgraj plik Excel — dane zostaną w Supabase i będą dostępne przy kolejnych logowaniach.</p>
       )}
 
-      {report && excelRows.length > 0 && (
+      {report && (excelRows.length > 0 || calcLoading || storeLoading) && (
         <div className="summary r14-summary">
           <span>Stan na: <b>{report.asOfDatePl || formatReportTitleDate(asOfDate)}</b></span>
           <span>Przybyło (01.–{report.asOfDatePl?.replace(/r\.$/, '') || '…'}): <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b></span>
