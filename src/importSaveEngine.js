@@ -3,6 +3,7 @@
  */
 
 import { normalizeDocumentNo } from './excelImport.js'
+import { k01LineDedupeKey } from './k01Engine.js'
 
 const OP_CHUNK = 100
 const ITEM_CHUNK = 150
@@ -949,6 +950,74 @@ async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
     await withImportRetry(() => client.from('fifo_allocations').delete().in('source_lot_id', chunk))
     await withImportRetry(() => client.from('fifo_allocations').delete().in('output_lot_id', chunk))
   }
+}
+
+/**
+ * Usuwa zduplikowane K01 (FIFO: zostaw najstarszy id na linię PZ).
+ * Działa z przeglądarki — nie wymaga migracji SQL.
+ */
+export async function removeDuplicateK01Documents(client, { onProgress } = {}) {
+  if (!client) throw new Error('Brak Supabase.')
+  onProgress?.('Sprawdzanie zduplikowanych kart K01…')
+
+  const { data, error } = await withImportRetry(() =>
+    client
+      .from('haccp_documents')
+      .select('id, document_no, document_date, product_name, qty')
+      .eq('document_type', 'K01')
+      .order('id', { ascending: true })
+  )
+  if (error) throw error
+
+  const toDelete = []
+  const seen = new Set()
+  for (const row of data || []) {
+    const key = k01LineDedupeKey(row)
+    if (seen.has(key)) toDelete.push(row.id)
+    else seen.add(key)
+  }
+  if (!toDelete.length) return 0
+
+  onProgress?.(`Usuwanie ${toDelete.length} zduplikowanych kart K01…`)
+  await deleteRowsInChunks(client, 'haccp_document_history', 'document_id', toDelete)
+  await deleteRowsInChunks(client, 'haccp_documents', 'id', toDelete)
+  return toDelete.length
+}
+
+export function formatRepairWarehouseResult(result = {}) {
+  const items = result.items_removed ?? 0
+  const lots = result.lots_removed ?? 0
+  const k01 = result.k01_removed ?? 0
+  if (!items && !lots && !k01) return 'Duplikaty: brak do usunięcia.'
+  const parts = []
+  if (items) parts.push(`${items} pozycji`)
+  if (lots) parts.push(`${lots} partii`)
+  if (k01) parts.push(`${k01} kart K01`)
+  return `Usunięto duplikaty: ${parts.join(', ')}.`
+}
+
+/**
+ * Pełne czyszczenie duplikatów magazynu: pozycje PZ + K01 (FIFO).
+ * RPC v46 gdy dostępne; K01 zawsze też z przeglądarki (np. ten sam PZ z wielu importów).
+ */
+export async function repairWarehouseImportDuplicates(client, { onProgress } = {}) {
+  if (!client) throw new Error('Brak Supabase.')
+  const notify = msg => onProgress?.(msg)
+  notify('Czyszczenie duplikatów magazynu (FIFO)…')
+
+  let result = { items_removed: 0, lots_removed: 0, k01_removed: 0, mode: 'client' }
+  try {
+    const rpc = await removeDuplicateIncomingOperationItems(client, { onProgress })
+    result = { ...result, ...rpc, mode: 'rpc' }
+  } catch (err) {
+    if (!/function.*does not exist/i.test(String(err?.message || ''))) throw err
+    notify('Migracja v46 niedostępna — czyszczę duplikaty K01 z przeglądarki…')
+  }
+
+  const k01Extra = await removeDuplicateK01Documents(client, { onProgress })
+  result.k01_removed = (result.k01_removed || 0) + k01Extra
+  if (k01Extra > 0 && result.mode === 'rpc') result.mode = 'rpc+k01'
+  return result
 }
 
 /**

@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, removeDuplicateIncomingOperationItems, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -286,6 +286,7 @@ function App() {
   const [authSession, setAuthSession] = useState(null)
   const [authReady, setAuthReady] = useState(skipAuth)
   const [haccpBusy, setHaccpBusy] = useState(false)
+  const [k01SupplierBusyId, setK01SupplierBusyId] = useState(null)
   const [importDeleting, setImportDeleting] = useState(false)
   const [importCleaning, setImportCleaning] = useState(false)
   const [importDeduping, setImportDeduping] = useState(false)
@@ -3399,7 +3400,7 @@ function App() {
             <tr>
               <td>1</td>
               <td><K01Value doc={doc} field="data_dostawy" label="Data dostawy">{doc.document_date || ''}</K01Value></td>
-              <td><K01Value doc={doc} field="dane_dostawcy" label="Dane dostawcy / nr faktury">{shortSupplier(doc)}</K01Value><button type="button" className="mini secondary no-print" onClick={()=>promptK01Supplier(doc)}>Zmień dostawcę</button></td>
+              <td><K01Value doc={doc} field="dane_dostawcy" label="Dane dostawcy / nr faktury">{shortSupplier(doc)}</K01Value><button type="button" className={`mini secondary no-print${k01SupplierBusyId === doc.id ? ' btn-busy' : ''}`} disabled={k01SupplierBusyId === doc.id} onClick={()=>promptK01Supplier(doc)}>{k01SupplierBusyId === doc.id ? 'Zapisuję…' : 'Zmień dostawcę'}</button></td>
               <td className={pn('stan_higieniczny_pojazdu') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="stan_higieniczny_pojazdu" label="Stan higieniczny pojazdu" pn>{pn('stan_higieniczny_pojazdu')}</K01Value></td>
               <td><K01Value doc={doc} field="ilosc" label="Ilość">{Number(doc.qty || 0).toLocaleString('pl-PL')}</K01Value></td>
               <td className={pn('wybarwienie_zapach_brak_uszkodzen') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="wybarwienie_zapach_brak_uszkodzen" label="Wybarwienie/zapach/brak uszkodzeń mechanicznych" pn>{pn('wybarwienie_zapach_brak_uszkodzen')}</K01Value></td>
@@ -3669,7 +3670,7 @@ function App() {
             return <tr key={doc.id}>
               <td>{i+1}</td>
               <td>{doc.document_date}</td>
-              <td style={{textAlign:'left'}}><span>{shortSupplier(doc)}</span><button type="button" className="mini secondary no-print" onClick={()=>promptK01Supplier(doc)}>Zmień dostawcę</button></td>
+              <td style={{textAlign:'left'}}><span>{shortSupplier(doc)}</span><button type="button" className={`mini secondary no-print${k01SupplierBusyId === doc.id ? ' btn-busy' : ''}`} disabled={k01SupplierBusyId === doc.id} onClick={()=>promptK01Supplier(doc)}>{k01SupplierBusyId === doc.id ? 'Zapisuję…' : 'Zmień dostawcę'}</button></td>
               <td className={normalizePN(doc.data?.stan_higieniczny_pojazdu)==='N'?'pn-n':''}>
                 <select className="mini-select no-print" value={normalizePN(doc.data?.stan_higieniczny_pojazdu)} onChange={e=>editHaccpRowField(doc,'stan_higieniczny_pojazdu','Stan higieniczny pojazdu', e.target.value, {directValue:e.target.value, pn:true})}><option value="P">P</option><option value="N">N</option></select>
                 <span className="print-only">{normalizePN(doc.data?.stan_higieniczny_pojazdu)}</span>
@@ -5197,7 +5198,7 @@ function App() {
         </div>}
       </div>
       <div className="actions no-print" style={{ marginBottom: 12 }}>
-        <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
+        <button className="secondary" disabled={haccpBusy} onClick={() => clickRefreshHaccp()}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież'}</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W06', w06Docs)}><Printer size={16}/> Druk / PDF</button>
         <KartotekaPrintBadge group={{ key: 'W06|register', type: 'W06', docs: w06Docs }} localPrints={kartotekaLocalPrints} onToggle={toggleKartotekaPrintStatus} />
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W06', w06Docs)}>Pobierz Excel</button>
@@ -5284,7 +5285,7 @@ function App() {
     const w03Docs = sortW03Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W03'))
     return <>
       <div className="actions no-print" style={{ marginBottom: 12 }}>
-        <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
+        <button className="secondary" disabled={haccpBusy} onClick={() => clickRefreshHaccp()}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież'}</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W03', w03Docs)}><Printer size={16}/> Druk / PDF</button>
         <KartotekaPrintBadge group={{ key: 'W03|register', type: 'W03', docs: w03Docs }} localPrints={kartotekaLocalPrints} onToggle={toggleKartotekaPrintStatus} />
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W03', w03Docs)}>Pobierz Excel</button>
@@ -5624,7 +5625,7 @@ function App() {
               <p className="hint">{cards.find(c => c[0] === code)?.[2]}</p>
             </div>
             <div className="actions docs-actions">
-              <button className="secondary" onClick={() => loadHaccpDocs({ syncK01: true })}><RefreshCcw size={16}/> Odśwież</button>
+              <button className="secondary" disabled={haccpBusy} onClick={() => clickRefreshHaccp()}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież'}</button>
             </div>
           </div>
           {code === 'W03' ? renderW03Section() : code === 'W06' ? renderW06Section() : code === 'R02' ? renderR02Section() : code === 'R01' ? renderR01Section() : code === 'R13' ? renderR13Section(          ) : code === 'R09' ? (
@@ -7417,27 +7418,18 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       return
     }
     if (!window.confirm(
-      'Usunąć zduplikowane pozycje przyjęć (ta sama operacja + produkt + kg)?\n\n' +
-      'Zachowamy najstarszy wpis. Skasujemy nadmiarowe partie i K01.\n\n' +
-      'Użyj przed ponownym importem tego samego pliku Excel.'
+      'Usunąć zduplikowane pozycje przyjęć i K01 (FIFO — zostaje najstarszy wpis)?\n\n' +
+      'Skasujemy nadmiarowe partie, pozycje magazynowe i potrójne K01 tego samego PZ.'
     )) return
     setImportDeduping(true)
-    setMessage('Usuwanie duplikatów w bazie… (zwykle kilka sekund po migracji v46)')
+    setMessage('Usuwanie duplikatów w bazie…')
     try {
-      const result = await removeDuplicateIncomingOperationItems(supabase, {
+      const result = await repairWarehouseImportDuplicates(supabase, {
         onProgress: msg => setMessage(msg)
       })
-      const items = result?.items_removed ?? 0
-      const lots = result?.lots_removed ?? 0
-      const k01 = result?.k01_removed ?? 0
-      setMessage(
-        items
-          ? `Usunięto duplikaty: ${items} pozycji, ${lots} partii, ${k01} kart K01. Odświeżam listę K01…`
-          : 'Nie znaleziono zduplikowanych pozycji przyjęć.'
-      )
-      if (items > 0) {
-        await loadHaccpDocs()
-      }
+      setMessage(formatRepairWarehouseResult(result) + ' Odświeżam kartoteki…')
+      await loadHaccpDocs({ force: true })
+      setMessage(formatRepairWarehouseResult(result) + ' Lista K01 zaktualizowana.')
     } catch (err) {
       setMessage(`Błąd usuwania duplikatów: ${err?.message || err}. Uruchom w Supabase SQL: supabase/2026-v46-remove-duplicate-import-items.sql`)
     } finally {
@@ -7486,7 +7478,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       const ops = purgeResult?.operations ?? '?'
       const lots = (purgeResult?.lots ?? 0) + (purgeResult?.orphan_lots ?? 0)
-      setMessage(`Import usunięty. Skasowano ${ops} operacji i ${lots} partii. Możesz wgrać ten sam plik od nowa.`)
+      setMessage(`Import usunięty. Skasowano ${ops} operacji i ${lots} partii. Czyszczenie duplikatów K01…`)
       setImportPreview([])
       setRows([])
       setFileName('')
@@ -7495,6 +7487,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         await cleanupOrphanedDeletedImports(supabase)
       } catch (_) { /* v40 migration may not be deployed yet */ }
       await loadImports()
+      try {
+        const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setMessage })
+        await loadHaccpDocs({ force: true })
+        await loadFifoData()
+        setMessage(
+          `Import usunięty (operacje: ${ops}, partie: ${lots}). ${formatRepairWarehouseResult(repair)} Możesz wgrać ten sam plik od nowa.`
+        )
+      } catch (repairErr) {
+        setMessage(`Import usunięty, ale czyszczenie K01 nie powiodło się: ${repairErr?.message || repairErr}. Kliknij „Odśwież” w kartotekach.`)
+      }
     } catch (err) {
       const msg = String(err?.message || err)
       if (/permission denied|42501|function.*does not exist/i.test(msg)) {
@@ -7605,11 +7607,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
 
   async function setK01Supplier(doc, supplierName) {
-    if (!supabase || !doc) return
+    if (!supabase || !doc) return false
     const clean = cleanSupplierName(supplierName)
-    if (!clean) { setMessage('Wpisz faktyczne imię i nazwisko / nazwę dostawcy.'); return }
+    if (!clean) { setMessage('Wpisz faktyczne imię i nazwisko / nazwę dostawcy.'); return false }
     const nextData = { ...(doc.data || {}), faktyczny_dostawca: clean }
     try {
+      setMessage('Zapisywanie dostawcy K01…')
       const { error } = await supabase
         .from('haccp_documents')
         .update({ data: nextData, updated_at: new Date().toISOString() })
@@ -7634,16 +7637,28 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         if (prev.id === doc.id) return updated
         return prev
       })
-      setMessage('Zapisano faktycznego dostawcę dla wpisu K01.')
+      setMessage(`Zapisano dostawcę „${clean}” dla ${doc.document_no || 'K01'}.`)
+      return true
     } catch (err) {
       setMessage(`Błąd zapisu dostawcy: ${err.message}`)
+      return false
     }
   }
 
-  function promptK01Supplier(doc) {
+  async function promptK01Supplier(doc) {
     const current = getK01SupplierName(doc)
     const next = window.prompt('Podaj faktycznego dostawcę dla tego PZ (np. Sałasiński Edward):', current || '')
-    if (next !== null) setK01Supplier(doc, next)
+    if (next === null) return
+    if (!String(next).trim()) {
+      setMessage('Anulowano — wpisz nazwę dostawcy.')
+      return
+    }
+    setK01SupplierBusyId(doc.id)
+    try {
+      await setK01Supplier(doc, next)
+    } finally {
+      setK01SupplierBusyId(null)
+    }
   }
 
 
@@ -7729,7 +7744,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   }
 
   async function refreshHaccpAfterFifo() {
-    await loadHaccpDocs(); await loadK03TraceData(); await loadFifoData(); await loadPzManagementData()
+    await clickRefreshHaccp()
+    await loadK03TraceData()
+    await loadFifoData()
+    await loadPzManagementData()
     setFifoKartotekiDirty(false)
     setMessage('Kartoteki odświeżone po zmianach FIFO.')
   }
@@ -7755,7 +7773,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (!supabase) return 0
     const { data: k01Existing } = await supabase
       .from('haccp_documents')
-      .select('id, document_type, lot_id, lot_no')
+      .select('id, document_type, lot_id, lot_no, operation_id, document_no, document_date, product_name, qty')
       .eq('document_type', 'K01')
     const existingLotIds = new Set((k01Existing || []).map(d => d.lot_id).filter(Boolean))
 
@@ -7868,13 +7886,37 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     return 0
   }
 
+  async function clickRefreshHaccp(options = {}) {
+    if (!supabase || haccpBusy) return
+    const { syncK01 = true, repair = true } = options
+    setHaccpBusy(true)
+    setMessage('Odświeżanie kartotek HACCP…')
+    try {
+      if (repair) {
+        const repairResult = await repairWarehouseImportDuplicates(supabase, { onProgress: setMessage })
+        if ((repairResult?.k01_removed || 0) + (repairResult?.items_removed || 0) > 0) {
+          setMessage(`${formatRepairWarehouseResult(repairResult)} Wczytywanie listy…`)
+        }
+      }
+      await loadHaccpDocs({ syncK01, force: true, skipBusy: true })
+      setMessage('Kartoteki odświeżone.')
+    } catch (err) {
+      setMessage(`Błąd odświeżania kartotek: ${err?.message || err}`)
+    } finally {
+      setHaccpBusy(false)
+    }
+  }
+
   async function loadHaccpDocs(options = {}) {
     if (!supabase) return
     const generation = ++haccpLoadGenerationRef.current
     if (haccpLoadInFlightRef.current && !options.force) return haccpLoadInFlightRef.current
+    const manageBusy = !options.skipBusy
+    if (manageBusy) setHaccpBusy(true)
     const run = (async () => {
       try {
         if (options.syncK01) {
+          setMessage('Sprawdzanie brakujących kart K01…')
           const k01Added = await syncAutoK01Documents()
           if (k01Added > 0 && generation === haccpLoadGenerationRef.current) {
             setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
@@ -7900,6 +7942,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       } finally {
         if (generation === haccpLoadGenerationRef.current) {
           haccpLoadInFlightRef.current = null
+          if (manageBusy) setHaccpBusy(false)
         }
       }
     })()
@@ -8017,27 +8060,34 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setImportOrphanCount(orphanCount)
 
       if (!groupsToImport.length) {
-        setImportProgress('Sprawdzanie brakujących kart K01…')
+        setImportProgress('Czyszczenie duplikatów i sprawdzanie K01…')
         let k01Added = 0
+        let repairMsg = ''
         try {
+          const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
+          repairMsg = formatRepairWarehouseResult(repair)
           k01Added = await syncAutoK01Documents()
-          if (k01Added > 0) await loadHaccpDocs()
+          const repair2 = await repairWarehouseImportDuplicates(supabase)
+          if ((repair2?.k01_removed || 0) > 0) repairMsg = formatRepairWarehouseResult(repair2)
+          await loadHaccpDocs({ force: true, skipBusy: true })
         } catch (k01Err) {
           setMessage(
             (duplicateCount
               ? `Brak nowych dokumentów do zapisu (${duplicateCount} duplikatów w pliku). `
               : 'Brak dokumentów do zapisu. ') +
-            `K01: błąd uzupełniania — ${k01Err?.message || k01Err}`
+            `K01/czyszczenie: błąd — ${k01Err?.message || k01Err}`
           )
           return
         }
         setMessage(
           duplicateCount
             ? `Brak nowych dokumentów do zapisu. W pliku ${duplicateCount} numerów PZ/WZ jest już w bazie.` +
+              (repairMsg && repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : '') +
               (k01Added
                 ? ` Uzupełniono ${k01Added} brakujących kart K01 — sprawdź listę (wyczyść filtr dat Od/Do).`
-                : ` K01 bez zmian. Jeśli nadal brak wpisów po 06.07 — w Magazynie sprawdź, czy są partie PZ z lipca.`)
-            : 'Brak dokumentów do zapisu w wczytanym pliku.'
+                : ` K01 bez zmian.`)
+            : 'Brak dokumentów do zapisu w wczytanym pliku.' +
+              (repairMsg && repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : '')
         )
         return
       }
@@ -8062,27 +8112,37 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setK03UnfreezeSuggestions([])
       setK03UnfreezeBannerOpen(false)
 
-      setMessage(`${importMsgBase} Trwa tworzenie kart K01…`)
+      setMessage(`${importMsgBase} Czyszczenie duplikatów i tworzenie kart K01…`)
       importCheckCacheRef.current = null
       await loadImports()
 
-      void (async () => {
-        let k01Msg = ''
-        try {
-          const k01FromFile = await syncAutoK01ForImportFile(importedFileId)
-          const k01FromMissing = await syncAutoK01Documents()
-          const k01Added = k01FromFile + k01FromMissing
-          if (k01Added > 0) {
-            k01Msg = ` Utworzono/uzupełniono ${k01Added} kart K01 — sprawdź Dokumentacja HACCP → K01 (wyczyść filtr dat Od/Do).`
-            await loadHaccpDocs()
-          } else {
-            k01Msg = ' K01: brak nowych partii PZ do kart — jeśli spodziewasz się wpisów po 06.07, sprawdź komunikat „Do zapisu” przy wczytaniu pliku.'
-          }
-        } catch (k01Err) {
-          k01Msg = ` K01: błąd synchronizacji (${k01Err?.message || k01Err}) – Kartoteki → Odśwież.`
+      setImportProgress('Czyszczenie duplikatów (FIFO)…')
+      let repairMsg = ''
+      try {
+        const repairBefore = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
+        repairMsg = formatRepairWarehouseResult(repairBefore)
+
+        setImportProgress('Tworzenie kart K01…')
+        const k01FromFile = await syncAutoK01ForImportFile(importedFileId)
+        const k01FromMissing = await syncAutoK01Documents()
+        const k01Added = k01FromFile + k01FromMissing
+
+        setImportProgress('Końcowe czyszczenie duplikatów K01…')
+        const repairAfter = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
+        if ((repairAfter?.k01_removed || 0) + (repairAfter?.items_removed || 0) > 0) {
+          repairMsg = formatRepairWarehouseResult(repairAfter)
         }
-        setMessage(`${importMsgBase}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
-      })()
+
+        await loadHaccpDocs({ force: true, skipBusy: true })
+
+        const k01Msg = k01Added > 0
+          ? ` Utworzono ${k01Added} kart K01.`
+          : ' K01: bez nowych wpisów (partie już miały karty).'
+        const dedupeNote = repairMsg && repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : ''
+        setMessage(`${importMsgBase}${dedupeNote}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
+      } catch (k01Err) {
+        setMessage(`${importMsgBase} Błąd K01/czyszczenia: ${k01Err?.message || k01Err} — Kartoteki → Odśwież.`)
+      }
     } catch (err) {
       setMessage(formatImportNetworkError(err))
     } finally {
@@ -8152,7 +8212,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <label>Okres kontroli (miesiąc)
           <input type="month" value={dashboardMonth} onChange={e => setDashboardMonth(e.target.value)} />
         </label>
-        <button className="secondary" onClick={() => { loadHaccpDocs({ syncK01: true }); loadFifoData(); loadK03TraceData(); loadAuxMaterials() }}><RefreshCcw size={16}/> Odśwież dane</button>
+        <button className="secondary" disabled={haccpBusy} onClick={async () => { await clickRefreshHaccp(); loadFifoData(); loadK03TraceData(); loadAuxMaterials() }}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież dane'}</button>
       </div>
       <div className="compliance-summary-row">
         <span className={complianceStatusClass('ok')}>{dashboardCompliance.summary.ok} uzupełnione</span>
@@ -8281,7 +8341,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {fifoKartotekiDirty && <div className="warning inline-warning"><AlertTriangle size={18}/><div><b>Zmieniono dane FIFO.</b> Kartoteki mogą pokazywać stary układ. Kliknij „Odśwież kartoteki”.</div></div>}
       {renderFifoProgressBanner()}
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={recalculateFifoFullFromPzTab} disabled={fifoRecalculating}>Pełne FIFO (admin)</button><button className="secondary" onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> Odśwież kartoteki</button></div>
+      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={recalculateFifoFullFromPzTab} disabled={fifoRecalculating}>Pełne FIFO (admin)</button><button className="secondary" disabled={haccpBusy} onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież kartoteki'}</button></div>
       <div className="summary"><span>PZ razem: <b>{pzRows.length}</b></span><span>Nieprzypisane: <b>{pzRows.filter(r => r.status_key === 'wolna').length}</b></span><span>Częściowo: <b>{pzRows.filter(r => r.status_key === 'czesciowo').length}</b></span><span>Wykorzystane: <b>{pzRows.filter(r => r.status_key === 'wykorzystana').length}</b></span></div>
       <div className="form-grid compact"><label>Szukaj PZ / partii / produktu<input value={pzSearch} onChange={e => setPzSearch(e.target.value)} placeholder="np. PZ/001 albo Jab/001 albo truskawka" /></label><label>Status<select value={pzStatusFilter} onChange={e => setPzStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="wolna">Nieprzypisane</option><option value="czesciowo">Częściowo</option><option value="wykorzystana">Wykorzystane</option></select></label></div>
       <div className="table-wrap small"><table><thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Asortyment</th><th>Grupa</th><th>Ilość PZ</th><th>Przypisano</th><th>Pozostało</th><th>Status</th><th>Akcje</th></tr></thead><tbody>{visiblePzRows.map(row => { const editDate = pzEditDates[row.id] ?? String(row.production_date || row.operation_date || '').slice(0, 10); return <tr key={row.id}><td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setPzEditDates(prev => ({ ...prev, [row.id]: e.target.value }))} /></td><td><b>{row.document_no || '-'}</b></td><td>{row.lot_no}</td><td>{row.product_name}</td><td>{row.product_group}</td><td>{Number(row.initial_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.allocated_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.calculated_remaining_qty || 0).toLocaleString('pl-PL')}</td><td><span className={`pill pz-status-${row.status_key}`}>{row.status_label}</span></td><td className="row-actions"><button className="mini secondary" onClick={() => savePzDate(row)}>Zapisz datę</button></td></tr> })}</tbody></table></div>
@@ -8701,7 +8761,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <p className="hint">{HACCPCARDS.find(c => c[0] === docsFilter)?.[2]}</p>
           </div>
           <div className="actions docs-actions">
-            <button className="secondary" onClick={() => { loadHaccpDocs({ syncK01: true }); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> Odśwież</button>
+            <button className="secondary" disabled={haccpBusy} onClick={async () => { await clickRefreshHaccp(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież'}</button>
             {docsFilter === 'K03' && <>
               <button className="secondary" onClick={() => runResyncOpenK03(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'K03…' : 'Napraw otwarte K03'}</button>
               <button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'FIFO…' : 'Uzupełnij FIFO'}</button>

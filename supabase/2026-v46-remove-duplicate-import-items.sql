@@ -66,6 +66,30 @@ BEGIN
 
   v_items := array_length(v_item_ids, 1);
 
+  -- Pass 2: zduplikowane K01 (ten sam numer PZ + data + produkt + kg) — FIFO: zostaw najstarszy id
+  SELECT array_agg(id)
+  INTO v_k01_ids
+  FROM (
+    SELECT id,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          COALESCE(document_no, ''),
+          COALESCE(document_date::text, ''),
+          COALESCE(LOWER(TRIM(product_name)), ''),
+          ROUND(qty::numeric, 3)
+        ORDER BY id ASC
+      ) AS rn
+    FROM haccp_documents
+    WHERE document_type = 'K01'
+  ) ranked
+  WHERE rn > 1;
+
+  IF v_k01_ids IS NOT NULL AND array_length(v_k01_ids, 1) > 0 THEN
+    DELETE FROM haccp_document_history WHERE document_id = ANY(v_k01_ids);
+    DELETE FROM haccp_documents WHERE id = ANY(v_k01_ids);
+    v_k01 := COALESCE(v_k01, 0) + array_length(v_k01_ids, 1);
+  END IF;
+
   RETURN jsonb_build_object(
     'items_removed', v_items,
     'lots_removed', COALESCE(v_lots, 0),

@@ -1,4 +1,13 @@
-export const K01_ENGINE_VERSION = '1.0'
+export const K01_ENGINE_VERSION = '1.1'
+
+/** Klucz logicznej linii K01 (FIFO: jeden wpis na PZ + data + produkt + kg). */
+export function k01LineDedupeKey(doc) {
+  const qty = Math.round(Number(doc?.qty || 0) * 1000) / 1000
+  const prod = String(doc?.product_name || '').trim().toLowerCase()
+  const no = String(doc?.document_no || '').trim()
+  const date = String(doc?.document_date || '').slice(0, 10)
+  return `${no}|${date}|${prod}|${qty}`
+}
 
 export function isIncomingLotOperation(op) {
   if (!op) return false
@@ -61,14 +70,24 @@ export function buildSyntheticK01DocsFromTrace(trace = {}, haccpDocs = [], optio
       .filter(d => d.document_type === 'K01' && d.lot_no)
       .map(d => d.lot_no)
   )
+  const existingLineKeys = new Set(
+    (haccpDocs || [])
+      .filter(d => d.document_type === 'K01')
+      .map(k01LineDedupeKey)
+  )
 
   const result = []
+  const pendingLineKeys = new Set()
   for (const lot of lots || []) {
     const op = opMap.get(lot.source_operation_id)
     if (!isIncomingLotOperation(op)) continue
     if (existingLotIds.has(lot.id)) continue
     if (lot.lot_no && existingLotNos.has(lot.lot_no)) continue
-    result.push(buildK01DocFromLot(lot, op, options))
+    const draft = buildK01DocFromLot(lot, op, options)
+    const lineKey = k01LineDedupeKey(draft)
+    if (existingLineKeys.has(lineKey) || pendingLineKeys.has(lineKey)) continue
+    pendingLineKeys.add(lineKey)
+    result.push(draft)
   }
 
   return result.sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)))
