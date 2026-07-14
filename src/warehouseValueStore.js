@@ -107,6 +107,7 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
       .select(LINE_SELECT)
       .order('issue_date', { ascending: true })
       .order('document_no', { ascending: true })
+      .order('row_no', { ascending: true, nullsFirst: false })
       .range(from, to)
     if (error) throw error
     loaded += data?.length || 0

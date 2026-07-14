@@ -11,16 +11,17 @@ import {
   computeMonthlyStockValueReportFromExcel,
   parseExcelFilesForReport,
   formatReportTitleDate,
-  buildReportTitle
+  buildReportTitle,
+  compareStockValueReports
 } from './monthlyStockValueFromExcel'
 import {
   fetchAllWarehouseValueLines,
   fetchWarehouseValueMeta,
+  fetchWarehouseValueStats,
   appendWarehouseValueFromParsedFiles,
   deleteWarehouseValueBatch,
   saveWarehouseValueSnapshot,
   fetchWarehouseValueSnapshots,
-  fetchWarehouseValueSnapshotByDate,
   deleteWarehouseValueSnapshot,
   clearAllWarehouseValueData,
   summarizeBatchRow,
@@ -112,25 +113,6 @@ function ReportDatePicker({ value, onChange, disabled }) {
   )
 }
 
-function reportFromSnapshot(snap, fileNames = []) {
-  if (!snap?.as_of_date) return null
-  const date = String(snap.as_of_date).slice(0, 10)
-  const payload = {
-    source: 'snapshot',
-    asOfDate: date,
-    asOfDatePl: formatReportTitleDate(date),
-    yearMonth: snap.year_month || date.slice(0, 7),
-    fileNames,
-    rows: snap.rows || [],
-    totals: snap.totals || {},
-    diagnostics: snap.diagnostics || {},
-    reportTitle: snap.report_title || buildReportTitle({ asOfDate: date, totals: snap.totals }),
-    message: 'Podgląd ze snapshotu — przeliczam na świeżych danych z bazy…'
-  }
-  if (!payload.reportTitle) payload.reportTitle = buildReportTitle(payload)
-  return payload
-}
-
 export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, printHtmlInIframe, setMessage }) {
   const [asOfDate, setAsOfDate] = useState(defaultAsOfDate)
   const [loading, setLoading] = useState(false)
@@ -138,6 +120,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [calcLoading, setCalcLoading] = useState(false)
   const [loadProgress, setLoadProgress] = useState({ loaded: 0, total: 0 })
   const [lineCountHint, setLineCountHint] = useState(0)
+  const [integrityNote, setIntegrityNote] = useState('')
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
@@ -175,18 +158,23 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       if (!meta.lineCount) {
         setExcelRows([])
         setReport(null)
+        setIntegrityNote('')
         return
       }
-
-      const names = (meta.batches || []).map(b => b.file_name).filter(Boolean)
-      const previewSnap = await fetchWarehouseValueSnapshotByDate(supabase, asOfDateRef.current)
-      if (previewSnap) setReport(reportFromSnapshot(previewSnap, names))
 
       const rows = await fetchAllWarehouseValueLines(supabase, {
         forceRefresh,
         onProgress: (loaded, total) => setLoadProgress({ loaded, total })
       })
       setExcelRows(rows)
+      const skipped = rows.length - (computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current).diagnostics?.excelLines || 0)
+      setIntegrityNote(
+        rows.length !== meta.lineCount
+          ? `Uwaga: w bazie ${meta.lineCount} wierszy, wczytano ${rows.length} — odśwież ponownie.`
+          : skipped > 0
+            ? `${skipped} wierszy w bazie pominięto przy przeliczeniu (MM, brak daty lub ilości).`
+            : ''
+      )
       if (!silent && rows.length) {
         setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${meta.batchCount} importów).`)
       }
@@ -214,6 +202,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     if (!excelRows.length) {
       setReport(null)
       setCalcLoading(false)
+      setIntegrityNote('')
       return
     }
     setCalcLoading(true)
@@ -242,17 +231,36 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         parsedFiles.push({ fileName: file.name, rows: part.rows })
         skippedMm += part.skippedMm || 0
       }
+      const flatRows = parsedFiles.flatMap(f => f.rows)
+      const fileReport = computeMonthlyStockValueReportFromExcel(flatRows, asOfDateRef.current, {
+        fileNames: parsedFiles.map(f => f.fileName)
+      })
+      const fileLineCount = fileReport.diagnostics?.excelLines || 0
       const { totalAdded, totalDuplicates } = await appendWarehouseValueFromParsedFiles(
         supabase,
         parsedFiles,
         { uploadedBy: savedBy }
       )
       await reloadFromSupabase(true, { forceRefresh: true })
-      const linesWithPrice = parsedFiles.flatMap(f => f.rows).filter(r => Number(r.unitNetPrice) > 0).length
+      const [dbRows, stats] = await Promise.all([
+        fetchAllWarehouseValueLines(supabase, { forceRefresh: true }),
+        fetchWarehouseValueStats(supabase)
+      ])
+      const dbReport = computeMonthlyStockValueReportFromExcel(dbRows, asOfDateRef.current, {
+        fileNames: (stats.batches || []).map(b => b.file_name).filter(Boolean)
+      })
+      const verify = stats.batchCount === 1
+        ? compareStockValueReports(fileReport, dbReport)
+        : { ok: true, diffs: [] }
+      const linesWithPrice = flatRows.filter(r => Number(r.unitNetPrice) > 0).length
       const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
       const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
+      const fileHint = `Plik: ${fileLineCount} linii raportowych`
+      const verifyHint = !verify.ok && totalAdded > 0
+        ? ' · UWAGA: wynik z bazy różni się od pliku — wyczyść magazyn wartości i wgraj Excel ponownie.'
+        : ''
       setMessage?.(
-        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${priceHint}. ` +
+        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${priceHint}. ${fileHint}${verifyHint}. ` +
         (totalAdded === 0 ? 'Wszystkie wiersze były już w bazie.' : 'Kolejne miesiące doklejaj — nie trzeba wgrywać historii od nowa.')
       )
     } catch (err) {
@@ -355,12 +363,14 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. FIFO {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        WZ rozlicza PZ wg <b>wariantu produktu</b> (jak w magazynie HACCP — np. WZ „Truskawka” może brać z PZ szypułkowych). Importy się <b>doklejają</b> — reszta z poprzedniego miesiąca wchodzi w stan automatycznie.
+        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w Excelu (normalizacja spacji i polskich znaków). Silnik {EXCEL_REPORT_VERSION} — identyczny wynik z pliku i z Supabase. Importy się <b>doklejają</b>.
       </p>
 
       {!isSupabaseConfigured && (
         <p className="hint inline-warning">Brak Supabase w .env — raport wymaga bazy. Skopiuj .env.example i uruchom migrację SQL.</p>
       )}
+
+      {integrityNote && <p className="hint inline-warning">{integrityNote}</p>}
 
       <section className="card stock-excel-panel">
         <h3><Database size={18} /> Magazyn danych (Supabase)</h3>
@@ -471,7 +481,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         <p className="hint">Wgraj plik Excel — dane zostaną w Supabase i będą dostępne przy kolejnych logowaniach.</p>
       )}
 
-      {report && (excelRows.length > 0 || calcLoading || storeLoading) && (
+      {report && excelRows.length > 0 && (
         <div className="summary r14-summary">
           <span>Stan na: <b>{report.asOfDatePl || formatReportTitleDate(asOfDate)}</b></span>
           <span>Przybyło (01.–{report.asOfDatePl?.replace(/r\.$/, '') || '…'}): <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b></span>
