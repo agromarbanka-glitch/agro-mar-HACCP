@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
-import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
+import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
@@ -6582,18 +6582,22 @@ function App() {
     const docNo = normalizeDocumentNo(row.documentNo)
     const key = `${row.operation}|${docNo}`
     const rowDate = resolveDocumentIssueDate(row.issueDate, docNo)
+    const dateFromNo = inferDateFromDocumentNo(docNo)
+    const preferredDate = (documentNoHasExplicitDate(docNo) && dateFromNo) ? dateFromNo : rowDate
     if (!groups.has(key)) {
       groups.set(key, {
         operation: row.operation,
         documentNo: docNo,
-        issueDate: rowDate,
+        issueDate: preferredDate,
         invoiceNo: row.invoiceNo || null,
         contractorName: row.contractorName || null,
         notes: row.notes || null,
         items: []
       })
-    } else if (rowDate && !groups.get(key).issueDate) {
-      groups.get(key).issueDate = rowDate
+    } else {
+      const g = groups.get(key)
+      if (documentNoHasExplicitDate(docNo) && dateFromNo) g.issueDate = dateFromNo
+      else if (preferredDate && !g.issueDate) g.issueDate = preferredDate
     }
     groups.get(key).items.push(row)
   }
@@ -7769,20 +7773,40 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
   }
 
-  async function syncAutoK01Documents(lotsData = null) {
+  async function syncAutoK01Documents(lotsData = null, { minProductionDate = null } = {}) {
     if (!supabase) return 0
-    const { data: k01Existing } = await supabase
-      .from('haccp_documents')
-      .select('id, document_type, lot_id, lot_no, operation_id, document_no, document_date, product_name, qty')
-      .eq('document_type', 'K01')
-    const existingLotIds = new Set((k01Existing || []).map(d => d.lot_id).filter(Boolean))
+
+    const k01Existing = []
+    let k01Offset = 0
+    const k01Page = 1000
+    while (true) {
+      const { data: chunk, error: k01Err } = await supabase
+        .from('haccp_documents')
+        .select('id, document_type, lot_id, lot_no, operation_id, document_no, document_date, product_name, qty')
+        .eq('document_type', 'K01')
+        .order('id', { ascending: true })
+        .range(k01Offset, k01Offset + k01Page - 1)
+      if (k01Err) throw k01Err
+      k01Existing.push(...(chunk || []))
+      if (!chunk?.length || chunk.length < k01Page) break
+      k01Offset += k01Page
+    }
+    const existingLotIds = new Set(k01Existing.map(d => d.lot_id).filter(Boolean))
 
     let lots = lotsData
     if (!lots) {
-      const { data: lotsRaw, error: lotsErr } = await supabase
+      const since = minProductionDate || (() => {
+        const d = new Date()
+        d.setDate(d.getDate() - 120)
+        return d.toISOString().slice(0, 10)
+      })()
+      let query = supabase
         .from('lots')
         .select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, storage_chamber_id')
-        .limit(50000)
+        .gte('production_date', since)
+        .order('id', { ascending: true })
+        .limit(20000)
+      const { data: lotsRaw, error: lotsErr } = await query
       if (lotsErr) throw lotsErr
       const productIds = Array.from(new Set((lotsRaw || []).map(l => l.product_id).filter(Boolean)))
       const chamberIds = Array.from(new Set((lotsRaw || []).map(l => l.storage_chamber_id).filter(Boolean)))
@@ -7813,7 +7837,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       : []
 
     const trace = { lots: candidateLots, operations }
-    const pending = buildSyntheticK01DocsFromTrace(trace, k01Existing || [], {
+    const pending = buildSyntheticK01DocsFromTrace(trace, k01Existing, {
       defaultSignature: defaultK01Employee || ''
     })
     if (!pending.length) return 0
@@ -7917,7 +7941,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       try {
         if (options.syncK01) {
           setMessage('Sprawdzanie brakujących kart K01…')
-          const k01Added = await syncAutoK01Documents()
+          const k01Added = await syncAutoK01Documents(null, { minProductionDate: options.minProductionDate })
           if (k01Added > 0 && generation === haccpLoadGenerationRef.current) {
             setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
           }
@@ -8060,15 +8084,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setImportOrphanCount(orphanCount)
 
       if (!groupsToImport.length) {
-        setImportProgress('Czyszczenie duplikatów i sprawdzanie K01…')
+        setImportProgress('Korygowanie dat, czyszczenie duplikatów i K01…')
         let k01Added = 0
         let repairMsg = ''
         try {
           const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
           repairMsg = formatRepairWarehouseResult(repair)
-          k01Added = await syncAutoK01Documents()
-          const repair2 = await repairWarehouseImportDuplicates(supabase)
-          if ((repair2?.k01_removed || 0) > 0) repairMsg = formatRepairWarehouseResult(repair2)
+          k01Added = await syncAutoK01Documents(null, { minProductionDate: '2026-06-01' })
           await loadHaccpDocs({ force: true, skipBusy: true })
         } catch (k01Err) {
           setMessage(
@@ -8112,33 +8134,22 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setK03UnfreezeSuggestions([])
       setK03UnfreezeBannerOpen(false)
 
-      setMessage(`${importMsgBase} Czyszczenie duplikatów i tworzenie kart K01…`)
+      setMessage(`${importMsgBase} Tworzenie kart K01…`)
       importCheckCacheRef.current = null
       await loadImports()
 
-      setImportProgress('Czyszczenie duplikatów (FIFO)…')
-      let repairMsg = ''
       try {
-        const repairBefore = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
-        repairMsg = formatRepairWarehouseResult(repairBefore)
+        setImportProgress('Tworzenie kart K01 z tego importu…')
+        const k01Added = await syncAutoK01ForImportFile(importedFileId)
 
-        setImportProgress('Tworzenie kart K01…')
-        const k01FromFile = await syncAutoK01ForImportFile(importedFileId)
-        const k01FromMissing = await syncAutoK01Documents()
-        const k01Added = k01FromFile + k01FromMissing
-
-        setImportProgress('Końcowe czyszczenie duplikatów K01…')
-        const repairAfter = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
-        if ((repairAfter?.k01_removed || 0) + (repairAfter?.items_removed || 0) > 0) {
-          repairMsg = formatRepairWarehouseResult(repairAfter)
-        }
+        setImportProgress('Korygowanie dat i usuwanie duplikatów…')
+        const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
+        const repairMsg = formatRepairWarehouseResult(repair)
 
         await loadHaccpDocs({ force: true, skipBusy: true })
 
-        const k01Msg = k01Added > 0
-          ? ` Utworzono ${k01Added} kart K01.`
-          : ' K01: bez nowych wpisów (partie już miały karty).'
-        const dedupeNote = repairMsg && repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : ''
+        const k01Msg = k01Added > 0 ? ` Utworzono ${k01Added} kart K01.` : ' K01: partie już miały karty.'
+        const dedupeNote = repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : ''
         setMessage(`${importMsgBase}${dedupeNote}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
       } catch (k01Err) {
         setMessage(`${importMsgBase} Błąd K01/czyszczenia: ${k01Err?.message || k01Err} — Kartoteki → Odśwież.`)

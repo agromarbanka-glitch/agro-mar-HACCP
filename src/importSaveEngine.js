@@ -2,7 +2,7 @@
  * Zapis importu Excel do Supabase – batch + retry (mniej zapytań, odporność na NetworkError).
  */
 
-import { normalizeDocumentNo } from './excelImport.js'
+import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
 const OP_CHUNK = 100
@@ -953,6 +953,55 @@ async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
 }
 
 /**
+ * Poprawia daty operacji/partii/K01 wg numeru PZ (np. 07/07/2026 zamiast błędnego forward-fill 06.07).
+ */
+export async function repairDatesFromDocumentNumbers(client, { onProgress } = {}) {
+  if (!client) throw new Error('Brak Supabase.')
+  onProgress?.('Korygowanie dat PZ z numerów dokumentów…')
+  let fixed = 0
+  let offset = 0
+  const pageSize = 400
+  while (true) {
+    const { data: ops, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, document_no, operation_date')
+        .ilike('document_no', 'PZ/%')
+        .order('id', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+    )
+    if (error) throw error
+    if (!ops?.length) break
+
+    for (const op of ops) {
+      if (!documentNoHasExplicitDate(op.document_no)) continue
+      const correct = inferDateFromDocumentNo(op.document_no)
+      const current = String(op.operation_date || '').slice(0, 10)
+      if (!correct || correct === current) continue
+
+      await withImportRetry(() =>
+        client.from('operations').update({ operation_date: correct }).eq('id', op.id)
+      )
+      await withImportRetry(() =>
+        client.from('lots').update({ production_date: correct }).eq('source_operation_id', op.id)
+      )
+      await withImportRetry(() =>
+        client
+          .from('haccp_documents')
+          .update({ document_date: correct })
+          .eq('operation_id', op.id)
+          .eq('document_type', 'K01')
+      )
+      fixed += 1
+    }
+
+    if (ops.length < pageSize) break
+    offset += pageSize
+  }
+  return { dates_fixed: fixed }
+}
+
+/**
  * Usuwa zduplikowane K01 (FIFO: zostaw najstarszy id na linię PZ).
  * Działa z przeglądarki — nie wymaga migracji SQL.
  */
@@ -960,22 +1009,31 @@ export async function removeDuplicateK01Documents(client, { onProgress } = {}) {
   if (!client) throw new Error('Brak Supabase.')
   onProgress?.('Sprawdzanie zduplikowanych kart K01…')
 
-  const { data, error } = await withImportRetry(() =>
-    client
-      .from('haccp_documents')
-      .select('id, document_no, document_date, product_name, qty')
-      .eq('document_type', 'K01')
-      .order('id', { ascending: true })
-  )
-  if (error) throw error
-
+  const pageSize = 1000
+  let offset = 0
   const toDelete = []
   const seen = new Set()
-  for (const row of data || []) {
-    const key = k01LineDedupeKey(row)
-    if (seen.has(key)) toDelete.push(row.id)
-    else seen.add(key)
+
+  while (true) {
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('haccp_documents')
+        .select('id, document_no, document_date, product_name, qty')
+        .eq('document_type', 'K01')
+        .order('id', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+    )
+    if (error) throw error
+    const chunk = data || []
+    for (const row of chunk) {
+      const key = k01LineDedupeKey(row)
+      if (seen.has(key)) toDelete.push(row.id)
+      else seen.add(key)
+    }
+    if (chunk.length < pageSize) break
+    offset += pageSize
   }
+
   if (!toDelete.length) return 0
 
   onProgress?.(`Usuwanie ${toDelete.length} zduplikowanych kart K01…`)
@@ -988,12 +1046,14 @@ export function formatRepairWarehouseResult(result = {}) {
   const items = result.items_removed ?? 0
   const lots = result.lots_removed ?? 0
   const k01 = result.k01_removed ?? 0
-  if (!items && !lots && !k01) return 'Duplikaty: brak do usunięcia.'
+  const dates = result.dates_fixed ?? 0
+  if (!items && !lots && !k01 && !dates) return 'Duplikaty: brak do usunięcia.'
   const parts = []
+  if (dates) parts.push(`${dates} dat PZ`)
   if (items) parts.push(`${items} pozycji`)
   if (lots) parts.push(`${lots} partii`)
   if (k01) parts.push(`${k01} kart K01`)
-  return `Usunięto duplikaty: ${parts.join(', ')}.`
+  return `Naprawiono: ${parts.join(', ')}.`
 }
 
 /**
@@ -1003,12 +1063,15 @@ export function formatRepairWarehouseResult(result = {}) {
 export async function repairWarehouseImportDuplicates(client, { onProgress } = {}) {
   if (!client) throw new Error('Brak Supabase.')
   const notify = msg => onProgress?.(msg)
+
+  const dateRepair = await repairDatesFromDocumentNumbers(client, { onProgress })
   notify('Czyszczenie duplikatów magazynu (FIFO)…')
 
-  let result = { items_removed: 0, lots_removed: 0, k01_removed: 0, mode: 'client' }
+  let result = { items_removed: 0, lots_removed: 0, k01_removed: 0, dates_fixed: dateRepair.dates_fixed || 0, mode: 'client' }
   try {
     const rpc = await removeDuplicateIncomingOperationItems(client, { onProgress })
-    result = { ...result, ...rpc, mode: 'rpc' }
+    result = { ...result, ...rpc, dates_fixed: (dateRepair.dates_fixed || 0) + (rpc.dates_fixed || 0) }
+    result.mode = 'rpc'
   } catch (err) {
     if (!/function.*does not exist/i.test(String(err?.message || ''))) throw err
     notify('Migracja v46 niedostępna — czyszczę duplikaty K01 z przeglądarki…')

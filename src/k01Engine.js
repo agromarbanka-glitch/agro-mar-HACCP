@@ -1,11 +1,17 @@
-export const K01_ENGINE_VERSION = '1.1'
+import { inferDateFromDocumentNo, resolveDocumentIssueDate } from './excelImport.js'
 
-/** Klucz logicznej linii K01 (FIFO: jeden wpis na PZ + data + produkt + kg). */
+export const K01_ENGINE_VERSION = '1.2'
+
+/** Klucz logicznej linii K01 (FIFO: jeden wpis na PZ + data + kg). */
 export function k01LineDedupeKey(doc) {
   const qty = Math.round(Number(doc?.qty || 0) * 1000) / 1000
-  const prod = String(doc?.product_name || '').trim().toLowerCase()
   const no = String(doc?.document_no || '').trim()
-  const date = String(doc?.document_date || '').slice(0, 10)
+  const dateFromNo = inferDateFromDocumentNo(no)
+  const date = dateFromNo || String(doc?.document_date || '').slice(0, 10)
+  if (/^PZ\//i.test(no)) {
+    return `${no}|${date}|${qty}`
+  }
+  const prod = String(doc?.product_name || '').trim().toLowerCase()
   return `${no}|${date}|${prod}|${qty}`
 }
 
@@ -30,7 +36,10 @@ export function normalizeK01Data(data = {}, signedBy = '') {
 
 export function buildK01DocFromLot(lot, operation, options = {}) {
   const op = operation || {}
-  const date = String(op.operation_date || lot.production_date || lot.created_at || '').slice(0, 10)
+  const date = resolveDocumentIssueDate(
+    op.operation_date || lot.production_date || lot.created_at || '',
+    op.document_no || ''
+  ) || String(lot.production_date || lot.created_at || '').slice(0, 10)
   const productName = lot.products?.name || lot.product_name || ''
   const signature = options.defaultSignature || ''
   return {

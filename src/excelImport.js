@@ -233,12 +233,13 @@ export function forwardFillExcelRows(rows) {
 
     const prevDocumentNo = last.documentNo
     if (looksLikeWarehouseDocumentNo(documentNo) && prevDocumentNo && documentNo !== prevDocumentNo) {
-      // Nie kopiuj daty z poprzedniego dokumentu (np. WZ → PZ) – tylko w obrębie tego samego nr.
-      last.issueDate = ''
+      last.issueDate = inferDateFromDocumentNo(documentNo) || ''
     }
 
     let issueDate = String(row.issueDate || '').trim()
     if (issueDate) {
+      const resolved = resolveDocumentIssueDate(issueDate, documentNo)
+      issueDate = resolved || issueDate
       last.issueDate = issueDate
     } else if (last.issueDate) {
       // Puste komórki daty pod pierwszym wierszem dokumentu = ta sama data co wyżej (ten sam nr).
@@ -285,9 +286,23 @@ function parseExcelDate(value) {
   return ''
 }
 
-/** Miesiąc/rok z nr PZ/WZ (np. PZ/016/06/2026 → ostatni dzień 06/2026). */
+/** Czy numer PZ/WZ zawiera pełną datę DD/MM/RRRR (np. PZ/018/07/07/2026). */
+export function documentNoHasExplicitDate(documentNo) {
+  return /\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/.test(normalizeDocumentNo(documentNo))
+}
+
+/** Data z numeru PZ/WZ: pełna DD/MM/RRRR albo (stary format) ostatni dzień miesiąca MM/RRRR. */
 export function inferDateFromDocumentNo(documentNo) {
   const norm = normalizeDocumentNo(documentNo)
+  const full = norm.match(/\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/)
+  if (full) {
+    const day = Number(full[1])
+    const month = Number(full[2])
+    const year = Number(full[3])
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2000 && year <= 2100) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    }
+  }
   const m = norm.match(/\/(\d{1,2})\/(\d{4})$/)
   if (!m) return ''
   const month = Number(m[1])
@@ -297,11 +312,13 @@ export function inferDateFromDocumentNo(documentNo) {
   return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
 }
 
-/** Data dokumentu: Excel → nr PZ/WZ (bez dzisiejszej daty). */
+/** Data dokumentu: numer PZ/WZ (gdy ma dzień) → Excel → numer bez dnia. */
 export function resolveDocumentIssueDate(issueDate, documentNo) {
+  const fromDocNo = inferDateFromDocumentNo(documentNo)
+  if (fromDocNo && documentNoHasExplicitDate(documentNo)) return fromDocNo
   const parsed = parseExcelDate(issueDate)
   if (parsed) return parsed
-  return inferDateFromDocumentNo(documentNo)
+  return fromDocNo
 }
 
 function parseQty(value) {

@@ -66,7 +66,30 @@ BEGIN
 
   v_items := array_length(v_item_ids, 1);
 
-  -- Pass 2: zduplikowane K01 (ten sam numer PZ + data + produkt + kg) — FIFO: zostaw najstarszy id
+  -- Pass 2: zduplikowane K01 (ten sam PZ + kg, FIFO po id) — bez product_name (bywa puste)
+  SELECT array_agg(id)
+  INTO v_k01_ids
+  FROM (
+    SELECT id,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          COALESCE(document_no, ''),
+          ROUND(qty::numeric, 3)
+        ORDER BY id ASC
+      ) AS rn
+    FROM haccp_documents
+    WHERE document_type = 'K01'
+      AND COALESCE(document_no, '') LIKE 'PZ/%'
+  ) ranked
+  WHERE rn > 1;
+
+  IF v_k01_ids IS NOT NULL AND array_length(v_k01_ids, 1) > 0 THEN
+    DELETE FROM haccp_document_history WHERE document_id = ANY(v_k01_ids);
+    DELETE FROM haccp_documents WHERE id = ANY(v_k01_ids);
+    v_k01 := COALESCE(v_k01, 0) + array_length(v_k01_ids, 1);
+  END IF;
+
+  -- Pass 3: pozostałe typy K01 (MM itd.) — numer + data + produkt + kg
   SELECT array_agg(id)
   INTO v_k01_ids
   FROM (
@@ -81,6 +104,7 @@ BEGIN
       ) AS rn
     FROM haccp_documents
     WHERE document_type = 'K01'
+      AND COALESCE(document_no, '') NOT LIKE 'PZ/%'
   ) ranked
   WHERE rn > 1;
 
