@@ -75,6 +75,8 @@ export async function getExistingOperationsForImport(client, groups) {
       details.set(key, {
         documentNo: op.document_no,
         operationType: op.operation_type,
+        operationId: op.id,
+        operationDate: op.operation_date || null,
         importFilename: imp?.filename || null,
         importDeleted: Boolean(imp?.deleted_at),
         createdAt: op.created_at,
@@ -90,12 +92,12 @@ export async function getExistingOperationsForImport(client, groups) {
     let error
     ;({ data, error } = await withImportRetry(() =>
       client.from('operations')
-        .select('id, operation_type, document_no, imported_file_id, created_at, imported_files(filename, deleted_at, status)')
+        .select('id, operation_type, document_no, operation_date, imported_file_id, created_at, imported_files(filename, deleted_at, status)')
         .in('document_no', queryNos)
     ))
     if (error) {
       ;({ data, error } = await withImportRetry(() =>
-        client.from('operations').select('id, operation_type, document_no, imported_file_id, created_at').in('document_no', queryNos)
+        client.from('operations').select('id, operation_type, document_no, operation_date, imported_file_id, created_at').in('document_no', queryNos)
       ))
       if (error) throw error
       const fileIds = [...new Set((data || []).map(o => o.imported_file_id).filter(Boolean))]
@@ -138,6 +140,201 @@ export function splitImportGroupsByExisting(groups, existingKeys) {
     else fresh.push(g)
   }
   return { duplicates, fresh }
+}
+
+function defaultNormalizeText(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+/** Klucz pozycji do porównania import ↔ baza (produkt + kg). */
+export function importItemMatchKey(row, deps = {}) {
+  const norm = deps.normalizeText || defaultNormalizeText
+  const canon = deps.canonicalProductName || (s => s)
+  const name = norm(canon(row.productName) || row.productName || '')
+  const qty = Math.round(Math.abs(Number(row.qty) || 0) * 1000) / 1000
+  return `${name}|${qty}`
+}
+
+function storedItemMatchKey(item, deps = {}) {
+  const norm = deps.normalizeText || defaultNormalizeText
+  const name = norm(item.raw_product_name || item.products?.name || '')
+  const qty = Math.round(Math.abs(Number(item.qty) || 0) * 1000) / 1000
+  return `${name}|${qty}`
+}
+
+/** Porównuje pozycje Excel z zapisem w bazie — nowe linie vs zmiany ilości/dat. */
+export function diffImportGroupAgainstStored(group, storedOp, storedItems, deps = {}) {
+  const storedDate = String(storedOp?.operationDate || storedOp?.operation_date || '').slice(0, 10)
+  const importDate = String(group?.issueDate || '').slice(0, 10)
+  const dateChanged = Boolean(storedDate && importDate && storedDate !== importDate)
+
+  const pool = (storedItems || []).map(item => storedItemMatchKey(item, deps))
+  const newItems = []
+  for (const row of group?.items || []) {
+    const key = importItemMatchKey(row, deps)
+    const idx = pool.indexOf(key)
+    if (idx >= 0) pool.splice(idx, 1)
+    else newItems.push(row)
+  }
+  const removedCount = pool.length
+  const qtyChanged = removedCount > 0
+
+  const changes = []
+  if (dateChanged) changes.push(`data dokumentu: ${storedDate} → ${importDate}`)
+  if (qtyChanged) changes.push(`zmiana pozycji (brakuje ${removedCount} linii w pliku vs baza)`)
+  if (newItems.length) changes.push(`${newItems.length} nowych linii w pliku`)
+
+  return {
+    newItems,
+    removedCount,
+    dateChanged,
+    hasContentChanges: dateChanged || qtyChanged,
+    changes
+  }
+}
+
+export function partitionImportGroups(groups, existingKeys) {
+  const fresh = []
+  const existing = []
+  for (const g of groups || []) {
+    if (existingKeys.has(operationImportKey(g))) existing.push(g)
+    else fresh.push(g)
+  }
+  return { fresh, existing }
+}
+
+async function fetchOperationItemsByOpIds(client, opIds) {
+  const byOp = new Map()
+  const unique = [...new Set((opIds || []).filter(Boolean))]
+  for (let i = 0; i < unique.length; i += 100) {
+    const chunk = unique.slice(i, i + 100)
+    const { data, error } = await withImportRetry(() =>
+      client.from('operation_items')
+        .select('id, operation_id, product_id, qty, direction, raw_product_name, products(name)')
+        .in('operation_id', chunk)
+    )
+    if (error) throw error
+    for (const item of data || []) {
+      const list = byOp.get(item.operation_id) || []
+      list.push(item)
+      byOp.set(item.operation_id, list)
+    }
+  }
+  return byOp
+}
+
+/**
+ * Dokleja nowe pozycje do dokumentów już w bazie (kontynuacja miesiąca).
+ * @returns {{ importedItems, createdLots, mergedDocuments, unchangedDocuments, changedDocuments }}
+ */
+export async function appendNewItemsFromExistingDocuments(client, existingGroups, details, deps, { onProgress } = {}) {
+  const notify = msg => onProgress?.(msg)
+  if (!client || !existingGroups?.length) {
+    return { importedItems: 0, createdLots: 0, mergedDocuments: 0, unchangedDocuments: 0, changedDocuments: [] }
+  }
+
+  const opIds = existingGroups
+    .map(g => details.get(operationImportKey(g))?.operationId)
+    .filter(Boolean)
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+
+  const productNames = []
+  for (const group of existingGroups) {
+    for (const row of group.items || []) productNames.push(row.productName)
+  }
+  notify('Doklejanie pozycji do istniejących dokumentów…')
+  const productMap = await ensureProductIds(client, productNames, deps)
+
+  let importedItems = 0
+  let createdLots = 0
+  let mergedDocuments = 0
+  let unchangedDocuments = 0
+  const changedDocuments = []
+  const allIncomingItems = []
+
+  for (const group of existingGroups) {
+    const meta = details.get(operationImportKey(group))
+    const opId = meta?.operationId
+    if (!opId) continue
+
+    const storedItems = itemsByOp.get(opId) || []
+    const diff = diffImportGroupAgainstStored(group, meta, storedItems, deps)
+
+    if (diff.hasContentChanges) {
+      changedDocuments.push({
+        operation: group.operation,
+        documentNo: group.documentNo,
+        operationId: opId,
+        changes: diff.changes
+      })
+    }
+
+    if (!diff.newItems.length) {
+      if (!diff.hasContentChanges) unchangedDocuments += 1
+      continue
+    }
+
+    mergedDocuments += 1
+    for (const row of diff.newItems) {
+      const canonicalName = deps.canonicalProductName?.(row.productName) || row.productName || 'Produkt do dopasowania'
+      const productId = productMap.get(deps.normalizeText(canonicalName))
+      const itemQty = Math.abs(Number(row.qty) || 0)
+      if (itemQty <= 0 || !productId) continue
+
+      const direction = group.operation === 'przyjecie' ? 'przychod' : 'rozchod'
+      const { data: inserted, error } = await withImportRetry(() =>
+        client.from('operation_items').insert({
+          operation_id: opId,
+          product_id: productId,
+          qty: itemQty,
+          unit: 'kg',
+          direction,
+          raw_product_name: row.productName,
+          unit_price_net: direction === 'przychod' && Number(row.unitNetPrice) > 0 ? Number(row.unitNetPrice) : null
+        }).select('id').single()
+      )
+      if (error) throw error
+      importedItems += 1
+
+      if (direction === 'przychod') {
+        allIncomingItems.push({
+          direction,
+          group,
+          row,
+          productId,
+          itemQty,
+          opId,
+          itemId: inserted.id
+        })
+      }
+    }
+  }
+
+  if (allIncomingItems.length) {
+    notify(`Tworzenie ${allIncomingItems.length} partii (doklejone PZ)…`)
+    createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
+  }
+
+  return { importedItems, createdLots, mergedDocuments, unchangedDocuments, changedDocuments }
+}
+
+/** Pobiera zapis operacji + pozycje — do wykrywania zmian na rozpisanych PZ/WZ. */
+export async function loadStoredImportOperations(client, groups, details) {
+  const opIds = (groups || [])
+    .map(g => details.get(operationImportKey(g))?.operationId)
+    .filter(Boolean)
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+  const out = new Map()
+  for (const group of groups || []) {
+    const key = operationImportKey(group)
+    const meta = details.get(key)
+    if (!meta?.operationId) continue
+    out.set(key, {
+      meta,
+      items: itemsByOp.get(meta.operationId) || []
+    })
+  }
+  return out
 }
 
 async function deleteRowsInChunks(client, table, column, ids, chunkSize = 80) {

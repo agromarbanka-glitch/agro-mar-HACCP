@@ -14,9 +14,9 @@ import {
   K03_ENGINE_VERSION
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
-import { operationImportKey } from './importSaveEngine'
+import { operationImportKey, diffImportGroupAgainstStored, loadStoredImportOperations } from './importSaveEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.3'
+export const K03_WZ_ENGINE_VERSION = '1.4'
 
 function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
   const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys
@@ -126,50 +126,37 @@ function normalizeDocNo(value) {
   return String(value || '').trim().toUpperCase().replace(/\s+/g, '')
 }
 
-function importGroupTouchesProduct(importGroup, snapProductName, snapGroup) {
-  const items = importGroup?.items || []
-  if (!items.length) return false
-  const snapKey = normalizeKey(snapProductName)
-  return items.some(item => {
-    const name = item?.productName
-    if (!name) return false
-    if (normalizeKey(name) === snapKey) return true
-    return productGroupForName(name) === snapGroup
-  })
-}
-
-function isNewImportGroup(group, existingOpKeys) {
-  if (!existingOpKeys?.size) return true
-  return !existingOpKeys.has(operationImportKey(group))
-}
-
 /**
- * Po imporcie Excel sugeruje zamrożone K03, które mogą wymagać odmrożenia.
- * Uwzględnia tylko **nowe** dokumenty z pliku (pomija duplikaty już w bazie).
+ * Po imporcie sugeruje odmrożenie tylko gdy plik zmienia PZ/WZ już rozpisane w zamrożonym K03.
+ * Nowe przyjęcia/wydania (nigdy nierozpisane) nie wymagają odmrożenia.
  */
 export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups = [], options = {}) {
-  const existingOpKeys = options.existingOpKeys || new Set()
-  const newGroups = (importGroups || []).filter(g => isNewImportGroup(g, existingOpKeys))
-  if (!client || !newGroups.length) return []
+  const existingDetails = options.existingDetails || new Map()
+  if (!client || !importGroups?.length || !existingDetails.size) return []
 
   const snapshots = await loadK03Snapshots(client)
   const frozen = (snapshots || []).filter(s => s.data?.frozen === true)
   if (!frozen.length) return []
 
-  const newPz = newGroups.filter(g => g.operation === 'przyjecie')
-  const newSales = newGroups.filter(g => g.operation === 'sprzedaz')
+  const allocatedKeys = new Set()
+  for (const snap of frozen) {
+    const wzNo = normalizeDocNo(snap.document_no)
+    if (wzNo) allocatedKeys.add(`sprzedaz|${wzNo}`)
+    for (const row of snap.data?.rawRows || []) {
+      const pzNo = normalizeDocNo(row.pz_no)
+      if (pzNo) allocatedKeys.add(`przyjecie|${pzNo}`)
+    }
+  }
+  if (!allocatedKeys.size) return []
+
+  const candidateGroups = (importGroups || []).filter(g => allocatedKeys.has(operationImportKey(g)))
+  if (!candidateGroups.length) return []
+
+  const storedByKey = await loadStoredImportOperations(client, candidateGroups, existingDetails)
   const suggestions = []
 
   for (const snap of frozen) {
     const reasons = []
-    const group = snap.data?.product_group || productGroupForName(snap.product_name)
-    const cutoff = String(
-      snap.data?.fifo_cutoff_date ||
-      snap.data?.k03_workflow?.fifo_cutoff_date ||
-      snap.document_date ||
-      ''
-    ).slice(0, 10)
-    const wzDate = String(snap.document_date || '').slice(0, 10)
     const frozenWzNo = normalizeDocNo(snap.document_no)
     const frozenPzNos = new Set(
       (snap.data?.rawRows || [])
@@ -177,26 +164,21 @@ export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups =
         .filter(Boolean)
     )
 
-    for (const pz of newPz) {
-      if (!importGroupTouchesProduct(pz, snap.product_name, group)) continue
-      const pzDate = String(pz.issueDate || '').slice(0, 10)
-      const docNo = normalizeDocNo(pz.documentNo)
+    for (const group of candidateGroups) {
+      const key = operationImportKey(group)
+      const stored = storedByKey.get(key)
+      if (!stored) continue
 
-      if (docNo && frozenPzNos.has(docNo)) {
-        reasons.push(`nowy import PZ ${pz.documentNo} (możliwa zmiana daty lub ilości)`)
-      } else if (pzDate && cutoff && pzDate <= cutoff) {
-        reasons.push(`nowe PZ ${pz.documentNo || '?'} z ${pzDate} przed datą graniczną ${cutoff}`)
-      }
-    }
+      const docNo = normalizeDocNo(group.documentNo)
+      const isAllocatedWz = group.operation === 'sprzedaz' && docNo && docNo === frozenWzNo
+      const isAllocatedPz = group.operation === 'przyjecie' && docNo && frozenPzNos.has(docNo)
+      if (!isAllocatedWz && !isAllocatedPz) continue
 
-    for (const sale of newSales) {
-      if (!importGroupTouchesProduct(sale, snap.product_name, group)) continue
-      const saleDate = String(sale.issueDate || '').slice(0, 10)
-      const saleDocNo = normalizeDocNo(sale.documentNo)
-      if (saleDocNo && frozenWzNo && saleDocNo === frozenWzNo) continue
-      if (saleDate && wzDate && saleDate <= wzDate) {
-        reasons.push(`nowa sprzedaż ${sale.documentNo || '?'} z ${saleDate} przed WZ ${snap.document_no || wzDate}`)
-      }
+      const diff = diffImportGroupAgainstStored(group, stored.meta, stored.items, options.deps || {})
+      if (!diff.hasContentChanges) continue
+
+      const label = group.operation === 'przyjecie' ? 'PZ' : 'WZ'
+      reasons.push(`${label} ${group.documentNo}: ${diff.changes.join('; ')}`)
     }
 
     const uniqueReasons = [...new Set(reasons)].slice(0, 3)
@@ -207,7 +189,7 @@ export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups =
       wz_no: snap.document_no || '',
       product_name: snap.product_name || '',
       lot_no: snap.lot_no || '',
-      wz_date: wzDate,
+      wz_date: String(snap.document_date || '').slice(0, 10),
       frozen_at: snap.data?.frozen_at || snap.updated_at,
       reasons: uniqueReasons,
       snap

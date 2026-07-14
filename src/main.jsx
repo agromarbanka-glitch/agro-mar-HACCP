@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, partitionImportGroups, appendNewItemsFromExistingDocuments, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -1256,8 +1256,8 @@ function App() {
         <div className="section-title"><AlertTriangle/><div>
           <h2>Odmrożenie K03 po imporcie ({k03UnfreezeSuggestions.length})</h2>
           <p>
-            Dotyczy tylko <b>nowych</b> dokumentów z pliku. Zamrożony K03 = wydruk — system nie zmienia przypisanych PZ sam.
-            Przy dokładaniu kolejnego miesiąca zwykle <b>nic nie trzeba odmrażać</b>. Odmroź tylko gdy importujesz wcześniejszy PZ/WZ, którego wcześniej nie było w bazie.
+            Tylko gdy import zmienia <b>PZ lub WZ już rozpisane</b> w zamrożonym K03 (inna data lub ilość).
+            Nowe przyjęcia po 6 lipca <b>nie wymagają</b> odmrożenia — trafiają do K01 i FIFO automatycznie.
           </p>
         </div></div>
         <div className="k03-unfreeze-toolbar">
@@ -6525,15 +6525,18 @@ function App() {
             const det = details.get(`${d.operation}|${normalizeDocumentNo(d.documentNo)}`)
             return `${d.documentNo}${det?.importFilename ? ` (${det.importFilename})` : ''}`
           }).join(', ')
-          loadMsg += ` W bazie jest już ${duplicates.length} aktywnych dokumentów – przy zapisie zostaną pominięte. Np.: ${examples}${duplicates.length > 5 ? '…' : ''}.`
+          loadMsg += ` W bazie jest już ${duplicates.length} dokumentów – przy zapisie dokleimy nowe pozycje; zupełnie nowe numery PZ/WZ zapiszą się osobno. Np.: ${examples}${duplicates.length > 5 ? '…' : ''}.`
         }
-        void suggestFrozenK03UnfreezeAfterImport(supabase, groups, { existingOpKeys: keys })
+        void suggestFrozenK03UnfreezeAfterImport(supabase, groups, {
+          existingDetails: details,
+          deps: { normalizeText, canonicalProductName }
+        })
           .then(suggestions => {
             setK03UnfreezeSuggestions(suggestions)
             setK03UnfreezeBannerHidden(false)
             setK03UnfreezeBannerOpen(suggestions.length > 0 && suggestions.length <= 3)
             if (suggestions.length) {
-              setMessage(prev => `${prev}${prev ? ' ' : ''}${suggestions.length} zamrożonych K03 może wymagać uwagi (tylko nowe dokumenty) — zakładka Importy.`)
+              setMessage(prev => `${prev}${prev ? ' ' : ''}${suggestions.length} K03 do sprawdzenia — wykryto zmiany na już rozpisanych PZ/WZ (Importy).`)
             } else {
               setK03UnfreezeBannerOpen(false)
             }
@@ -7939,6 +7942,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       }
 
       const { duplicates, fresh: groupsToImport } = splitImportGroupsByExisting(groups, keys)
+      const { existing: existingGroups } = partitionImportGroups(groups, keys)
       setImportDuplicates(duplicates)
       setImportDuplicateDetails(details)
       setImportOrphanCount(orphanCount)
@@ -7955,10 +7959,35 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         onProgress: setImportProgress
       })
 
+      setImportProgress('Doklejanie pozycji do istniejących dokumentów…')
+      const mergeResult = await appendNewItemsFromExistingDocuments(supabase, existingGroups, details, importDeps, {
+        onProgress: setImportProgress
+      })
+
+      const totalOps = importedOperations
+      const totalItems = importedItems + mergeResult.importedItems
+      const totalLots = createdLots + mergeResult.createdLots
+      const mergeNote = mergeResult.mergedDocuments
+        ? ` Doklejono pozycje do ${mergeResult.mergedDocuments} dokumentów (+${mergeResult.importedItems} linii, +${mergeResult.createdLots} partii).`
+        : (duplicateCount ? ` ${duplicateCount} dokumentów już w bazie (bez nowych pozycji).` : '')
+
       const importMsgBase =
-        `Import zapisany. Dokumentów: ${importedOperations}, pozycji: ${importedItems}, partii: ${createdLots}. Pominięto duplikatów: ${duplicateCount}.` +
-        (orphanCount ? ` Wyczyszczono osierocone wpisy z usuniętych importów.` : '') +
-        (duplicateCount ? ` Przykłady pominiętych: ${duplicates.slice(0, 5).map(d => d.documentNo).join(', ')}${duplicateCount > 5 ? '…' : ''}.` : '')
+        `Import zapisany. Nowych dokumentów: ${totalOps}, pozycji: ${totalItems}, partii: ${totalLots}.${mergeNote}` +
+        (orphanCount ? ` Wyczyszczono osierocone wpisy z usuniętych importów.` : '')
+
+      if (mergeResult.changedDocuments?.length) {
+        void suggestFrozenK03UnfreezeAfterImport(supabase, groups, {
+          existingDetails: details,
+          deps: importDeps
+        }).then(suggestions => {
+          setK03UnfreezeSuggestions(suggestions)
+          setK03UnfreezeBannerHidden(false)
+          setK03UnfreezeBannerOpen(suggestions.length > 0 && suggestions.length <= 3)
+        }).catch(() => {})
+      } else {
+        setK03UnfreezeSuggestions([])
+        setK03UnfreezeBannerOpen(false)
+      }
 
       setMessage(`${importMsgBase} Trwa tworzenie kart K01…`)
       importCheckCacheRef.current = null
@@ -7967,9 +7996,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       void (async () => {
         let k01Msg = ''
         try {
-          const k01Added = await syncAutoK01ForImportFile(importedFileId)
+          const k01FromImport = await syncAutoK01ForImportFile(importedFileId)
+          const k01FromMerge = mergeResult.createdLots > 0 ? await syncAutoK01Documents() : 0
+          const k01Added = k01FromImport + k01FromMerge
           if (k01Added > 0) {
-            k01Msg = ` Utworzono ${k01Added} kart K01 (lipiec – sprawdź Dokumentacja HACCP → K01).`
+            k01Msg = ` Utworzono ${k01Added} kart K01 — sprawdź Dokumentacja HACCP → K01.`
             await loadHaccpDocs()
           } else {
             k01Msg = ' K01: wszystkie karty już istnieją lub brak nowych partii PZ.'

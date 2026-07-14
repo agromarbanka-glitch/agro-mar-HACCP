@@ -226,7 +226,9 @@ export function forwardFillExcelRows(rows) {
       }
     }
     if (!looksLikeWarehouseDocumentNo(documentNo) && last.documentNo) {
-      documentNo = last.documentNo
+      const rowDateHint = String(row.issueDate || '').trim() || last.issueDate
+      const dateAdvanced = rowDateHint && last.issueDate && rowDateHint > last.issueDate
+      if (!dateAdvanced) documentNo = last.documentNo
     }
 
     const prevDocumentNo = last.documentNo
