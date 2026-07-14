@@ -2,13 +2,14 @@
  * Zapis importu Excel do Supabase – batch + retry (mniej zapytań, odporność na NetworkError).
  */
 
-import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport.js'
+import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
-const OP_CHUNK = 100
-const ITEM_CHUNK = 150
+const OP_CHUNK = 50
+const ITEM_CHUNK = 80
 const NAME_CHUNK = 100
-const LOT_RPC_CHUNK = 500
+const DOC_BATCH_SIZE = 40
+const LOT_RPC_CHUNK = 35
 const LOT_CONCURRENCY = 24
 const ITEM_LOT_UPDATE_CHUNK = 80
 const RETRY_ATTEMPTS = 3
@@ -765,55 +766,14 @@ async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
   return lotIds.length
 }
 
-/**
- * @returns {{ importedFileId, importedOperations, importedItems, createdLots, rozchodItems }}
- */
-export async function saveImportToSupabase(client, {
-  groupsToImport,
-  rowsCount,
-  fileName,
-  duplicateCount,
-  deps,
-  onProgress
-}) {
-  const notify = msg => onProgress?.(msg)
-
-  notify('Rejestrowanie pliku importu…')
-  const { data: imported, error: fileError } = await withImportRetry(() =>
-    client.from('imported_files').insert({
-      filename: fileName || 'import.xlsx',
-      rows_count: rowsCount,
-      status: 'w_trakcie'
-    }).select('id').single()
-  )
-  if (fileError) throw fileError
-
-  const allProductNames = []
-  const allContractorNames = []
-  for (const group of groupsToImport) {
-    if (group.contractorName) allContractorNames.push(group.contractorName)
-    for (const row of group.items) allProductNames.push(row.productName)
-  }
-
-  notify('Przygotowanie słowników produktów i kontrahentów…')
-  const [productMap, contractorMap] = await Promise.all([
-    ensureProductIds(client, allProductNames, deps),
-    ensureContractorIds(client, allContractorNames)
-  ])
-
-  let importedOperations = 0
-  let importedItems = 0
-  let createdLots = 0
-  let rozchodItems = 0
-
-  notify(`Zapis ${groupsToImport.length} dokumentów…`)
-  const allOpRows = groupsToImport.map(group => ({
+async function insertOperationsForGroups(client, groups, importedFileId, contractorMap) {
+  const allOpRows = groups.map(group => ({
     operation_type: group.operation,
     operation_date: group.issueDate,
     document_no: group.documentNo,
     invoice_no: group.invoiceNo,
     contractor_id: group.contractorName ? contractorMap.get(group.contractorName) : null,
-    imported_file_id: imported.id,
+    imported_file_id: importedFileId,
     notes: group.notes || null
   }))
 
@@ -843,14 +803,18 @@ export async function saveImportToSupabase(client, {
   const opKeyToId = new Map()
   for (const op of insertedOps) {
     opKeyToId.set(operationImportKey({ operation: op.operation_type, documentNo: op.document_no }), op.id)
-    importedOperations += 1
   }
+  return { opKeyToId, importedOperations: insertedOps.length }
+}
 
-  notify('Zapis pozycji…')
+async function insertItemsAndLotsForGroups(client, groups, opKeyToId, productMap, deps, notify, fileName, importedFileId) {
+  let importedItems = 0
+  let rozchodItems = 0
+  let createdLots = 0
   const allItemRows = []
   const allItemMeta = []
 
-  for (const group of groupsToImport) {
+  for (const group of groups) {
     const opId = opKeyToId.get(operationImportKey(group))
     if (!opId) continue
 
@@ -896,16 +860,81 @@ export async function saveImportToSupabase(client, {
         `Brak ${allIncomingItems.length - validIncoming.length} operacji przy tworzeniu partii (import mógł zostać przerwany). Kliknij „Zapisz import” ponownie.`
       )
     }
-    notify(`Tworzenie ${validIncoming.length} partii…`)
     try {
       createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
     } catch (lotErr) {
       const lotMsg = String(lotErr?.message || '')
       if (!/lots_lot_no_key|duplicate key.*lot|lots_source_operation_id_fkey/i.test(lotMsg)) throw lotErr
       notify('Pozostałości partii w bazie – pełne sprzątanie…')
-      await runFullImportLotCleanup(client, fileName, imported.id)
+      await runFullImportLotCleanup(client, fileName, importedFileId)
       createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
     }
+  }
+
+  return { importedItems, rozchodItems, createdLots }
+}
+
+/**
+ * @returns {{ importedFileId, importedOperations, importedItems, createdLots, rozchodItems }}
+ */
+export async function saveImportToSupabase(client, {
+  groupsToImport,
+  rowsCount,
+  fileName,
+  duplicateCount,
+  deps,
+  onProgress
+}) {
+  const notify = msg => onProgress?.(msg)
+
+  notify('Rejestrowanie pliku importu…')
+  const { data: imported, error: fileError } = await withImportRetry(() =>
+    client.from('imported_files').insert({
+      filename: fileName || 'import.xlsx',
+      rows_count: rowsCount,
+      status: 'w_trakcie'
+    }).select('id').single()
+  )
+  if (fileError) throw fileError
+
+  const allProductNames = []
+  const allContractorNames = []
+  for (const group of groupsToImport) {
+    if (group.contractorName) allContractorNames.push(group.contractorName)
+    for (const row of group.items) allProductNames.push(row.productName)
+  }
+
+  notify('Przygotowanie słowników produktów i kontrahentów…')
+  const [productMap, contractorMap] = await Promise.all([
+    ensureProductIds(client, allProductNames, deps),
+    ensureContractorIds(client, allContractorNames)
+  ])
+
+  let importedOperations = 0
+  let importedItems = 0
+  let createdLots = 0
+  let rozchodItems = 0
+
+  const batchCount = Math.ceil(groupsToImport.length / DOC_BATCH_SIZE)
+  notify(`Zapis ${groupsToImport.length} dokumentów w ${batchCount} paczkach…`)
+
+  for (let b = 0; b < groupsToImport.length; b += DOC_BATCH_SIZE) {
+    const batch = groupsToImport.slice(b, b + DOC_BATCH_SIZE)
+    const batchNo = Math.floor(b / DOC_BATCH_SIZE) + 1
+    notify(`Paczka ${batchNo}/${batchCount}: dokumenty ${b + 1}–${b + batch.length} / ${groupsToImport.length}…`)
+
+    const { opKeyToId, importedOperations: batchOps } = await insertOperationsForGroups(
+      client, batch, imported.id, contractorMap
+    )
+    importedOperations += batchOps
+
+    notify(`Paczka ${batchNo}/${batchCount}: pozycje i partie…`)
+    const batchResult = await insertItemsAndLotsForGroups(
+      client, batch, opKeyToId, productMap, deps, notify, fileName, imported.id
+    )
+    importedItems += batchResult.importedItems
+    rozchodItems += batchResult.rozchodItems
+    createdLots += batchResult.createdLots
   }
 
   const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
@@ -946,6 +975,63 @@ async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
     await withImportRetry(() => client.from('fifo_allocations').delete().in('source_lot_id', chunk))
     await withImportRetry(() => client.from('fifo_allocations').delete().in('output_lot_id', chunk))
   }
+}
+
+/**
+ * Poprawia daty tylko operacji z danego importu (szybkie — bez skanowania całej bazy).
+ */
+export async function repairDatesForImportFile(client, importedFileId, { onProgress } = {}) {
+  if (!client || !importedFileId) return { dates_fixed: 0 }
+  onProgress?.('Korygowanie dat PZ z tego importu…')
+  let fixed = 0
+  let offset = 0
+  const pageSize = 200
+  while (true) {
+    const { data: ops, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, document_no, operation_date')
+        .eq('imported_file_id', importedFileId)
+        .order('id', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+    )
+    if (error) throw error
+    if (!ops?.length) break
+
+    for (const op of ops) {
+      if (!documentNoHasExplicitDate(op.document_no) && !documentNoHasMonthYear(op.document_no)) continue
+      const correct = inferDateFromDocumentNo(op.document_no)
+      const current = String(op.operation_date || '').slice(0, 10)
+      if (!correct || correct === current) continue
+
+      await withImportRetry(() =>
+        client.from('operations').update({ operation_date: correct }).eq('id', op.id)
+      )
+      await withImportRetry(() =>
+        client.from('lots').update({ production_date: correct }).eq('source_operation_id', op.id)
+      )
+      await withImportRetry(() =>
+        client
+          .from('haccp_documents')
+          .update({ document_date: correct })
+          .eq('operation_id', op.id)
+          .eq('document_type', 'K01')
+      )
+      fixed += 1
+    }
+
+    if (ops.length < pageSize) break
+    offset += pageSize
+  }
+  return { dates_fixed: fixed }
+}
+
+/** Lekkie czyszczenie po zapisie importu — tylko ten plik + K01 (bez ciężkiego RPC po całej bazie). */
+export async function repairAfterImportSave(client, importedFileId, { onProgress } = {}) {
+  const dateRepair = await repairDatesForImportFile(client, importedFileId, { onProgress })
+  onProgress?.('Sprawdzanie zduplikowanych kart K01…')
+  const k01Removed = await removeDuplicateK01Documents(client, { onProgress })
+  return { dates_fixed: dateRepair.dates_fixed || 0, k01_removed: k01Removed, items_removed: 0, lots_removed: 0 }
 }
 
 /**
@@ -1056,11 +1142,17 @@ export function formatRepairWarehouseResult(result = {}) {
  * Pełne czyszczenie duplikatów magazynu: pozycje PZ + K01 (FIFO).
  * RPC v46 gdy dostępne; K01 zawsze też z przeglądarki (np. ten sam PZ z wielu importów).
  */
-export async function repairWarehouseImportDuplicates(client, { onProgress } = {}) {
+export async function repairWarehouseImportDuplicates(client, { onProgress, importedFileId, light = false } = {}) {
   if (!client) throw new Error('Brak Supabase.')
+  if (light && importedFileId) {
+    return repairAfterImportSave(client, importedFileId, { onProgress })
+  }
+
   const notify = msg => onProgress?.(msg)
 
-  const dateRepair = await repairDatesFromDocumentNumbers(client, { onProgress })
+  const dateRepair = importedFileId
+    ? await repairDatesForImportFile(client, importedFileId, { onProgress })
+    : await repairDatesFromDocumentNumbers(client, { onProgress })
   notify('Czyszczenie duplikatów magazynu (FIFO)…')
 
   let result = { items_removed: 0, lots_removed: 0, k01_removed: 0, dates_fixed: dateRepair.dates_fixed || 0, mode: 'client' }
@@ -1132,6 +1224,12 @@ export function formatImportNetworkError(err) {
     return (
       'Błąd połączenia z Supabase (NetworkError). Sprawdź internet i czy projekt Supabase nie jest wstrzymany. ' +
       'Możesz spróbować ponownie – już zapisane dokumenty zostaną pominięte jako duplikaty.'
+    )
+  }
+  if (/statement timeout|57014|canceling statement due to statement timeout/i.test(msg)) {
+    return (
+      'Zapis trwał za długo (limit czasu Supabase). Kliknij „Zapisz import do Supabase” ponownie — ' +
+      'dokumenty już zapisane zostaną pominięte, system dokończy resztę partiami. Nie zamykaj karty.'
     )
   }
   return `Błąd zapisu do Supabase: ${msg}`

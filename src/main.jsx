@@ -8188,8 +8188,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         setImportProgress('Tworzenie kart K01 z tego importu…')
         const k01Added = await syncAutoK01ForImportFile(importedFileId)
 
-        setImportProgress('Korygowanie dat i usuwanie duplikatów…')
-        const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
+        setImportProgress('Korygowanie dat i usuwanie duplikatów K01…')
+        const repair = await repairWarehouseImportDuplicates(supabase, {
+          onProgress: setImportProgress,
+          importedFileId,
+          light: true
+        })
         const repairMsg = formatRepairWarehouseResult(repair)
 
         await loadHaccpDocs({ force: true, skipBusy: true })
