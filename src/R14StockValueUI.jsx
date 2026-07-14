@@ -355,7 +355,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. FIFO {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w Excelu. Importy się <b>doklejają</b> — reszta z poprzedniego miesiąca wchodzi w stan automatycznie.
+        WZ rozlicza PZ wg <b>wariantu produktu</b> (jak w magazynie HACCP — np. WZ „Truskawka” może brać z PZ szypułkowych). Importy się <b>doklejają</b> — reszta z poprzedniego miesiąca wchodzi w stan automatycznie.
       </p>
 
       {!isSupabaseConfigured && (

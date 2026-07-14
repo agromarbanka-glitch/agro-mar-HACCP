@@ -2,7 +2,8 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.1 (przywrócony): WZ rozlicza tylko PZ o tej samej nazwie produktu z importu.
+ * WZ rozlicza PZ wg wariantu produktu (jak magazyn K03/HACCP):
+ * np. WZ „Truskawka” może brać z PZ „Truskawka z szypułką”, ale nie odwrotnie.
  */
 import {
   classifyOperation,
@@ -10,9 +11,9 @@ import {
   normalizeDocumentNo,
   isMmDocument
 } from './excelImport'
-import { resolveFifoProductGroup } from './k03Engine'
+import { resolveFifoProductGroup, normalizeFifoProductKey, FIFO_SALE_SOURCE_KEYS } from './k03Engine'
 
-export const EXCEL_REPORT_VERSION = '2.5'
+export const EXCEL_REPORT_VERSION = '2.6'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -74,19 +75,41 @@ function roundMoney(n) {
   return Math.round(Number(n || 0) * 100) / 100
 }
 
-function normalizeKey(name) {
-  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
 function displayName(name) {
   return String(name || '').trim() || 'Produkt'
+}
+
+const FIFO_DISPLAY_LABELS = {
+  truskawka: 'Truskawka',
+  'truskawka z szypulka': 'Truskawka z szypułką',
+  'malina pw': 'Malina świeża PW',
+  'malina klasa i': 'Malina klasa I',
+  'malina extra': 'Malina extra',
+  'malina pulpa': 'Malina pulpa',
+  'porzeczka czarna': 'Porzeczka czarna',
+  'porzeczka czerwona': 'Porzeczka kolorowa',
+  'porzeczka czarna pulpa': 'Porzeczka czarna pulpa',
+  'porzeczka czerwona pulpa': 'Porzeczka kolorowa pulpa',
+  wisnia: 'Wiśnia',
+  aronia: 'Aronia',
+  sliwka: 'Śliwka',
+  'jablko obierka': 'Jabłko na obierkę',
+  'jablko przemyslowe': 'Jabłko przemysłowe'
+}
+
+function fifoRowLabel(productKey, rawName) {
+  return FIFO_DISPLAY_LABELS[productKey] || displayName(rawName)
+}
+
+function fifoSaleSourceKeys(productKey) {
+  return FIFO_SALE_SOURCE_KEYS[productKey] || [productKey]
 }
 
 function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
 
-function simulateFifoExactName({ cutoffDate, lots, sales }) {
+function simulateFifoWithSources({ cutoffDate, lots, sales }) {
   const sortedSales = [...sales].sort((a, b) =>
     a.issueDate.localeCompare(b.issueDate) ||
     a.documentNo.localeCompare(b.documentNo)
@@ -94,8 +117,9 @@ function simulateFifoExactName({ cutoffDate, lots, sales }) {
 
   for (const sale of sortedSales) {
     let left = sale.qty
+    const allowedSources = new Set(fifoSaleSourceKeys(sale.productKey))
     const pool = lots
-      .filter(l => l.productKey === sale.productKey && l.remaining_qty > 0 && l.issueDate <= cutoffDate)
+      .filter(l => allowedSources.has(l.productKey) && l.remaining_qty > 0 && l.issueDate <= cutoffDate)
       .sort((a, b) =>
         a.issueDate.localeCompare(b.issueDate) ||
         a.documentNo.localeCompare(b.documentNo) ||
@@ -128,8 +152,8 @@ function normalizeExcelRows(rows) {
       operation,
       documentNo,
       issueDate,
-      productName: displayName(row.productName),
-      productKey: normalizeKey(row.productName),
+      productName: fifoRowLabel(normalizeFifoProductKey(row.productName), row.productName),
+      productKey: normalizeFifoProductKey(row.productName),
       qty: Math.abs(Number(row.qty) || 0),
       unitPriceNet: unitPrice > 0 ? unitPrice : null
     })
@@ -141,7 +165,7 @@ function ensureRow(map, key, label) {
   if (!map.has(key)) {
     map.set(key, {
       product_key: key,
-      product_name: label,
+      product_name: fifoRowLabel(key, label),
       product_group: resolveFifoProductGroup(null, label),
       purchased_kg: 0,
       sold_kg: 0,
@@ -241,7 +265,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     }
   })
 
-  simulateFifoExactName({ cutoffDate, lots, sales: salesForFifo })
+  simulateFifoWithSources({ cutoffDate, lots, sales: salesForFifo })
 
   let missingPriceLines = 0
 
