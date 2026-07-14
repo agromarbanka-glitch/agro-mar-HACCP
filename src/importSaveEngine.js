@@ -686,8 +686,23 @@ async function createIncomingLot(client, { productId, operationId, operationDate
   return lot.id
 }
 
+async function syncLotSequencesForProducts(client, productIds) {
+  const ids = [...new Set((productIds || []).filter(Boolean))]
+  if (!ids.length) return
+  try {
+    await withImportRetry(() =>
+      client.rpc('sync_lot_sequences_from_lots', { p_product_ids: ids })
+    )
+  } catch (err) {
+    if (!/function.*does not exist/i.test(String(err?.message || ''))) throw err
+  }
+}
+
 async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
   let total = 0
+  const productIds = [...new Set(incomingItems.map(i => i.productId).filter(Boolean))]
+  await syncLotSequencesForProducts(client, productIds)
+
   const chunkCount = Math.ceil(incomingItems.length / LOT_RPC_CHUNK)
   for (let i = 0; i < incomingItems.length; i += LOT_RPC_CHUNK) {
     const slice = incomingItems.slice(i, i + LOT_RPC_CHUNK)
@@ -705,11 +720,29 @@ async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
       product_group: deps.productGroupForName(meta.row.productName),
       unit_price_net: null
     }))
-    const { data, error } = await withImportRetry(() =>
-      client.rpc('create_incoming_lots_batch', { p_items: payload })
-    )
-    if (error) throw error
-    total += Number(data || 0)
+
+    let lastErr = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const { data, error } = await withImportRetry(() =>
+        client.rpc('create_incoming_lots_batch', { p_items: payload })
+      )
+      if (!error) {
+        total += Number(data || 0)
+        lastErr = null
+        break
+      }
+      lastErr = error
+      if (
+        attempt === 0 &&
+        /unikalnego numeru partii|generate_lot_no|lot_no/i.test(String(error.message || ''))
+      ) {
+        notify('Synchronizacja numerów partii…')
+        await syncLotSequencesForProducts(client, productIds)
+        continue
+      }
+      throw error
+    }
+    if (lastErr) throw lastErr
   }
   return total
 }
@@ -909,6 +942,9 @@ export async function saveImportToSupabase(client, {
     ensureProductIds(client, allProductNames, deps),
     ensureContractorIds(client, allContractorNames)
   ])
+
+  notify('Synchronizacja numerów partii…')
+  await syncLotSequencesForProducts(client, [...productMap.values()])
 
   let importedOperations = 0
   let importedItems = 0
@@ -1224,6 +1260,13 @@ export function formatImportNetworkError(err) {
     return (
       'Błąd połączenia z Supabase (NetworkError). Sprawdź internet i czy projekt Supabase nie jest wstrzymany. ' +
       'Możesz spróbować ponownie – już zapisane dokumenty zostaną pominięte jako duplikaty.'
+    )
+  }
+  if (/unikalnego numeru partii|generate_lot_no/i.test(msg)) {
+    return (
+      'Błąd numeru partii magazynowej — sekwencja numerów rozjechała się z bazą (duży import). ' +
+      'Uruchom w Supabase SQL: supabase/2026-v47-generate-lot-no-sync.sql, potem kliknij „Zapisz import” ponownie. ' +
+      'Dokumenty już zapisane zostaną pominięte.'
     )
   }
   if (/statement timeout|57014|canceling statement due to statement timeout/i.test(msg)) {
