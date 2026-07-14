@@ -372,7 +372,21 @@ button.mini { padding:8px 10px; border-radius:10px; font-size:12px; margin-right
   background: #fffbeb;
 }
 .k03-unfreeze-banner h2 { font-size: 18px; margin: 0; }
-.unfreeze-suggest-list { display: grid; gap: 10px; }
+.k03-unfreeze-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.k03-unfreeze-toolbar { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+.k03-unfreeze-summary { margin: 0; }
+.unfreeze-suggest-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(420px, 55vh);
+  overflow: auto;
+}
 .unfreeze-suggest-item {
   padding: 12px 14px;
   border-radius: 12px;

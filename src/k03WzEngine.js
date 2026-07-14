@@ -14,6 +14,7 @@ import {
   K03_ENGINE_VERSION
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
+import { operationImportKey } from './importSaveEngine'
 
 export const K03_WZ_ENGINE_VERSION = '1.3'
 
@@ -125,19 +126,38 @@ function normalizeDocNo(value) {
   return String(value || '').trim().toUpperCase().replace(/\s+/g, '')
 }
 
+function importGroupTouchesProduct(importGroup, snapProductName, snapGroup) {
+  const items = importGroup?.items || []
+  if (!items.length) return false
+  const snapKey = normalizeKey(snapProductName)
+  return items.some(item => {
+    const name = item?.productName
+    if (!name) return false
+    if (normalizeKey(name) === snapKey) return true
+    return productGroupForName(name) === snapGroup
+  })
+}
+
+function isNewImportGroup(group, existingOpKeys) {
+  if (!existingOpKeys?.size) return true
+  return !existingOpKeys.has(operationImportKey(group))
+}
+
 /**
- * Po imporcie Excel sugeruje zamrożone K03, które mogą wymagać odmrożenia
- * (nowe PZ w tej samej grupie, wcześniejsza sprzedaż, ponowny numer PZ).
+ * Po imporcie Excel sugeruje zamrożone K03, które mogą wymagać odmrożenia.
+ * Uwzględnia tylko **nowe** dokumenty z pliku (pomija duplikaty już w bazie).
  */
-export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups = []) {
-  if (!client || !importGroups.length) return []
+export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups = [], options = {}) {
+  const existingOpKeys = options.existingOpKeys || new Set()
+  const newGroups = (importGroups || []).filter(g => isNewImportGroup(g, existingOpKeys))
+  if (!client || !newGroups.length) return []
 
   const snapshots = await loadK03Snapshots(client)
   const frozen = (snapshots || []).filter(s => s.data?.frozen === true)
   if (!frozen.length) return []
 
-  const newPz = importGroups.filter(g => g.operation === 'przyjecie')
-  const newSales = importGroups.filter(g => g.operation === 'sprzedaz')
+  const newPz = newGroups.filter(g => g.operation === 'przyjecie')
+  const newSales = newGroups.filter(g => g.operation === 'sprzedaz')
   const suggestions = []
 
   for (const snap of frozen) {
@@ -150,6 +170,7 @@ export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups =
       ''
     ).slice(0, 10)
     const wzDate = String(snap.document_date || '').slice(0, 10)
+    const frozenWzNo = normalizeDocNo(snap.document_no)
     const frozenPzNos = new Set(
       (snap.data?.rawRows || [])
         .map(r => normalizeDocNo(r.pz_no))
@@ -157,26 +178,28 @@ export async function suggestFrozenK03UnfreezeAfterImport(client, importGroups =
     )
 
     for (const pz of newPz) {
+      if (!importGroupTouchesProduct(pz, snap.product_name, group)) continue
       const pzDate = String(pz.issueDate || '').slice(0, 10)
-      const pzGroup = productGroupForName(pz.productName)
       const docNo = normalizeDocNo(pz.documentNo)
 
       if (docNo && frozenPzNos.has(docNo)) {
-        reasons.push(`ponowny import PZ ${pz.documentNo} (możliwa zmiana daty lub ilości)`)
-      } else if (pzGroup === group && pzDate && cutoff && pzDate <= cutoff) {
-        reasons.push(`nowe PZ ${pz.documentNo || '?'} z ${pzDate} – ta sama grupa (${group}), przed datą graniczną ${cutoff}`)
+        reasons.push(`nowy import PZ ${pz.documentNo} (możliwa zmiana daty lub ilości)`)
+      } else if (pzDate && cutoff && pzDate <= cutoff) {
+        reasons.push(`nowe PZ ${pz.documentNo || '?'} z ${pzDate} przed datą graniczną ${cutoff}`)
       }
     }
 
     for (const sale of newSales) {
+      if (!importGroupTouchesProduct(sale, snap.product_name, group)) continue
       const saleDate = String(sale.issueDate || '').slice(0, 10)
-      const saleGroup = productGroupForName(sale.productName)
-      if (saleDate && wzDate && saleDate <= wzDate && (!group || saleGroup === group || !sale.productName)) {
-        reasons.push(`nowa sprzedaż ${sale.documentNo || '?'} z ${saleDate} – może zmienić FIFO przed WZ ${snap.document_no || wzDate}`)
+      const saleDocNo = normalizeDocNo(sale.documentNo)
+      if (saleDocNo && frozenWzNo && saleDocNo === frozenWzNo) continue
+      if (saleDate && wzDate && saleDate <= wzDate) {
+        reasons.push(`nowa sprzedaż ${sale.documentNo || '?'} z ${saleDate} przed WZ ${snap.document_no || wzDate}`)
       }
     }
 
-    const uniqueReasons = [...new Set(reasons)]
+    const uniqueReasons = [...new Set(reasons)].slice(0, 3)
     if (!uniqueReasons.length) continue
 
     suggestions.push({

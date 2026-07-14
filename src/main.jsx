@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3 } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
@@ -404,6 +404,8 @@ function App() {
   const [k03WzModal, setK03WzModal] = useState(null)
   const [k03ActionDialog, setK03ActionDialog] = useState(null)
   const [k03UnfreezeSuggestions, setK03UnfreezeSuggestions] = useState([])
+  const [k03UnfreezeBannerOpen, setK03UnfreezeBannerOpen] = useState(false)
+  const [k03UnfreezeBannerHidden, setK03UnfreezeBannerHidden] = useState(false)
   const [fifoChangeLog, setFifoChangeLog] = useState([])
   const [fifoRecalculating, setFifoRecalculating] = useState(false)
   const [fifoProgress, setFifoProgress] = useState(null)
@@ -1245,14 +1247,38 @@ function App() {
   }
 
   function renderK03UnfreezeBanner() {
-    if (!k03UnfreezeSuggestions.length) return null
+    if (!k03UnfreezeSuggestions.length || k03UnfreezeBannerHidden) return null
+    const previewLimit = 8
+    const preview = k03UnfreezeSuggestions.slice(0, previewLimit)
+    const hiddenCount = k03UnfreezeSuggestions.length - preview.length
     return <section className="card k03-unfreeze-banner">
-      <div className="section-title"><AlertTriangle/><div>
-        <h2>Po imporcie – rozważ odmrożenie K03</h2>
-        <p>Nowe dane mogą zmienić rozliczenie FIFO dla poniższych zamrożonych kartotek. Odmroż tylko te, których dotyczy import.</p>
-      </div></div>
-      <div className="unfreeze-suggest-list">
-        {k03UnfreezeSuggestions.map(item => (
+      <div className="k03-unfreeze-head">
+        <div className="section-title"><AlertTriangle/><div>
+          <h2>Odmrożenie K03 po imporcie ({k03UnfreezeSuggestions.length})</h2>
+          <p>
+            Dotyczy tylko <b>nowych</b> dokumentów z pliku. Zamrożony K03 = wydruk — system nie zmienia przypisanych PZ sam.
+            Przy dokładaniu kolejnego miesiąca zwykle <b>nic nie trzeba odmrażać</b>. Odmroź tylko gdy importujesz wcześniejszy PZ/WZ, którego wcześniej nie było w bazie.
+          </p>
+        </div></div>
+        <div className="k03-unfreeze-toolbar">
+          <button type="button" className="mini secondary" onClick={() => setK03UnfreezeBannerOpen(o => !o)}>
+            {k03UnfreezeBannerOpen ? <><ChevronUp size={14}/> Zwiń</> : <><ChevronDown size={14}/> Rozwiń listę</>}
+          </button>
+          <button type="button" className="mini secondary" onClick={() => setK03UnfreezeBannerHidden(true)} title="Ukryj do następnego importu">
+            <X size={14}/> Ukryj
+          </button>
+        </div>
+      </div>
+      {!k03UnfreezeBannerOpen && (
+        <p className="hint k03-unfreeze-summary">
+          {k03UnfreezeSuggestions.length === 1
+            ? '1 zamrożona kartoteka może wymagać uwagi.'
+            : `${k03UnfreezeSuggestions.length} zamrożonych kartotek może wymagać uwagi.`}
+          {' '}Kliknij „Rozwiń listę”, jeśli chcesz je przejrzeć.
+        </p>
+      )}
+      {k03UnfreezeBannerOpen && <div className="unfreeze-suggest-list">
+        {preview.map(item => (
           <div key={item.k03_key || item.wz_no} className="unfreeze-suggest-item">
             <div className="unfreeze-suggest-main">
               <b>K03 · WZ {item.wz_no}</b>
@@ -1276,7 +1302,8 @@ function App() {
             </div>
           </div>
         ))}
-      </div>
+      </div>}
+      {k03UnfreezeBannerOpen && hiddenCount > 0 && <p className="hint">… i jeszcze {hiddenCount} kartotek (przewiń listę).</p>}
     </section>
   }
 
@@ -6500,11 +6527,15 @@ function App() {
           }).join(', ')
           loadMsg += ` W bazie jest już ${duplicates.length} aktywnych dokumentów – przy zapisie zostaną pominięte. Np.: ${examples}${duplicates.length > 5 ? '…' : ''}.`
         }
-        void suggestFrozenK03UnfreezeAfterImport(supabase, groups)
+        void suggestFrozenK03UnfreezeAfterImport(supabase, groups, { existingOpKeys: keys })
           .then(suggestions => {
             setK03UnfreezeSuggestions(suggestions)
+            setK03UnfreezeBannerHidden(false)
+            setK03UnfreezeBannerOpen(suggestions.length > 0 && suggestions.length <= 3)
             if (suggestions.length) {
-              setMessage(prev => `${prev}${prev ? ' ' : ''}Możliwe konflikty z ${suggestions.length} zamrożonymi K03 – sprawdź baner przed zapisem.`)
+              setMessage(prev => `${prev}${prev ? ' ' : ''}${suggestions.length} zamrożonych K03 może wymagać uwagi (tylko nowe dokumenty) — zakładka Importy.`)
+            } else {
+              setK03UnfreezeBannerOpen(false)
             }
           })
           .catch(() => {})
@@ -7996,9 +8027,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div><strong>Ważne:</strong> ta aplikacja ma być podłączona wyłącznie do nowego projektu Supabase <b>AGRO-MAR-HACCP</b>, nigdy do starej bazy opakowań.</div>
     </section>
 
-    {renderK03UnfreezeBanner()}
-
-
     <nav className="top-tabs">
       {tabs.map(([key, label, Icon]) => <button key={key} className={activeTab === key ? 'tab active' : 'tab'} onClick={() => setActiveTab(key)}><Icon size={16}/>{label}</button>)}
     </nav>
@@ -8554,7 +8582,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {canSeeDocsHubSection(authProfile, docsHubSection) && ['raporty', 'wykazy', 'formularze', 'protokoly', 'specyfikacje'].includes(docsHubSection) && renderHubManualSection()}
 
       {docsHubSection === 'kartoteki' && <>
-      {renderK03UnfreezeBanner()}
       {renderFifoProgressBanner()}
       <div className="docs-layout">
         {renderDocsSidebar(docsFilterStats)}
