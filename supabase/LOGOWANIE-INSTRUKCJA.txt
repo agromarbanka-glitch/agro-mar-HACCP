@@ -71,6 +71,10 @@ Objawy bez tego kroku:
   - przycisk „Utwórz kartotekę” (R01, R02…) nic nie robi
   - importy / magazyn też mogą być puste
 
+DIAGNOSTYKA (zalecane przed v45):
+  → Uruchom plik: SPRAWDZ-GOTOWOSC-do-v45.sql
+  → Pokaże co jest OK, czego brakuje i co uruchomić dalej.
+
 1. SQL Editor → New query
 2. Otwórz plik: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql
 3. Skopiuj CAŁOŚĆ → wklej → RUN
