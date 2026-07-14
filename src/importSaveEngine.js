@@ -157,26 +157,39 @@ export function importItemMatchKey(row, deps = {}) {
 
 function storedItemMatchKey(item, deps = {}) {
   const norm = deps.normalizeText || defaultNormalizeText
-  const name = norm(item.raw_product_name || item.products?.name || '')
+  const canon = deps.canonicalProductName || (s => s)
+  const raw = item.raw_product_name || item.products?.name || ''
+  const name = norm(canon(raw) || raw)
   const qty = Math.round(Math.abs(Number(item.qty) || 0) * 1000) / 1000
   return `${name}|${qty}`
 }
 
-/** Porównuje pozycje Excel z zapisem w bazie — nowe linie vs zmiany ilości/dat. */
+function itemKeyCounts(items, deps, kind) {
+  const counts = new Map()
+  for (const entry of items || []) {
+    const key = kind === 'stored' ? storedItemMatchKey(entry, deps) : importItemMatchKey(entry, deps)
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  return counts
+}
+
+/** Porównuje pozycje Excel z zapisem w bazie — nowe linie vs zmiany ilości/dat (multiset). */
 export function diffImportGroupAgainstStored(group, storedOp, storedItems, deps = {}) {
   const storedDate = String(storedOp?.operationDate || storedOp?.operation_date || '').slice(0, 10)
   const importDate = String(group?.issueDate || '').slice(0, 10)
   const dateChanged = Boolean(storedDate && importDate && storedDate !== importDate)
 
-  const pool = (storedItems || []).map(item => storedItemMatchKey(item, deps))
+  const storedCounts = itemKeyCounts(storedItems, deps, 'stored')
   const newItems = []
   for (const row of group?.items || []) {
     const key = importItemMatchKey(row, deps)
-    const idx = pool.indexOf(key)
-    if (idx >= 0) pool.splice(idx, 1)
+    const left = storedCounts.get(key) || 0
+    if (left > 0) storedCounts.set(key, left - 1)
     else newItems.push(row)
   }
-  const removedCount = pool.length
+
+  let removedCount = 0
+  for (const n of storedCounts.values()) removedCount += n
   const qtyChanged = removedCount > 0
 
   const changes = []
@@ -585,18 +598,58 @@ async function ensureProductIds(client, productNames, deps) {
 }
 
 async function ensureContractorIds(client, contractorNames) {
-  const unique = [...new Set(contractorNames.filter(Boolean))]
+  const unique = [...new Set(contractorNames.filter(Boolean).map(n => String(n).trim()))]
   const map = new Map()
   if (!unique.length) return map
 
-  const existing = await fetchNamesInChunks(client, 'contractors', 'name', unique, 'id, name')
-  for (const c of existing) map.set(c.name, c.id)
+  const { data: catalog, error: catalogErr } = await withImportRetry(() =>
+    client.from('contractors').select('id, name')
+  )
+  if (catalogErr) throw catalogErr
+
+  const byExact = new Map()
+  const byNorm = new Map()
+  for (const c of catalog || []) {
+    byExact.set(c.name, c.id)
+    byNorm.set(String(c.name || '').trim().toLowerCase(), c.id)
+  }
+
+  for (const name of unique) {
+    const id = byExact.get(name) || byNorm.get(name.toLowerCase())
+    if (id) map.set(name, id)
+  }
 
   const missing = unique.filter(name => !map.has(name))
-  if (missing.length) {
-    const rows = missing.map(name => ({ name, contractor_type: 'oba' }))
-    const inserted = await insertInChunks(client, 'contractors', rows, 'id, name', 50)
-    for (const c of inserted) map.set(c.name, c.id)
+  for (const name of missing) {
+    const { data, error } = await withImportRetry(() =>
+      client.from('contractors').insert({ name, contractor_type: 'oba' }).select('id, name').maybeSingle()
+    )
+    if (error) {
+      if (/duplicate key|contractors_name_key|unique constraint/i.test(String(error.message || ''))) {
+        const retry = byExact.get(name) || byNorm.get(name.toLowerCase())
+        if (retry) {
+          map.set(name, retry)
+          continue
+        }
+        const { data: refetch, error: refetchErr } = await withImportRetry(() =>
+          client.from('contractors').select('id, name')
+        )
+        if (refetchErr) throw refetchErr
+        for (const c of refetch || []) {
+          byExact.set(c.name, c.id)
+          byNorm.set(String(c.name || '').trim().toLowerCase(), c.id)
+        }
+        const id2 = byExact.get(name) || byNorm.get(name.toLowerCase())
+        if (id2) map.set(name, id2)
+        else throw error
+      } else {
+        throw error
+      }
+    } else if (data?.id) {
+      map.set(name, data.id)
+      byExact.set(data.name, data.id)
+      byNorm.set(String(data.name || '').trim().toLowerCase(), data.id)
+    }
   }
   return map
 }
@@ -870,8 +923,103 @@ export async function saveImportToSupabase(client, {
   }
 }
 
+/** Szacuje ile linii doklejenie doda (bez zapisu do bazy). */
+export async function estimateMergeNewItems(client, existingGroups, details, deps) {
+  if (!client || !existingGroups?.length) return 0
+  const opIds = existingGroups.map(g => details.get(operationImportKey(g))?.operationId).filter(Boolean)
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+  let total = 0
+  for (const group of existingGroups) {
+    const key = operationImportKey(group)
+    const meta = details.get(key)
+    const opId = meta?.operationId
+    if (!opId) continue
+    const diff = diffImportGroupAgainstStored(group, meta, itemsByOp.get(opId) || [], deps)
+    total += diff.newItems.length
+  }
+  return total
+}
+
+/**
+ * Usuwa zduplikowane pozycje przyjęć (ta sama operacja + produkt + kg).
+ * Zachowuje najstarszy wpis (min id). Kasuje powiązane partie i K01.
+ */
+export async function removeDuplicateIncomingOperationItems(client) {
+  if (!client) throw new Error('Brak Supabase.')
+
+  const { data: rpcData, error: rpcErr } = await withImportRetry(() =>
+    client.rpc('remove_duplicate_incoming_items')
+  )
+  if (!rpcErr) {
+    return rpcData || { items_removed: 0, lots_removed: 0, k01_removed: 0 }
+  }
+  if (!/function.*does not exist/i.test(String(rpcErr.message || ''))) throw rpcErr
+
+  const { data: items, error } = await withImportRetry(() =>
+    client.from('operation_items')
+      .select('id, operation_id, product_id, qty, lot_id, direction')
+      .eq('direction', 'przychod')
+      .order('id', { ascending: true })
+      .limit(50000)
+  )
+  if (error) throw error
+
+  const groups = new Map()
+  for (const item of items || []) {
+    const qty = Math.round(Number(item.qty || 0) * 1000) / 1000
+    const key = `${item.operation_id}|${item.product_id}|${qty}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(item)
+  }
+
+  const toDelete = []
+  for (const list of groups.values()) {
+    if (list.length <= 1) continue
+    for (let i = 1; i < list.length; i += 1) toDelete.push(list[i])
+  }
+  if (!toDelete.length) return { items_removed: 0, lots_removed: 0, k01_removed: 0, mode: 'client' }
+
+  const lotIds = [...new Set(toDelete.map(i => i.lot_id).filter(Boolean))]
+  const itemIds = toDelete.map(i => i.id)
+
+  if (lotIds.length) {
+    const { data: k01Docs } = await withImportRetry(() =>
+      client.from('haccp_documents').select('id').eq('document_type', 'K01').in('lot_id', lotIds)
+    )
+    const k01Ids = (k01Docs || []).map(d => d.id)
+    if (k01Ids.length) {
+      await deleteRowsInChunks(client, 'haccp_document_history', 'document_id', k01Ids)
+      await deleteRowsInChunks(client, 'haccp_documents', 'id', k01Ids)
+    }
+    for (const lotId of lotIds) {
+      await withImportRetry(() =>
+        client.from('fifo_allocations').delete().or(`source_lot_id.eq.${lotId},output_lot_id.eq.${lotId}`)
+      )
+    }
+    await deleteRowsInChunks(client, 'pz_fifo_change_log', 'lot_id', lotIds)
+    await deleteRowsInChunks(client, 'lot_location_history', 'lot_id', lotIds)
+    await deleteRowsInChunks(client, 'lot_change_history', 'lot_id', lotIds)
+    await deleteRowsInChunks(client, 'lots', 'id', lotIds)
+  }
+
+  await deleteRowsInChunks(client, 'operation_items', 'id', itemIds)
+
+  return {
+    items_removed: itemIds.length,
+    lots_removed: lotIds.length,
+    k01_removed: lotIds.length,
+    mode: 'client'
+  }
+}
+
 export function formatImportNetworkError(err) {
   const msg = String(err?.message || err || '')
+  if (/contractors_name_key|duplicate key.*contractors/i.test(msg)) {
+    return (
+      'Błąd: kontrahent już jest w bazie (duplikat nazwy). Odśwież stronę i spróbuj ponownie — import powinien użyć istniejącego wpisu. ' +
+      'Jeśli błąd się powtarza, zgłoś administratorowi.'
+    )
+  }
   if (/lots_lot_no_key|duplicate key.*lot/i.test(msg)) {
     return (
       'Błąd: numer partii już istnieje w bazie (pozostałość po wcześniejszym imporcie). ' +

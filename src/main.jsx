@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, partitionImportGroups, appendNewItemsFromExistingDocuments, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, partitionImportGroups, appendNewItemsFromExistingDocuments, estimateMergeNewItems, removeDuplicateIncomingOperationItems, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -288,6 +288,7 @@ function App() {
   const [haccpBusy, setHaccpBusy] = useState(false)
   const [importDeleting, setImportDeleting] = useState(false)
   const [importCleaning, setImportCleaning] = useState(false)
+  const [importDeduping, setImportDeduping] = useState(false)
   const [importSaving, setImportSaving] = useState(false)
   const [importProgress, setImportProgress] = useState('')
   const loadedForUserRef = useRef(null)
@@ -7385,6 +7386,44 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  async function runRemoveImportDuplicates() {
+    if (!supabase) return
+    if (!isAdmin(authProfile)) {
+      setMessage('Tylko administrator może usuwać zduplikowane pozycje importu.')
+      return
+    }
+    if (!window.confirm(
+      'Usunąć zduplikowane pozycje przyjęć (ta sama operacja + produkt + kg)?\n\n' +
+      'Zachowamy najstarszy wpis. Skasujemy nadmiarowe partie i K01.\n\n' +
+      'Użyj przed ponownym importem tego samego pliku Excel.'
+    )) return
+    setImportDeduping(true)
+    try {
+      const result = await removeDuplicateIncomingOperationItems(supabase)
+      const items = result?.items_removed ?? 0
+      const lots = result?.lots_removed ?? 0
+      const k01 = result?.k01_removed ?? 0
+      setMessage(
+        items
+          ? `Usunięto duplikaty: ${items} pozycji, ${lots} partii, ${k01} kart K01. Możesz wgrać plik Excel od nowa.`
+          : 'Nie znaleziono zduplikowanych pozycji przyjęć.'
+      )
+      if (items > 0) {
+        await Promise.all([
+          loadImports(),
+          loadFifoData(),
+          loadHaccpDocs({ syncK01: true }),
+          loadK03TraceData(),
+          loadPzManagementData()
+        ])
+      }
+    } catch (err) {
+      setMessage(`Błąd usuwania duplikatów: ${err?.message || err}. Uruchom w Supabase SQL: supabase/2026-v46-remove-duplicate-import-items.sql`)
+    } finally {
+      setImportDeduping(false)
+    }
+  }
+
   async function deleteImportedFile(fileId, fileNameForConfirm) {
     if (!supabase) return
     if (!ensureCanDelete()) return
@@ -7960,16 +7999,23 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       })
 
       setImportProgress('Doklejanie pozycji do istniejących dokumentów…')
-      const mergeResult = await appendNewItemsFromExistingDocuments(supabase, existingGroups, details, importDeps, {
-        onProgress: setImportProgress
-      })
+      const pendingMerge = existingGroups.length
+        ? await estimateMergeNewItems(supabase, existingGroups, details, importDeps)
+        : 0
+      const mergeResult = pendingMerge > 0
+        ? await appendNewItemsFromExistingDocuments(supabase, existingGroups, details, importDeps, {
+          onProgress: setImportProgress
+        })
+        : { importedItems: 0, createdLots: 0, mergedDocuments: 0, unchangedDocuments: existingGroups.length, changedDocuments: [] }
 
       const totalOps = importedOperations
       const totalItems = importedItems + mergeResult.importedItems
       const totalLots = createdLots + mergeResult.createdLots
       const mergeNote = mergeResult.mergedDocuments
         ? ` Doklejono pozycje do ${mergeResult.mergedDocuments} dokumentów (+${mergeResult.importedItems} linii, +${mergeResult.createdLots} partii).`
-        : (duplicateCount ? ` ${duplicateCount} dokumentów już w bazie (bez nowych pozycji).` : '')
+        : (duplicateCount && pendingMerge === 0
+          ? ` ${duplicateCount} dokumentów już w bazie — bez duplikowania pozycji.`
+          : '')
 
       const importMsgBase =
         `Import zapisany. Nowych dokumentów: ${totalOps}, pozycji: ${totalItems}, partii: ${totalLots}.${mergeNote}` +
@@ -8109,7 +8155,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Pobieramy tylko potrzebne pola: nr dokumentu/PZ, data wystawienia, ilość i produkt.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
 
       {rows.length > 0 && <>
         <div className="summary">
@@ -8135,7 +8181,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj nowy plik Excel. Po imporcie plik pojawi się w rejestrze niżej.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>
