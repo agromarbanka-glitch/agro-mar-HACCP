@@ -154,6 +154,8 @@ export async function fetchWarehouseValueMeta(client) {
     batches: stats.batches,
     snapshots
   }
+}
+
 export async function fetchWarehouseValueStats(client) {
   const [batches, lineCountRes] = await Promise.all([
     fetchWarehouseValueBatches(client),
