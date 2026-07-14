@@ -346,7 +346,7 @@ export function isMmDocument(documentType, documentNo) {
   return false
 }
 
-export async function readAgromarExcel(file, { skipMm = true } = {}) {
+export async function readAgromarExcel(file, { skipMm = true, includeUnitPrice = false } = {}) {
   const buffer = await file.arrayBuffer()
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
   const sheetName = workbook.SheetNames[0]
@@ -362,7 +362,7 @@ export async function readAgromarExcel(file, { skipMm = true } = {}) {
       documentType = inferDocumentType(documentType, documentNo)
       const productName = String(pick(row, REQUIRED.productName)).trim()
       const qty = pickLineQty(row, columnKeys)
-      const unitNetPrice = pickLineUnitNetPrice(row, columnKeys)
+      const unitNetPrice = includeUnitPrice ? pickLineUnitNetPrice(row, columnKeys) : 0
 
       return {
         rowNo: headerRow + index + 2,

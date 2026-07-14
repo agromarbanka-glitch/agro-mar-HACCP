@@ -466,7 +466,16 @@ function App() {
   const docsHubNavRef = useRef(null)
 
   const filteredRows = useMemo(() => rows
-    .map(r => ({ ...r, documentNo: normalizeDocumentNo(r.documentNo), operation: classifyOperation(r.documentType, r.documentNo) }))
+    .map(r => {
+      const documentNo = normalizeDocumentNo(r.documentNo)
+      const operation = classifyOperation(r.documentType, documentNo)
+      return {
+        ...r,
+        documentNo,
+        operation,
+        issueDate: resolveDocumentIssueDate(r.issueDate, documentNo)
+      }
+    })
     .filter(r => r.operation !== 'pominiete_mm'), [rows])
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
   const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
@@ -6512,15 +6521,25 @@ function App() {
     setImportOrphanCount(0)
     importCheckCacheRef.current = null
     try {
-      const { rows: parsed, skippedMmCount } = await readAgromarExcel(file)
+      const { rows: parsed, skippedMmCount } = await readAgromarExcel(file, { includeUnitPrice: false })
       setRows(parsed)
-      let loadMsg = `Wczytano ${parsed.length} wierszy. System pobiera: nr PZ/WZ/FV, datę, produkt, ilość i cenę netto (ostatnia kolumna „Cena netto”).`
+      let loadMsg = `Wczytano ${parsed.length} wierszy. Import HACCP/magazyn: nr PZ/WZ/FV, data, produkt, ilość — bez ceny netto.`
+      loadMsg += ` Wartość magazynu (ceny) wgrywasz osobno: Raporty → Wartość magazynu.`
       if (skippedMmCount > 0) {
         loadMsg += ` Pominięto ${skippedMmCount} wierszy MM (przesunięcia magazynowe).`
       }
       if (supabase) {
         const classified = parsed
-          .map(r => ({ ...r, operation: classifyOperation(r.documentType, r.documentNo) }))
+          .map(r => {
+            const documentNo = normalizeDocumentNo(r.documentNo)
+            const operation = classifyOperation(r.documentType, r.documentNo)
+            return {
+              ...r,
+              documentNo,
+              operation,
+              issueDate: resolveDocumentIssueDate(r.issueDate, documentNo)
+            }
+          })
           .filter(r => r.operation !== 'pominiete_mm')
         const groups = groupImportRows(classified)
         const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
@@ -6539,6 +6558,8 @@ function App() {
             return `${d.documentNo}${det?.importFilename ? ` (${det.importFilename})` : ''}`
           }).join(', ')
           loadMsg += ` Pominięto ${duplicates.length} dokumentów już w bazie (nie zostaną zapisane).`
+          const dupRange = importFreshDateSummary(duplicates)
+          if (dupRange) loadMsg += ` Daty pominiętych: ${dupRange}.`
           if (fresh.length) loadMsg += ` Do zapisu: ${fresh.length} nowych dokumentów (dowolna data, np. uzupełniające PZ z 02.07).`
           else loadMsg += ` Brak nowych dokumentów — nic nie zostanie zapisane.`
           loadMsg += ` Np. duplikat: ${examples}${duplicates.length > 5 ? '…' : ''}.`
@@ -8250,7 +8271,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </section>
 
     <section className="card">
-      <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Pobieramy tylko potrzebne pola: nr dokumentu/PZ, data wystawienia, ilość i produkt.</p></div></div>
+      <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>PZ, WZ, ilości, daty, produkty — <b>bez ceny netto</b>. Kartoteki K01–K07 i FIFO. Ceny i wartość magazynu: <b>Raporty → Wartość magazynu</b> (osobny import).</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
       <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
@@ -8278,7 +8299,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {activeTab === 'importy' && canSeeTab(authProfile, 'importy') && <>
     {renderK03UnfreezeBanner()}
     <section className="card">
-      <div className="section-title"><Upload/><div><h2>Import Excel</h2><p>Wgraj plik z operacjami magazynowymi. <b>Nowe numery</b> PZ/WZ zapisują się (dowolna data w miesiącu). Numery <b>już w bazie</b> są pomijane — lista duplikatów poniżej.</p></div></div>
+      <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>Wgraj operacje magazynowe: <b>PZ/WZ, daty, ilości, produkty</b> — bez ceny netto. Numery już w bazie są pomijane. <b>Wartość magazynu (ceny)</b> → Raporty → Wartość magazynu.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
       <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
