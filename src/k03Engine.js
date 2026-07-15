@@ -740,8 +740,9 @@ export function matchesK03ClassFilter(productName, productGroup = '', filter = '
   const normalized = normalizeK03ClassFilterValue(filter)
   if (normalized === 'all') return true
 
-  const group = productGroup || productGroupForName(productName)
-  const variant = normalizeFifoProductKey(productName)
+  const canonical = canonicalProductName(productName)
+  const group = productGroup || productGroupForName(canonical)
+  const variant = normalizeFifoProductKey(canonical)
 
   if (normalized.startsWith('group:')) {
     const want = normalized.slice(6)

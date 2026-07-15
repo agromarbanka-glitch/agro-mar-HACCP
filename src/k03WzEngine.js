@@ -335,7 +335,7 @@ export async function loadWzQueue(client, options = {}) {
       operation_id: form.data?.sale_operation_id,
       product_id: form.data?.product_id,
       product_name: canonicalProductName(form.product_name),
-      product_group: form.product_group || form.data?.product_group,
+      product_group: form.product_group || form.data?.product_group || productGroupForName(form.product_name),
       document_no: form.document_no,
       wz_date: form.document_date,
       qty: Number(form.qty || 0),

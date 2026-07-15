@@ -797,6 +797,24 @@ function App() {
     setK03AssortmentFilter(normalizeK03ClassFilterValue(snap.k03AssortmentFilter || 'all'))
   }
 
+  function resetK03SidebarFilters() {
+    setK03AssortmentFilter('all')
+    setDocsWorkflowFilter('all')
+    setDocsDateFrom('')
+    setDocsDateTo('')
+    setHaccpSearch('')
+    setHaccpStatusFilter('all')
+    persistDocsFilters('K03', {
+      docsDateFrom: '',
+      docsDateTo: '',
+      docsWorkflowFilter: 'all',
+      haccpSearch: '',
+      haccpStatusFilter: 'all',
+      k03AssortmentFilter: 'all'
+    })
+    setMessage('Filtry K03 wyzerowane — pokazuję wszystkie WZ.')
+  }
+
   function persistDocsFilters(code, snap) {
     try {
       const all = JSON.parse(localStorage.getItem(DOCS_FILTERS_STORAGE_KEY) || '{}')
@@ -945,6 +963,9 @@ function App() {
 
       {isK03 && <div className="docs-sidebar-block docs-sidebar-class-filter">
         <h4>Klasa / asortyment</h4>
+        {(k03AssortmentFilter !== 'all' || docsWorkflowFilter !== 'all' || docsDateFrom || docsDateTo) && (
+          <p className="hint"><button type="button" className="linkish mini" onClick={resetK03SidebarFilters}>Wyczyść filtry K03</button></p>
+        )}
         <label>Wybierz klasę owocu
           <select className="k03-class-filter-select" value={k03AssortmentFilter} onChange={e => setK03AssortmentFilter(normalizeK03ClassFilterValue(e.target.value))}>
             <option value="all">Wszystkie klasy ({k03ClassCounts.get('all') || 0})</option>
@@ -9264,8 +9285,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             </details>
           </section>
           <details className="docs-k03-wz" open>
-            <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje · {syntheticK03Docs.length} K03</summary>
-            {filteredWzQueueLines.length === 0 && !k03Loading && <p className="hint">Brak WZ. Import Excel → Zapisz do Supabase.</p>}
+            <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje (widoczne {filteredWzQueueLines.length} z {wzQueueLines.length}) · {syntheticK03Docs.length} K03</summary>
+            {filteredWzQueueLines.length === 0 && !k03Loading && wzQueueLines.length > 0 && (
+              <div className="warning inline-warning" style={{ marginBottom: 10 }}>
+                <AlertTriangle size={18}/>
+                <div>
+                  <b>Filtry ukrywają wszystkie WZ</b> — w bazie jest {wzQueueLines.length} WZ (w tym porzeczka kolorowa). To nie znaczy, że asortyment zniknął.
+                  <div className="actions" style={{ marginTop: 8 }}>
+                    <button type="button" className="secondary mini" onClick={resetK03SidebarFilters}>Pokaż wszystkie WZ</button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {filteredWzQueueLines.length === 0 && !k03Loading && wzQueueLines.length === 0 && <p className="hint">Brak WZ. Import Excel → Zapisz do Supabase.</p>}
             {filteredWzQueueLines.length > 0 && <div className="table-wrap docs-table-wrap"><table className="docs-table">
               <thead><tr><th>Asortyment</th><th>Data WZ</th><th>Nr WZ</th><th>Ilość</th><th>Status</th><th>Akcje</th></tr></thead>
               <tbody>{filteredWzQueueLines.map(line => {
