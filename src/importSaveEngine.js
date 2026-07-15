@@ -1,6 +1,13 @@
 /**
  * Zapis importu Excel do Supabase – batch + retry (mniej zapytań, odporność na NetworkError).
+ *
+ * IMPORT SAVE v2.0 (zatwierdzony wzorzec — nie zmieniaj bez zgłoszenia problemu z importem):
+ * - HACCP/magazyn osobno od wartości magazynu (bez ceny netto)
+ * - jeden przebieg zapisu + create_incoming_lots_batch v48
+ * - K01 i lekki repair po zapisie w tle (main.jsx)
+ * - duplikaty PZ/WZ po numerze dokumentu → pomijane (FIFO)
  */
+export const IMPORT_SAVE_ENGINE_VERSION = '2.0'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'

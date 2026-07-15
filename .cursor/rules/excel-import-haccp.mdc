@@ -1,0 +1,41 @@
+---
+description: Standard importu Excel HACCP/magazyn — nie zmieniaj bez zgłoszenia problemu
+globs: src/importSaveEngine.js,src/excelImport.js,src/main.jsx,src/k01Engine.js,supabase/*import*.sql,supabase/*lot*.sql
+alwaysApply: true
+---
+
+# Import Excel — wzorzec produkcyjny (zatwierdzony)
+
+**Nie modyfikuj logiki importu**, dopóki użytkownik nie zgłosi konkretnego problemu z importem.
+
+## Dwa osobne importy
+
+| Cel | Gdzie | Cena netto |
+|-----|-------|------------|
+| HACCP, FIFO, K01, operacje magazynowe | **Importy → Import Excel** | **NIE** (`includeUnitPrice: false`) |
+| Wartość magazynu | **Raporty → Wartość magazynu** | TAK |
+
+Nigdy nie łącz tych ścieżek ani komunikatów UI.
+
+## Zapis HACCP (Importy → Zapisz do Supabase)
+
+1. `prepareImportExcelSave` → duplikaty po **numerze PZ/WZ** → zapis tylko **fresh** (bez merge/append).
+2. **Jeden przebieg**: operacje (chunk 250) → pozycje (500) → partie RPC `create_incoming_lots_batch` (chunk 600, **SQL v48**).
+3. **Bez** paczek po 40 dokumentów, **bez** `unit_price_net`, **bez** skanowania wszystkich K01 przed zapisem magazynu.
+4. Po zapisie magazynu: komunikat sukcesu od razu; **K01 + lekki repair w tle** (`repairWarehouseImportDuplicates` z `light: true`, `importedFileId`).
+5. **FIFO przy deduplikacji**: zostaje najstarszy wpis (id / data z numeru PZ).
+
+## Daty
+
+- PZ z dniem w numerze (`PZ/018/07/07/2026`) → data z numeru, nie forward-fill z Excela.
+- WZ `numer/MM/RRRR` → miesiąc/rok z numeru, nie data z Excela.
+
+## Supabase (wymagane migracje)
+
+- `2026-v47-generate-lot-no-sync.sql` — numery partii
+- `2026-v48-fast-import-lots-batch.sql` — szybkie partie
+- `2026-v46-remove-duplicate-import-items.sql` — deduplikacja (przycisk admin)
+
+## Czas docelowy
+
+Magazyn: **1–3 min**. K01 w tle: **+1–2 min**. Przy timeoutie: ponowny „Zapisz” (duplikaty pomijane).
