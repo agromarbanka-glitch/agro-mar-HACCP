@@ -714,8 +714,26 @@ const K03_KNOWN_VARIANT_IDS = new Set(
 export function normalizeK03ClassFilterValue(filter = 'all') {
   const raw = String(filter || 'all').trim()
   if (!raw || raw === 'all') return 'all'
-  if (raw.startsWith('group:') || raw.startsWith('variant:')) return raw
-  return `group:${raw}`
+  let normalized = raw
+  if (!raw.startsWith('group:') && !raw.startsWith('variant:')) {
+    normalized = `group:${raw}`
+  }
+  const legacy = {
+    'variant:porzeczka czerwona': 'variant:porzeczka kolorowa',
+    'variant:porzeczka czerwona pulpa': 'variant:porzeczka kolorowa pulpa'
+  }
+  return legacy[normalized] || normalized
+}
+
+function k03VariantMatchesFilter(variant, filterVariant) {
+  if (variant === filterVariant) return true
+  const aliasPairs = [
+    ['porzeczka kolorowa', 'porzeczka czerwona'],
+    ['porzeczka kolorowa pulpa', 'porzeczka czerwona pulpa']
+  ]
+  return aliasPairs.some(([a, b]) =>
+    (variant === a && filterVariant === b) || (variant === b && filterVariant === a)
+  )
 }
 
 export function matchesK03ClassFilter(productName, productGroup = '', filter = 'all') {
@@ -726,11 +744,13 @@ export function matchesK03ClassFilter(productName, productGroup = '', filter = '
   const variant = normalizeFifoProductKey(productName)
 
   if (normalized.startsWith('group:')) {
-    return group === normalized.slice(6)
+    const want = normalized.slice(6)
+    if (want === 'porzeczka_czerwona' && group === 'porzeczka_czerwona') return true
+    return group === want
   }
 
   if (normalized.startsWith('variant:')) {
-    return variant === normalized.slice(8)
+    return k03VariantMatchesFilter(variant, normalized.slice(8))
   }
 
   return false
@@ -868,6 +888,7 @@ export async function repairPorzeczkaProductGroups(client, { onProgress } = {}) 
 
   let productsFixed = 0
   const productIdsByGroup = { porzeczka_czarna: [], porzeczka_czerwona: [] }
+  const canonicalByProductId = new Map()
 
   for (const p of products || []) {
     const text = normalizeText(p.name)
@@ -888,6 +909,10 @@ export async function repairPorzeczkaProductGroups(client, { onProgress } = {}) 
 
     if (!targetGroup) continue
     productIdsByGroup[targetGroup].push(p.id)
+    const displayName = canonical || (targetGroup === 'porzeczka_czerwona'
+      ? (/pulpa/.test(text) || p.code === 'Pkp' ? 'Porzeczka kolorowa pulpa' : 'Porzeczka kolorowa')
+      : (/pulpa/.test(text) || p.code === 'Pczp' ? 'Porzeczka czarna pulpa' : 'Porzeczka czarna'))
+    canonicalByProductId.set(p.id, displayName)
 
     const patch = {}
     if (p.product_group !== targetGroup) patch.product_group = targetGroup
@@ -899,13 +924,9 @@ export async function repairPorzeczkaProductGroups(client, { onProgress } = {}) 
     productsFixed += 1
   }
 
-  onProgress?.('Nazwy w pozycjach i kartotekach: czerwona → kolorowa…')
-  const kolorIds = productIdsByGroup.porzeczka_czerwona
-  if (kolorIds.length) {
-    for (let i = 0; i < kolorIds.length; i += 80) {
-      const chunk = kolorIds.slice(i, i + 80)
-      await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa' }).in('product_id', chunk)
-    }
+  onProgress?.('Nazwy w pozycjach: czerwona → kolorowa…')
+  for (const [productId, displayName] of canonicalByProductId) {
+    await client.from('operation_items').update({ raw_product_name: displayName }).eq('product_id', productId)
   }
   await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa' }).ilike('raw_product_name', '%porzeczka%czerwon%').not('raw_product_name', 'ilike', '%pulpa%')
   await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa pulpa' }).ilike('raw_product_name', '%porzeczka%czerwon%pulpa%')

@@ -6441,6 +6441,12 @@ function App() {
   }, [activeTab, docsFilter])
 
   useEffect(() => {
+    if (docsFilter !== 'K03') return
+    const fixed = normalizeK03ClassFilterValue(k03AssortmentFilter)
+    if (fixed !== k03AssortmentFilter) setK03AssortmentFilter(fixed)
+  }, [docsFilter, k03AssortmentFilter])
+
+  useEffect(() => {
     if (activeTab === 'stany' && supabase && authReady && (authProfile || skipAuth)) {
       loadStanyData()
     }
@@ -7132,7 +7138,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       let note = ''
 
       if (supabase) {
-        await repairPorzeczkaProductGroups(supabase).catch(() => {})
         const queue = await loadWzQueue(supabase, { repairPz: options.repairPz !== false })
         forms = queue.forms || []
         setWzQueueLines(queue.lines || [])
