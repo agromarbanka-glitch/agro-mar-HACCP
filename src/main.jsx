@@ -4,8 +4,8 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick } from './importSaveEngine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData } from './fifoEngine'
@@ -318,6 +318,7 @@ function App() {
   const [importPreviewModal, setImportPreviewModal] = useState(null)
   const [importOpEditDates, setImportOpEditDates] = useState({})
   const [importOpDateSaving, setImportOpDateSaving] = useState(null)
+  const [importDateRepairing, setImportDateRepairing] = useState(false)
   const [importDuplicates, setImportDuplicates] = useState([])
   const [importNewDocCount, setImportNewDocCount] = useState(0)
   const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
@@ -1470,6 +1471,28 @@ function App() {
     }
   }
 
+  async function repairFifoDatesForK03Preview() {
+    if (!k03WzModal || !supabase) return
+    setK03WzModal(m => ({ ...m, loading: true, error: '', preview: null }))
+    try {
+      await repairPorzeczkaProductGroups(supabase)
+      const result = await repairFifoPzDatesQuick(supabase)
+      invalidateFifoBaseCache()
+      await loadK03TraceData({ repairPz: false })
+      const preview = await previewK03Workflow(supabase, k03WzModal.line, {
+        mode: k03WzModal.mode,
+        przerobDate: k03WzModal.przerobDate,
+        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal),
+        frozenKeys: frozenKeysFromSnapshots(k03Snapshots)
+      })
+      if (!preview.ok) throw new Error(preview.error || 'Błąd podglądu FIFO po naprawie dat.')
+      setK03WzModal(m => ({ ...m, preview, loading: false, confirmMismatch: false, manualRows: [] }))
+      setMessage(`Skorygowano ${result.dates_fixed} dat PZ i ${result.lots_synced} partii — odświeżono FIFO.`)
+    } catch (err) {
+      setK03WzModal(m => ({ ...m, loading: false, error: err?.message || String(err) }))
+    }
+  }
+
   async function confirmK03WzModal(acceptMismatch = false) {
     if (!k03WzModal || !supabase) return
     setK03WzModal(m => ({ ...m, saving: true, savingStep: 'Przygotowanie…', error: '' }))
@@ -1556,7 +1579,7 @@ function App() {
       <div className="haccp-modal k03-wz-modal" onClick={e => e.stopPropagation()}>
         <div className="k03-wz-modal-header">
           <h3>{title}</h3>
-          <p className="k03-wz-modal-subtitle"><b>{line.product_name}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
+          <p className="k03-wz-modal-subtitle"><b>{canonicalProductName(line.product_name)}</b> · WZ {line.document_no} · {Number(line.qty || 0).toLocaleString('pl-PL')} kg · {line.wz_date}</p>
           {editMode && <p className="hint k03-wz-modal-note">Możesz zmienić tryb (przerób / bez przerobu), datę, źródła PZ i numer partii. Zamrożona kartoteka zostanie odmrożona i zapisana od nowa.</p>}
         </div>
         <div className="k03-wz-modal-body">
@@ -1658,6 +1681,14 @@ function App() {
             <> {preview.diagnostics.priorUnallocatedWzCount} wcześniejszych WZ bez K03 ({Number(preview.diagnostics.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) – rozlicz je wcześniej.</>
           )}
         </p>}
+        {preview?.diagnostics && Number(preview.diagnostics.purchasedTotalKg || 0) > 0 && Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0 && (
+          <div className="actions no-print" style={{ marginBottom: 8 }}>
+            <button type="button" className="secondary mini" disabled={loading || saving} onClick={repairFifoDatesForK03Preview}>
+              {loading ? 'Naprawa dat…' : 'Napraw daty PZ z numerów dokumentów'}
+            </button>
+            <span className="hint">W bazie jest {Number(preview.diagnostics.purchasedTotalKg).toLocaleString('pl-PL')} kg PZ, ale wszystkie mają datę późniejszą niż {preview.cutoffDate} — kliknij, aby skorygować z nr PZ (np. …/26/06/2026).</span>
+          </div>
+        )}
         {confirmMismatch && (manualRows?.length > 0) && (
           <div className="k03-manual-pz-box">
             <p className="hint"><b>Uzupełnij ręcznie brakujące PZ</b> — wiersze z FIFO możesz poprawić; w wierszu „brak towaru” wpisz nr PZ, datę, dostawcę i kg.</p>
@@ -7101,6 +7132,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       let note = ''
 
       if (supabase) {
+        await repairPorzeczkaProductGroups(supabase).catch(() => {})
         const queue = await loadWzQueue(supabase, { repairPz: options.repairPz !== false })
         forms = queue.forms || []
         setWzQueueLines(queue.lines || [])
@@ -7588,6 +7620,23 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  async function repairImportFileDates() {
+    if (!supabase || !importPreviewModal?.fileId) return
+    setImportDateRepairing(true)
+    try {
+      await repairPorzeczkaProductGroups(supabase)
+      const result = await repairFifoPzDatesQuick(supabase, { importedFileId: importPreviewModal.fileId })
+      invalidateFifoBaseCache()
+      await loadImportPreview(importPreviewModal.fileId, importPreviewModal.fileName)
+      await loadK03TraceData({ repairPz: false })
+      setMessage(`Naprawiono ${result.dates_fixed} dat PZ, zsynchronizowano ${result.lots_synced} partii. Odśwież podgląd FIFO przy WZ.`)
+    } catch (err) {
+      setMessage(`Błąd naprawy dat: ${err?.message || err}`)
+    } finally {
+      setImportDateRepairing(false)
+    }
+  }
+
   async function saveImportOperationDate(op) {
     if (!supabase || !op?.id) return
     const newDate = importOpEditDates[op.id] ?? String(op.operation_date || '').slice(0, 10)
@@ -7620,6 +7669,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <div className="haccp-modal import-preview-modal" onClick={e => e.stopPropagation()}>
           <h3>Podgląd importu: {fileName || 'plik Excel'}</h3>
           <p className="hint">{loading ? 'Wczytywanie dokumentów…' : `${filtered.length} dokumentów w bazie. Możesz ręcznie poprawić datę PZ lub WZ.`}</p>
+          {!loading && filtered.length > 0 && (
+            <div className="actions no-print" style={{ marginBottom: 8 }}>
+              <button type="button" className="secondary mini" disabled={importDateRepairing} onClick={repairImportFileDates}>
+                {importDateRepairing ? 'Naprawa…' : 'Napraw daty PZ z numerów dokumentów'}
+              </button>
+            </div>
+          )}
           {error && <p className="status danger">{error}</p>}
           {!loading && filtered.length > 0 && (
             <div className="table-wrap small import-preview-table">
@@ -9213,7 +9269,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 const frozen = k03LineIsFrozen(line)
                 const modeTag = k03LineWorkflowModeTag(line)
                 return <tr key={line.key} className={frozen ? 'row-frozen' : ''}>
-                  <td><b>{line.product_name}</b></td>
+                  <td><b>{canonicalProductName(line.product_name)}</b></td>
                   <td>{line.wz_date || '-'}</td>
                   <td>{line.document_no || '-'}</td>
                   <td>{Number(line.qty || 0).toLocaleString('pl-PL')} kg</td>

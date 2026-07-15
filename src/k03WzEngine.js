@@ -13,6 +13,7 @@ import {
   productGroupForName,
   repairPzRowsFromLots,
   formNeedsPzRepair,
+  canonicalProductName,
   K03_ENGINE_VERSION
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
@@ -333,7 +334,7 @@ export async function loadWzQueue(client, options = {}) {
       formId: form.id,
       operation_id: form.data?.sale_operation_id,
       product_id: form.data?.product_id,
-      product_name: form.product_name,
+      product_name: canonicalProductName(form.product_name),
       product_group: form.product_group || form.data?.product_group,
       document_no: form.document_no,
       wz_date: form.document_date,

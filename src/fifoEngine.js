@@ -1,7 +1,7 @@
 /**
  * FIFO – przeliczanie przyrostowe (braki) i pełne z ochroną zamrożonych K03.
  */
-import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo, isInternalLotNumber, repairPzRowsFromLots } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo, isInternalLotNumber, repairPzRowsFromLots, fifoClassDisplayLabel, canonicalProductName } from './k03Engine'
 
 function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
@@ -164,7 +164,7 @@ async function loadFifoBaseData(client, options = {}) {
       key,
       operation_id: item.operation_id,
       product_id: item.product_id,
-      product_name: rawName || product?.name || '',
+      product_name: canonicalProductName(rawName || product?.name || ''),
       sale_group: resolveProductGroup(product, rawName),
       matchSpec: resolveFifoMatchSpec(product, rawName),
       sale_date: op?.operation_date,
@@ -1081,7 +1081,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     diagnostics: {
       productGroup: sale.sale_group,
       fifoVariant: matchSpec?.variantKey,
-      fifoClassLabel: matchSpec?.mode === 'variant' ? [...matchSpec.sourceKeys].join(', ') : matchSpec?.variantKey,
+      fifoClassLabel: fifoClassDisplayLabel(matchSpec),
       fifoSourceVariants: matchSpec?.mode === 'variant' ? [...matchSpec.sourceKeys] : undefined,
       purchasedTotalKg: purchasedInventory.purchasedTotal,
       purchasedWithinCutoffKg: purchasedInventory.purchasedWithinCutoff,

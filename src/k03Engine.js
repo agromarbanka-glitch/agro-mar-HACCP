@@ -399,6 +399,22 @@ function isPorzeczkaCzarnaKey(lotKey, group = '') {
     group === 'porzeczka_czarna'
 }
 
+/** Etykieta klasy FIFO do wyświetlania (np. porzeczka_czerwona → Porzeczka kolorowa). */
+export function fifoClassDisplayLabel(matchSpecOrKey) {
+  const spec = typeof matchSpecOrKey === 'object' ? matchSpecOrKey : null
+  const rawKey = spec
+    ? (spec.mode === 'variant' && spec.sourceKeys?.length ? spec.sourceKeys[0] : (spec.variantKey || spec.productGroup))
+    : String(matchSpecOrKey || '')
+  const key = normalizeText(rawKey)
+  if (key === 'porzeczka_czerwona' || isPorzeczkaKolorowaSourceKey(key)) return 'Porzeczka kolorowa'
+  if (key === 'porzeczka_czarna' || key === 'porzeczka czarna') return 'Porzeczka czarna'
+  if (key === 'porzeczka kolorowa') return 'Porzeczka kolorowa'
+  if (key === 'truskawka') return 'Truskawka'
+  if (key === 'truskawka z szypulka') return 'Truskawka z szypułką'
+  if (key.startsWith('malina')) return canonicalProductName(rawKey) || rawKey
+  return rawKey || key
+}
+
 /** Nazwa kanoniczna produktu – synonimy z importu mapowane na nazwy w systemie. */
 export function canonicalProductName(productName = '') {
   const raw = String(productName || '').trim()
@@ -883,6 +899,19 @@ export async function repairPorzeczkaProductGroups(client, { onProgress } = {}) 
     productsFixed += 1
   }
 
+  onProgress?.('Nazwy w pozycjach i kartotekach: czerwona → kolorowa…')
+  const kolorIds = productIdsByGroup.porzeczka_czerwona
+  if (kolorIds.length) {
+    for (let i = 0; i < kolorIds.length; i += 80) {
+      const chunk = kolorIds.slice(i, i + 80)
+      await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa' }).in('product_id', chunk)
+    }
+  }
+  await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa' }).ilike('raw_product_name', '%porzeczka%czerwon%').not('raw_product_name', 'ilike', '%pulpa%')
+  await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa pulpa' }).ilike('raw_product_name', '%porzeczka%czerwon%pulpa%')
+  await client.from('haccp_documents').update({ product_name: 'Porzeczka kolorowa' }).ilike('product_name', '%porzeczka%czerwon%').not('product_name', 'ilike', '%pulpa%')
+  await client.from('haccp_documents').update({ product_name: 'Porzeczka kolorowa pulpa' }).ilike('product_name', '%porzeczka%czerwon%pulpa%')
+
   let lotsFixed = 0
   for (const [group, ids] of Object.entries(productIdsByGroup)) {
     if (!ids.length) continue
@@ -956,7 +985,7 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   const lotNoOverride = options.lotNo || ''
   const op = saleLine.op
   const product = productMap.get(saleLine.product_id)
-  const productName = product?.name || saleLine.raw_product_name || 'Produkt'
+  const productName = canonicalProductName(product?.name || saleLine.raw_product_name || 'Produkt')
   const productGroup = resolveProductGroup(product, productName)
   const wzNo = saleDocumentNo(op) || saleLine.document_no || `OP-${String(saleLine.operation_id || '').slice(0, 8)}`
   const wzDate = saleOperationDate(op) || saleLine.issue_date || '0000-01-01'

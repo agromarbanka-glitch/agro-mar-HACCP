@@ -12,7 +12,7 @@
 export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
-import { repairPorzeczkaProductGroups } from './k03Engine.js'
+import { repairPorzeczkaProductGroups, canonicalProductName } from './k03Engine.js'
 import { invalidateFifoBaseCache } from './fifoEngine.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
@@ -1376,6 +1376,63 @@ export async function repairDatesFromDocumentNumbers(client, { onProgress } = {}
     offset += pageSize
   }
   return { dates_fixed: fixed }
+}
+
+/** Ujednolica production_date partii PZ z datą operacji źródłowej (po ręcznej korekcie dat). */
+export async function syncIncomingLotProductionDates(client, { onProgress } = {}) {
+  if (!client) return { lots_synced: 0 }
+  onProgress?.('Synchronizacja dat partii PZ z operacjami…')
+  let synced = 0
+  let offset = 0
+  const pageSize = 400
+  while (true) {
+    const { data: ops, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, operation_date, operation_type, document_no')
+        .eq('operation_type', 'przyjecie')
+        .order('id', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+    )
+    if (error) throw error
+    if (!ops?.length) break
+
+    for (const op of ops) {
+      const correct = String(op.operation_date || '').slice(0, 10)
+      if (!correct || correct === '0000-01-01') continue
+      const { data: lots, error: lotErr } = await withImportRetry(() =>
+        client.from('lots').select('id, production_date').eq('source_operation_id', op.id)
+      )
+      if (lotErr) throw lotErr
+      for (const lot of lots || []) {
+        const current = String(lot.production_date || '').slice(0, 10)
+        if (current === correct) continue
+        await withImportRetry(() =>
+          client.from('lots').update({ production_date: correct }).eq('id', lot.id)
+        )
+        synced += 1
+      }
+    }
+
+    if (ops.length < pageSize) break
+    offset += pageSize
+  }
+  if (synced) invalidateFifoBaseCache()
+  return { lots_synced: synced }
+}
+
+/** Naprawa dat PZ (z numerów dokumentów) + synchronizacja partii — przed podglądem FIFO. */
+export async function repairFifoPzDatesQuick(client, { onProgress, importedFileId } = {}) {
+  const fromDocs = await repairDatesFromDocumentNumbers(client, { onProgress })
+  const fromFile = importedFileId
+    ? await repairDatesForImportFile(client, importedFileId, { onProgress })
+    : { dates_fixed: 0 }
+  const sync = await syncIncomingLotProductionDates(client, { onProgress })
+  invalidateFifoBaseCache()
+  return {
+    dates_fixed: (fromDocs.dates_fixed || 0) + (fromFile.dates_fixed || 0),
+    lots_synced: sync.lots_synced || 0
+  }
 }
 
 /**
