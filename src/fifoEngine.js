@@ -407,12 +407,93 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatch
   return { priorUnallocatedQty, priorUnallocatedCount }
 }
 
-function buildScratchLotStateForSale(base, saleKey, matchSpec, workflowBySaleKey) {
+function buildScratchLotStateForSale(base, saleKey) {
   const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
-  resetIncomingLotsInPool(lotState, base.productMap, matchSpec, base.opMap)
-  applyOtherSalesAllocations(base, lotState, saleKey, matchSpec, workflowBySaleKey)
-  reservePriorUnallocatedSales(base, lotState, saleKey, matchSpec, workflowBySaleKey)
+  const existing = base.allocationsBySaleKey.get(saleKey) || []
+  if (existing.length) restoreAllocationsToLots(existing, lotState)
   return lotState
+}
+
+function sumAllocatedKgForPool(base, matchSpec, excludeSaleKey = null, workflowBySaleKey = null) {
+  const wfMap = workflowBySaleKey || base.workflowBySaleKey || new Map()
+  let total = 0
+  for (const alloc of base.allocationsRaw || []) {
+    const sk = saleLineKey(alloc.operation_id, alloc.product_id)
+    if (excludeSaleKey && sk === excludeSaleKey) continue
+    const sale = base.saleByKey?.get(sk)
+    if (!sale) continue
+    const saleSpec = effectiveSaleMatchSpec(sale, wfMap.get(sk) || null)
+    if (!sameFifoPool(saleSpec, matchSpec)) continue
+    total += Number(alloc.qty || 0)
+  }
+  return Math.round(total * 1000) / 1000
+}
+
+function poolPurchasedKg(base, matchSpec) {
+  let total = 0
+  for (const lot of base.lotState.values()) {
+    if (!fifoLotMatchesMatchSpec(lot, base.productMap, matchSpec)) continue
+    if (!isIncomingLotOperation(base.opMap.get(lot.source_operation_id))) continue
+    total += Number(lot.initial_qty || 0)
+  }
+  return Math.round(total * 1000) / 1000
+}
+
+function poolFifoOverAllocated(base, matchSpec) {
+  const poolLotIds = poolIncomingLotIds(base.lotState, base.productMap, matchSpec, base.opMap)
+  for (const lotId of poolLotIds) {
+    const lot = base.lotState.get(lotId)
+    if (!lot) continue
+    const used = (base.allocationsRaw || [])
+      .filter(a => a.source_lot_id === lotId)
+      .reduce((s, a) => s + Number(a.qty || 0), 0)
+    if (used > Number(lot.initial_qty || 0) + 0.001) return true
+  }
+  const purchased = poolPurchasedKg(base, matchSpec)
+  const allocated = sumAllocatedKgForPool(base, matchSpec, null, base.workflowBySaleKey)
+  return purchased > 0 && allocated > purchased + 0.5
+}
+
+/** Przebudowa FIFO w puli produktu – kolejność WZ, tylko faktyczne kg (naprawa po błędnych zapisach). */
+async function rebuildPoolFifoInOrder(client, base, matchSpec, workflowBySaleKey) {
+  const poolLotIds = poolIncomingLotIds(base.lotState, base.productMap, matchSpec, base.opMap)
+  if (!poolLotIds.length) return
+
+  const poolLotSet = new Set(poolLotIds)
+  const allocIds = (base.allocationsRaw || [])
+    .filter(a => poolLotSet.has(a.source_lot_id))
+    .map(a => a.id)
+  if (allocIds.length) await deleteAllocations(client, allocIds)
+
+  for (const lotId of poolLotIds) {
+    const lot = base.lotState.get(lotId)
+    if (!lot) continue
+    lot.remaining_qty = Number(lot.initial_qty || 0)
+    lot.status = 'aktywna'
+    base.lotState.set(lotId, lot)
+  }
+  await persistLotsBatch(client, base.lotState, poolLotIds)
+
+  const wfMap = workflowBySaleKey || base.workflowBySaleKey || new Map()
+  for (const sale of base.sortedSales) {
+    const wf = wfMap.get(sale.key) || null
+    const saleSpec = effectiveSaleMatchSpec(sale, wf)
+    if (!sameFifoPool(saleSpec, matchSpec)) continue
+    const spec = saleMatchSpecWithOptions(sale, {
+      fifoSourceKeys: wf?.fifo_source_keys,
+      fifo_source_keys: wf?.fifo_source_keys
+    })
+    const cutoff = saleFifoCutoffDate(sale, wf)
+    await allocateSale(
+      client,
+      { ...sale, matchSpec: spec, sale_date: cutoff },
+      base.lotState,
+      base.productMap,
+      base.opMap,
+      { matchSpec: spec }
+    )
+  }
+  await syncPoolLotRemainingFromAllocations(client, base, matchSpec)
 }
 
 function poolIncomingLotIds(lotState, productMap, matchSpec, opMap) {
@@ -589,7 +670,7 @@ async function enrichAllocationRows(client, allocationRows) {
 
 /** Podgląd FIFO dla jednej pozycji WZ z datą graniczną (przerób lub WZ). */
 export async function previewFifoForSale(client, operationId, productId, cutoffDate, options = {}) {
-  const base = await loadFifoBaseData(client)
+  const base = await loadFifoBaseData(client, options.forceReload ? { forceReload: true } : {})
   const workflowBySaleKey = base.workflowBySaleKey || new Map()
   const saleKey = saleLineKey(operationId, productId)
   const sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
@@ -600,15 +681,25 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   const matchSpec = saleMatchSpecWithOptions(sale, options)
   await syncPoolLotRemainingFromAllocations(client, base, matchSpec)
 
-  const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
-  resetIncomingLotsInPool(lotState, base.productMap, matchSpec, base.opMap)
+  if (!options._poolRebuilt && poolFifoOverAllocated(base, matchSpec)) {
+    await rebuildPoolFifoInOrder(client, base, matchSpec, workflowBySaleKey)
+    invalidateFifoBaseCache()
+    return previewFifoForSale(client, operationId, productId, cutoffDate, { ...options, _poolRebuilt: true, forceReload: true })
+  }
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
-  const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
+  const warehouseInventory = summarizeGroupInventory(
+    new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }])),
+    base.productMap,
+    matchSpec,
+    cutoff,
+    base.opMap
+  )
+  const lotState = buildScratchLotStateForSale(base, saleKey)
+  const inventoryForSale = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
   const salesSummary = summarizeGroupSales(base, matchSpec, saleKey)
-  applyOtherSalesAllocations(base, lotState, saleKey, matchSpec, workflowBySaleKey)
   const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey, matchSpec, workflowBySaleKey)
-  const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
+  const allocatedByOthersKg = sumAllocatedKgForPool(base, matchSpec, saleKey, workflowBySaleKey)
   const sim = simulateAllocation({ ...sale, matchSpec }, lotState, base.productMap, cutoff, base.opMap)
   const pzRows = enrichAllocationRowsLocal(sim.allocationRows, lotState, base.opMap)
   const pzRowsValid = pzRows.filter(r => {
@@ -637,19 +728,21 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       productGroup: sale.sale_group,
       fifoVariant: matchSpec?.variantKey,
       fifoSourceVariants: matchSpec?.mode === 'variant' ? [...matchSpec.sourceKeys] : undefined,
-      purchasedTotalKg: inventoryBefore.purchasedTotal,
-      purchasedWithinCutoffKg: inventoryBefore.purchasedWithinCutoff,
+      purchasedTotalKg: warehouseInventory.purchasedTotal,
+      purchasedWithinCutoffKg: warehouseInventory.purchasedWithinCutoff,
       soldTotalKg: salesSummary.soldTotal,
       soldBeforeTargetKg: salesSummary.soldBeforeTarget,
-      remainingWithinCutoffKg: inventoryBefore.remainingWithinCutoff,
-      remainingAfterCutoffKg: inventoryBefore.remainingAfterCutoff,
-      remainingWithinCutoffAfterReserveKg: inventoryAfterReserve.remainingWithinCutoff,
-      lotsMissingDateKg: inventoryBefore.lotsMissingDateKg,
-      lotCountInGroup: inventoryBefore.lotCount,
-      lotCountWithinCutoff: inventoryBefore.lotCountWithinCutoff,
+      remainingWithinCutoffKg: warehouseInventory.remainingWithinCutoff,
+      remainingAfterCutoffKg: warehouseInventory.remainingAfterCutoff,
+      remainingWithinCutoffAfterReserveKg: inventoryForSale.remainingWithinCutoff,
+      allocatedByOtherWzKg: allocatedByOthersKg,
+      lotsMissingDateKg: warehouseInventory.lotsMissingDateKg,
+      lotCountInGroup: warehouseInventory.lotCount,
+      lotCountWithinCutoff: warehouseInventory.lotCountWithinCutoff,
       priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
       priorUnallocatedWzKg: priorReserve.priorUnallocatedQty,
-      targetSaleQty: Number(sale.sale_qty || 0)
+      targetSaleQty: Number(sale.sale_qty || 0),
+      fifoRebuilt: Boolean(options._poolRebuilt)
     }
   }
 }
@@ -675,7 +768,7 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
 
   await syncPoolLotRemainingFromAllocations(client, base, matchSpec)
 
-  const scratch = buildScratchLotStateForSale(base, saleKey, matchSpec, workflowBySaleKey)
+  const scratch = buildScratchLotStateForSale(base, saleKey)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const saleForAlloc = { ...sale, matchSpec, sale_date: cutoff }

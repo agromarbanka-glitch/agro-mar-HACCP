@@ -370,7 +370,13 @@ function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
     note += formatPostCutoffStockHint(diag.remainingAfterCutoffKg, cutoffDate, wzDate)
   }
   if ((diag.priorUnallocatedWzCount || 0) > 0) {
-    note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze przypisanych PZ – rozlicz je od najstarszej daty WZ (kolejność FIFO).`
+    note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je od najstarszej daty (kolejność FIFO).`
+  }
+  if (Number(diag.allocatedByOtherWzKg || 0) > 0.5) {
+    note += ` Inne WZ mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z tej puli.`
+  }
+  if (diag.fifoRebuilt) {
+    note += ' FIFO puli zostało automatycznie przeliczone wg stanu magazynu (kg).'
   }
   const soldBefore = Number(diag.soldBeforeTargetKg || 0)
   const pzCutoff = Number(diag.purchasedWithinCutoffKg || 0)
