@@ -72,7 +72,7 @@ import * as XLSX from 'xlsx'
 import './style.css'
 
 const PRODUCTS = [
-  ['Malina pulpa', 'Mp'], ['Porzeczka czarna', 'Pcz'], ['Porzeczka czarna pulpa', 'Pczp'], ['Porzeczka czerwona', 'Pk'], ['Porzeczka czerwona pulpa', 'Pkp'], ['Truskawka', 'T'],
+  ['Malina pulpa', 'Mp'], ['Porzeczka czarna', 'Pcz'], ['Porzeczka czarna pulpa', 'Pczp'], ['Porzeczka kolorowa', 'Pk'], ['Porzeczka kolorowa pulpa', 'Pkp'], ['Truskawka', 'T'],
   ['Truskawka z szypułką', 'Tsz'], ['Aronia', 'A'], ['Śliwka', 'S'], ['Wiśnia', 'W'],
   ['Malina klasa I', 'M1'], ['Malina extra', 'Mex'], ['Jabłko obierka', 'Jabobier'], ['Jabłko na obierkę', 'Jabobier'], ['Jabłko przemysłowe', 'Jab']
 ]
@@ -166,9 +166,10 @@ const PRODUCT_CODE_BY_NORMALIZED_NAME = new Map([
   [normalizeText('Jabłko obierka'), 'Jabobier'],
   [normalizeText('Jabłko na obierke'), 'Jabobier'],
   [normalizeText('Porzeczka czarna pulpa'), 'Pczp'],
-  [normalizeText('Porzeczka czerwona pulpa'), 'Pkp'],
-  [normalizeText('Porzeczka kolorowa'), 'Pk'],
   [normalizeText('Porzeczka kolorowa pulpa'), 'Pkp'],
+  [normalizeText('Porzeczka kolorowa'), 'Pk'],
+  [normalizeText('Porzeczka czerwona pulpa'), 'Pkp'],
+  [normalizeText('Porzeczka czerwona'), 'Pk'],
 ])
 
 function baseCodeForProduct(productName) {
@@ -8756,7 +8757,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <select value={productionOutputName} onChange={e => setProductionOutputName(e.target.value)}>
             <option>Malina pulpa</option>
             <option>Porzeczka czarna pulpa</option>
-            <option>Porzeczka czerwona pulpa</option>
+            <option>Porzeczka kolorowa pulpa</option>
             <option>Malina klasa I</option>
             <option>Malina extra</option>
             <option>Wiśnia</option>
@@ -8765,7 +8766,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <option>Truskawka</option>
             <option>Truskawka z szypułką</option>
             <option>Porzeczka czarna</option>
-            <option>Porzeczka czerwona</option>
+            <option>Porzeczka kolorowa</option>
             <option>Jabłko przemysłowe</option>
             <option>Jabłko obierka</option>
             <option>Jabłko na obierkę</option>

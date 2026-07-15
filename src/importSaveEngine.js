@@ -12,6 +12,8 @@
 export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
+import { repairPorzeczkaProductGroups } from './k03Engine.js'
+import { invalidateFifoBaseCache } from './fifoEngine.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
 const OP_CHUNK = 400
@@ -1311,6 +1313,8 @@ export async function repairAfterImportSave(client, importedFileId, { onProgress
   const pzRepair = importGroups?.length
     ? await repairPzDatesFromImportGroups(client, importGroups, { onProgress })
     : { pz_dates_fixed: 0 }
+  const porzeczkaRepair = await repairPorzeczkaProductGroups(client, { onProgress })
+  if (porzeczkaRepair.products_fixed) invalidateFifoBaseCache()
   const dateRepair = await repairDatesForImportFile(client, importedFileId, { onProgress })
   onProgress?.('Sprawdzanie zduplikowanych kart K01…')
   const k01Removed = await removeDuplicateK01Documents(client, { onProgress })
@@ -1318,6 +1322,7 @@ export async function repairAfterImportSave(client, importedFileId, { onProgress
     dates_fixed: (dateRepair.dates_fixed || 0) + (pzRepair.pz_dates_fixed || 0),
     wz_dates_fixed: wzRepair.wz_dates_fixed || 0,
     pz_dates_fixed: pzRepair.pz_dates_fixed || 0,
+    porzeczka_products_fixed: porzeczkaRepair.products_fixed || 0,
     k01_removed: k01Removed,
     items_removed: 0,
     lots_removed: 0
@@ -1448,6 +1453,8 @@ export async function repairWarehouseImportDuplicates(client, { onProgress, impo
   const pzRepair = importGroups?.length
     ? await repairPzDatesFromImportGroups(client, importGroups, { onProgress })
     : { pz_dates_fixed: 0 }
+  const porzeczkaRepair = await repairPorzeczkaProductGroups(client, { onProgress })
+  if (porzeczkaRepair.products_fixed) invalidateFifoBaseCache()
   const dateRepair = importedFileId
     ? await repairDatesForImportFile(client, importedFileId, { onProgress })
     : await repairDatesFromDocumentNumbers(client, { onProgress })
@@ -1460,6 +1467,7 @@ export async function repairWarehouseImportDuplicates(client, { onProgress, impo
     dates_fixed: (dateRepair.dates_fixed || 0) + (pzRepair.pz_dates_fixed || 0),
     wz_dates_fixed: wzRepair.wz_dates_fixed || 0,
     pz_dates_fixed: pzRepair.pz_dates_fixed || 0,
+    porzeczka_products_fixed: porzeczkaRepair.products_fixed || 0,
     mode: 'client'
   }
   try {

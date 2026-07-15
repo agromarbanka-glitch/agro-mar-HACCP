@@ -7,8 +7,10 @@ export const K03_ENGINE_VERSION = '3.9'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
-  ['porzeczka czerwona', 'Pk'], ['porzeczka czerwona pulpa', 'Pkp'], ['porzeczka kolorowa', 'Pk'], ['porzeczka kolorowa pulpa', 'Pkp'], ['truskawka', 'T'],
-  ['truskawka z szypulka', 'Tsz'], ['aronia', 'A'], ['sliwka', 'S'], ['wisnia', 'W'],
+  ['porzeczka kolorowa', 'Pk'], ['porzeczka kolorowa pulpa', 'Pkp'],
+  ['porzeczka czerwona', 'Pk'], ['porzeczka czerwona pulpa', 'Pkp'],
+  ['pcz', 'Pcz'], ['pczp', 'Pczp'], ['pk', 'Pk'], ['pkp', 'Pkp'],
+  ['truskawka', 'T'], ['truskawka z szypulka', 'Tsz'], ['aronia', 'A'], ['sliwka', 'S'], ['wisnia', 'W'],
   ['malina klasa i', 'M1'], ['malina extra', 'Mex'], ['malina pw', 'Mpw'],
   ['jablko obierka', 'Jabobier'], ['jablko na obierke', 'Jabobier'], ['jablko przemyslowe', 'Jab'], ['jablko', 'Jab']
 ])
@@ -347,11 +349,54 @@ function normalizeText(value) {
     .replace(/\s+/g, ' ')
 }
 
-/** Porzeczka kolor / kolorowa (Excel/import) = porzeczka czerwona. Nie mylić z czarną. */
-export function isPorzeczkaCzerwonaAlias(productName = '') {
+/** Porzeczka kolorowa (Excel: kolor / kolorowa / czerwona). Nie mylić z czarną. */
+export function isPorzeczkaKolorowaAlias(productName = '') {
   const text = normalizeText(productName)
-  if (/porzeczka\s+czarna/.test(text)) return false
-  return /porzeczka\s+(czerwona|kolorowa|kolor)\b/.test(text)
+  if (/porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text)) return false
+  if (text === 'pk' || text === 'pkp') return true
+  return /porzeczka\s+(kolorowa|kolor|czerwona)\b/.test(text)
+}
+
+/** @deprecated użyj isPorzeczkaKolorowaAlias */
+export function isPorzeczkaCzerwonaAlias(productName) {
+  return isPorzeczkaKolorowaAlias(productName)
+}
+
+/** Porzeczka czarna (Excel: czarna, cz., Pcz). */
+export function isPorzeczkaCzarnaAlias(productName = '') {
+  const text = normalizeText(productName)
+  if (isPorzeczkaKolorowaAlias(productName)) return false
+  if (text === 'pcz' || text === 'pczp') return true
+  return /porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text)
+}
+
+function isPorzeczkaKolorowaKey(lotKey, group = '') {
+  return lotKey === 'porzeczka kolorowa' ||
+    lotKey === 'porzeczka kolorowa pulpa' ||
+    lotKey === 'porzeczka czerwona' ||
+    lotKey === 'porzeczka czerwona pulpa' ||
+    lotKey === 'porzeczka kolor' ||
+    lotKey === 'pk' ||
+    lotKey === 'pkp' ||
+    group === 'porzeczka_czerwona'
+}
+
+function isPorzeczkaKolorowaSourceKey(key = '') {
+  return key === 'porzeczka kolorowa' ||
+    key === 'porzeczka kolorowa pulpa' ||
+    key === 'porzeczka czerwona' ||
+    key === 'porzeczka czerwona pulpa' ||
+    key === 'porzeczka kolor' ||
+    key === 'pk' ||
+    key === 'pkp'
+}
+
+function isPorzeczkaCzarnaKey(lotKey, group = '') {
+  return lotKey === 'porzeczka czarna' ||
+    lotKey === 'porzeczka czarna pulpa' ||
+    lotKey === 'pcz' ||
+    lotKey === 'pczp' ||
+    group === 'porzeczka_czarna'
 }
 
 /** Nazwa kanoniczna produktu – synonimy z importu mapowane na nazwy w systemie. */
@@ -366,10 +411,10 @@ export function canonicalProductName(productName = '') {
   if (/^m1$/i.test(raw.trim()) || /malina\s+(klasa\s*)?(i|1)\b/.test(text)) return 'Malina klasa I'
   if (/^mpw$/i.test(raw.trim()) || /malina\s+(swieza\s*)?pw\b/.test(text)) return 'Malina PW'
   if (/^mex$/i.test(raw.trim()) || /malina\s+extra/.test(text)) return 'Malina extra'
-  if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'Porzeczka czarna pulpa'
-  if (/porzeczka\s+czarna/.test(text)) return raw
-  if (/porzeczka\s+kolor(\owa)?\s+pulpa/.test(text)) return 'Porzeczka czerwona pulpa'
-  if (/porzeczka\s+kolor(\owa)?/.test(text)) return 'Porzeczka czerwona'
+  if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'Porzeczka czarna pulpa'
+  if (/porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text) || text === 'pcz') return 'Porzeczka czarna'
+  if (/porzeczka\s+kolor(\owa)?\s+pulpa/.test(text) || text === 'pkp') return 'Porzeczka kolorowa pulpa'
+  if (/porzeczka\s+kolor(\owa)?/.test(text) || /porzeczka\s+czerwona/.test(text) || text === 'pk') return 'Porzeczka kolorowa'
   return raw
 }
 
@@ -378,8 +423,8 @@ export function productGroupForName(productName) {
   if (text === 't' || text === 'tsz') return 'truskawka'
   if (text.includes('malin')) return 'malina'
   if (text.includes('wisn')) return 'wisnia'
-  if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
-  if (isPorzeczkaCzerwonaAlias(text)) return 'porzeczka_czerwona'
+  if (isPorzeczkaCzarnaAlias(text)) return 'porzeczka_czarna'
+  if (isPorzeczkaKolorowaAlias(text)) return 'porzeczka_czerwona'
   if (text.includes('truskawk')) return 'truskawka'
   if (text.includes('aronia')) return 'aronia'
   if (text.includes('sliw')) return 'sliwka'
@@ -406,11 +451,16 @@ export const FIFO_SALE_SOURCE_KEYS = {
   'malina pw': ['malina pw'],
   'malina swieza': ['malina pw'],
   'porzeczka czarna pulpa': ['porzeczka czarna'],
-  'porzeczka czerwona pulpa': ['porzeczka czerwona'],
+  'porzeczka kolorowa pulpa': ['porzeczka kolorowa'],
   'porzeczka czarna': ['porzeczka czarna'],
-  'porzeczka czerwona': ['porzeczka czerwona'],
-  'porzeczka kolorowa': ['porzeczka czerwona'],
-  'porzeczka kolor': ['porzeczka czerwona'],
+  'porzeczka kolorowa': ['porzeczka kolorowa'],
+  'porzeczka kolor': ['porzeczka kolorowa'],
+  'porzeczka czerwona': ['porzeczka kolorowa'],
+  'porzeczka czerwona pulpa': ['porzeczka kolorowa'],
+  pcz: ['porzeczka czarna'],
+  pczp: ['porzeczka czarna'],
+  pk: ['porzeczka kolorowa'],
+  pkp: ['porzeczka kolorowa'],
   wisnia: ['wisnia'],
   aronia: ['aronia'],
   sliwka: ['sliwka'],
@@ -424,8 +474,8 @@ export const FIFO_SALE_SOURCE_KEYS = {
 function fifoSourceFamily(variantKey = '') {
   if (variantKey === 'truskawka' || variantKey === 'truskawka z szypulka') return 'truskawka'
   if (/^malina/.test(variantKey)) return 'malina'
-  if (/porzeczka czarna/.test(variantKey)) return 'porzeczka_czarna'
-  if (variantKey === 'porzeczka kolorowa' || variantKey === 'porzeczka kolor' || variantKey === 'porzeczka czerwona' || /porzeczka czerwona/.test(variantKey)) return 'porzeczka_czerwona'
+  if (/porzeczka czarna/.test(variantKey) || variantKey === 'pcz' || variantKey === 'pczp') return 'porzeczka_czarna'
+  if (isPorzeczkaKolorowaSourceKey(variantKey)) return 'porzeczka_czerwona'
   if (/jablko/.test(variantKey)) return 'jablko'
   if (variantKey === 'wisnia' || variantKey === 'aronia' || variantKey === 'sliwka') return variantKey
   return null
@@ -470,15 +520,18 @@ const FIFO_SOURCE_PICKERS = {
     }
   },
   porzeczka_czerwona: {
-    hint: 'Źródło PZ porzeczki czerwonej (kolorowej) dla tego WZ.',
+    hint: 'Źródło PZ porzeczki kolorowej dla tego WZ.',
     choices: [
-      { key: 'porzeczka czerwona', label: 'Porzeczka czerwona / kolorowa' }
+      { key: 'porzeczka kolorowa', label: 'Porzeczka kolorowa' }
     ],
     defaultKeysForVariant: {
-      'porzeczka czerwona': ['porzeczka czerwona'],
-      'porzeczka kolorowa': ['porzeczka czerwona'],
-      'porzeczka kolor': ['porzeczka czerwona'],
-      'porzeczka czerwona pulpa': ['porzeczka czerwona']
+      'porzeczka kolorowa': ['porzeczka kolorowa'],
+      'porzeczka kolor': ['porzeczka kolorowa'],
+      'porzeczka czerwona': ['porzeczka kolorowa'],
+      'porzeczka czerwona pulpa': ['porzeczka kolorowa'],
+      'porzeczka kolorowa pulpa': ['porzeczka kolorowa'],
+      pk: ['porzeczka kolorowa'],
+      pkp: ['porzeczka kolorowa']
     }
   },
   jablko: {
@@ -528,6 +581,10 @@ export function normalizeFifoProductKey(productName = '', product = null, lotGro
     if (code === 'm1') return 'malina klasa i'
     if (code === 'mpw') return 'malina pw'
     if (code === 'mex') return 'malina extra'
+    if (code === 'pcz') return 'porzeczka czarna'
+    if (code === 'pczp') return 'porzeczka czarna pulpa'
+    if (code === 'pk') return 'porzeczka kolorowa'
+    if (code === 'pkp') return 'porzeczka kolorowa pulpa'
   }
 
   if (text === 't') return 'truskawka'
@@ -535,6 +592,10 @@ export function normalizeFifoProductKey(productName = '', product = null, lotGro
   if (text === 'm1') return 'malina klasa i'
   if (text === 'mpw') return 'malina pw'
   if (text === 'mex') return 'malina extra'
+  if (text === 'pcz') return 'porzeczka czarna'
+  if (text === 'pczp') return 'porzeczka czarna pulpa'
+  if (text === 'pk') return 'porzeczka kolorowa'
+  if (text === 'pkp') return 'porzeczka kolorowa pulpa'
 
   if (/truskawka\s+(z\s*)?szyp|truskawka\s*szyp|\btsz\b/.test(text)) return 'truskawka z szypulka'
   if (/truskawk/.test(text)) return 'truskawka'
@@ -547,10 +608,10 @@ export function normalizeFifoProductKey(productName = '', product = null, lotGro
   if (/malina\s+extra/.test(text)) return 'malina extra'
   if (/malina/.test(text)) return text
 
-  if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'porzeczka czarna pulpa'
-  if (/porzeczka\s+czarna/.test(text)) return 'porzeczka czarna'
-  if (/porzeczka\s+(czerwona|kolorowa|kolor)\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
-  if (/porzeczka\s+(czerwona|kolorowa|kolor)\b/.test(text)) return 'porzeczka czerwona'
+  if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'porzeczka czarna pulpa'
+  if (/porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text) || text === 'pcz') return 'porzeczka czarna'
+  if (/porzeczka\s+(kolorowa|kolor|czerwona)\s+pulpa/.test(text) || text === 'pkp') return 'porzeczka kolorowa pulpa'
+  if (/porzeczka\s+(kolorowa|kolor|czerwona)\b/.test(text) || text === 'pk') return 'porzeczka kolorowa'
 
   if (/wisnia\s+(swieza\s*)?pw\b/.test(text)) return 'wisnia pw'
   if (/wisnia\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'wisnia i') return 'wisnia klasa i'
@@ -602,10 +663,10 @@ export const K03_CLASS_FILTER_TREE = [
   },
   {
     id: 'porzeczka_czerwona',
-    label: 'Porzeczka czerwona',
+    label: 'Porzeczka kolorowa',
     variants: [
-      { id: 'porzeczka czerwona', label: 'Czerwona / kolorowa' },
-      { id: 'porzeczka czerwona pulpa', label: 'Pulpa' }
+      { id: 'porzeczka kolorowa', label: 'Porzeczka kolorowa' },
+      { id: 'porzeczka kolorowa pulpa', label: 'Pulpa' }
     ]
   },
   {
@@ -741,17 +802,11 @@ export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
     if (matchSpec.sourceKeys.has('malina pw') && lotKey === 'malina pw') return true
     if (matchSpec.sourceKeys.has('malina klasa i') && lotKey === 'malina klasa i') return true
     if (matchSpec.sourceKeys.has('malina extra') && lotKey === 'malina extra') return true
-    if (matchSpec.sourceKeys.has('porzeczka czerwona') && (
-      lotKey === 'porzeczka czerwona' ||
-      lotKey === 'porzeczka kolorowa' ||
-      lotKey === 'porzeczka kolor' ||
-      group === 'porzeczka_czerwona'
-    )) return true
-    if (matchSpec.sourceKeys.has('porzeczka czarna') && (
-      lotKey === 'porzeczka czarna' ||
-      lotKey === 'porzeczka czarna pulpa' ||
-      group === 'porzeczka_czarna'
-    )) return true
+    for (const sk of matchSpec.sourceKeys || []) {
+      if (isPorzeczkaKolorowaSourceKey(sk) && isPorzeczkaKolorowaKey(lotKey, group)) return true
+      if ((sk === 'porzeczka czarna' || sk === 'porzeczka czarna pulpa' || sk === 'pcz' || sk === 'pczp') &&
+        isPorzeczkaCzarnaKey(lotKey, group)) return true
+    }
     return false
   }
   return matchSpec?.sourceKeys?.has(group)
@@ -785,6 +840,62 @@ export function resolveFifoProductGroup(product, productName = '', lotGroup = ''
   if (CANONICAL_PRODUCT_GROUPS.has(byStored) && byStored !== 'inna') return byStored
 
   return byName || stored || 'inna'
+}
+
+/** Naprawia product_group i nazwy produktów porzeczek po imporcie (kolorowa ≠ czarna, skróty Pcz/Pk). */
+export async function repairPorzeczkaProductGroups(client, { onProgress } = {}) {
+  if (!client) return { products_fixed: 0, lots_fixed: 0 }
+  onProgress?.('Synchronizacja grup porzeczek (czarna / kolorowa)…')
+
+  const { data: products, error } = await client.from('products').select('id, name, code, product_group')
+  if (error) throw error
+
+  let productsFixed = 0
+  const productIdsByGroup = { porzeczka_czarna: [], porzeczka_czerwona: [] }
+
+  for (const p of products || []) {
+    const text = normalizeText(p.name)
+    let targetGroup = null
+    let canonical = null
+
+    if (isPorzeczkaCzarnaAlias(p.name)) {
+      targetGroup = 'porzeczka_czarna'
+      if (!/porzeczka\s+czarna/i.test(String(p.name || ''))) {
+        canonical = /pulpa/.test(text) || p.code === 'Pczp' ? 'Porzeczka czarna pulpa' : 'Porzeczka czarna'
+      }
+    } else if (isPorzeczkaKolorowaAlias(p.name)) {
+      targetGroup = 'porzeczka_czerwona'
+      if (!/porzeczka\s+kolorowa/i.test(String(p.name || ''))) {
+        canonical = /pulpa/.test(text) || p.code === 'Pkp' ? 'Porzeczka kolorowa pulpa' : 'Porzeczka kolorowa'
+      }
+    }
+
+    if (!targetGroup) continue
+    productIdsByGroup[targetGroup].push(p.id)
+
+    const patch = {}
+    if (p.product_group !== targetGroup) patch.product_group = targetGroup
+    if (canonical && normalizeText(p.name) !== normalizeText(canonical)) patch.name = canonical
+    if (!Object.keys(patch).length) continue
+
+    const { error: updErr } = await client.from('products').update(patch).eq('id', p.id)
+    if (updErr) throw updErr
+    productsFixed += 1
+  }
+
+  let lotsFixed = 0
+  for (const [group, ids] of Object.entries(productIdsByGroup)) {
+    if (!ids.length) continue
+    for (let i = 0; i < ids.length; i += 80) {
+      const chunk = ids.slice(i, i + 80)
+      const { error: lotErr } = await client.from('lots').update({ product_group: group }).in('product_id', chunk).neq('product_group', group)
+      if (lotErr) throw lotErr
+    }
+    const { count, error: countErr } = await client.from('lots').select('id', { count: 'exact', head: true }).in('product_id', ids).eq('product_group', group)
+    if (!countErr && Number(count || 0) > 0) lotsFixed += Number(count || 0)
+  }
+
+  return { products_fixed: productsFixed, lots_fixed: lotsFixed }
 }
 
 function resolveProductGroup(product, productName = '', lotGroup = '') {
