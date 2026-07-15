@@ -442,6 +442,20 @@ async function deleteRowsInChunks(client, table, column, ids, chunkSize = 80) {
   }
 }
 
+/** Usuwa wszystkie wiersze z tabeli partiami (paginacja). */
+async function deleteAllTableRows(client, table, idColumn = 'id', batchSize = 500) {
+  while (true) {
+    const { data, error } = await withImportRetry(() =>
+      client.from(table).select(idColumn).limit(batchSize)
+    )
+    if (error) throw error
+    if (!data?.length) break
+    const ids = data.map(r => r[idColumn]).filter(Boolean)
+    await deleteRowsInChunks(client, table, idColumn, ids, 100)
+    if (data.length < batchSize) break
+  }
+}
+
 /** Kasuje operacje, partie i FIFO jednego importu (gdy brak migracji v40/v42 w Supabase). */
 export async function purgeImportDataClientSide(client, importedFileId) {
   const { data: ops, error: opsErr } = await withImportRetry(() =>
@@ -1422,7 +1436,92 @@ export async function purgeAllActiveExcelImports(client, { onProgress, reason = 
   return { filesPurged, operations, lots, importFilesTotal: active.length }
 }
 
+/**
+ * Usuwa WSZYSTKO z magazynu Excel: importy, operacje, partie, FIFO, kartoteki K03/K01.
+ * Po resecie wgraj Excel od zera i twórz K03 chronologicznie (najpierw czerwiec, potem lipiec).
+ */
+export async function purgeCompleteWarehouseReset(client, { onProgress, reason = 'Reset kompletny — magazyn od zera' } = {}) {
+  const notify = msg => onProgress?.(msg)
+  if (!client) throw new Error('Brak Supabase.')
+
+  notify('Krok 1/3 — usuwanie importów Excel…')
+  const importResult = await purgeAllActiveExcelImports(client, { onProgress: notify, reason })
+
+  notify('Krok 2/3 — usuwanie kartotek K03, K01 i pozostałości FIFO…')
+  let haccpRemoved = 0
+  while (true) {
+    const { data: docs, error: docErr } = await withImportRetry(() =>
+      client.from('haccp_documents').select('id').limit(500)
+    )
+    if (docErr) throw docErr
+    if (!docs?.length) break
+    const ids = docs.map(d => d.id)
+    await deleteRowsInChunks(client, 'haccp_document_history', 'document_id', ids, 100)
+    await deleteRowsInChunks(client, 'haccp_documents', 'id', ids, 100)
+    haccpRemoved += ids.length
+    notify(`Usunięto ${haccpRemoved} kartotek HACCP…`)
+    if (docs.length < 500) break
+  }
+
+  try {
+    await deleteAllTableRows(client, 'haccp_aux_materials')
+  } catch (_) { /* opcjonalna tabela */ }
+
+  await deleteAllTableRows(client, 'fifo_allocations')
+  await deleteAllTableRows(client, 'fifo_allocation_change_log')
+  await deleteAllTableRows(client, 'pz_fifo_change_log')
+
+  notify('Krok 3/3 — usuwanie partii i operacji magazynowych…')
+  let lotsRemoved = 0
+  while (true) {
+    const { data: lots, error: lotErr } = await withImportRetry(() =>
+      client.from('lots').select('id').limit(500)
+    )
+    if (lotErr) throw lotErr
+    if (!lots?.length) break
+    const lotIds = lots.map(l => l.id)
+    for (let i = 0; i < lotIds.length; i += 80) {
+      await withImportRetry(() =>
+        client.from('operation_items').update({ lot_id: null }).in('lot_id', lotIds.slice(i, i + 80))
+      )
+    }
+    await deleteRowsInChunks(client, 'lot_location_history', 'lot_id', lotIds, 100)
+    await deleteRowsInChunks(client, 'lot_change_history', 'lot_id', lotIds, 100)
+    await deleteRowsInChunks(client, 'lots', 'id', lotIds, 100)
+    lotsRemoved += lotIds.length
+    notify(`Usunięto ${lotsRemoved} partii…`)
+    if (lots.length < 500) break
+  }
+
+  await deleteAllTableRows(client, 'operation_items')
+  await deleteAllTableRows(client, 'operations')
+
+  notify('Finalizacja…')
+  try {
+    await cleanupOrphanedDeletedImports(client)
+  } catch (_) { /* v40 */ }
+  try {
+    await withImportRetry(() => client.rpc('purge_orphan_import_lots'))
+  } catch (_) { /* opcjonalne RPC */ }
+
+  return {
+    ...importResult,
+    haccpRemoved,
+    lotsRemoved,
+    complete: true
+  }
+}
+
 export function formatPurgeAllImportsResult(result) {
+  if (result?.complete) {
+    const parts = []
+    if (result.filesPurged) parts.push(`${result.filesPurged} importów`)
+    if (result.haccpRemoved) parts.push(`${result.haccpRemoved} kartotek (K03/K01)`)
+    if (result.operations) parts.push(`${result.operations} operacji`)
+    if (result.lotsRemoved || result.lots) parts.push(`${result.lotsRemoved || result.lots} partii`)
+    if (!parts.length) return 'Reset kompletny: magazyn był już pusty. Wgraj Excel od nowa.'
+    return `Reset kompletny: usunięto ${parts.join(', ')}. FIFO wyczyszczone. Wgraj Excel i kliknij Zapisz — potem K03 od najstarszej WZ.`
+  }
   if (!result?.filesPurged) return 'Reset: brak aktywnych importów do usunięcia.'
   return `Reset magazynu: usunięto ${result.filesPurged} importów (${result.operations} operacji, ${result.lots} partii). Wgraj Excel od nowa.`
 }

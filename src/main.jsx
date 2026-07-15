@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeAllActiveExcelImports, formatPurgeAllImportsResult } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -7512,22 +7512,27 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       return
     }
     if (!window.confirm(
-      'RESET MAGAZYNU Z IMPORTU EXCEL\n\n' +
-      'Usunie WSZYSTKIE aktywne importy: PZ, WZ, partie, rozliczenia FIFO i K01 wygenerowane z importu.\n\n' +
-      'Po resecie wczytaj ten sam plik Excel i kliknij Zapisz — wszystkie dokumenty trafią jako nowe.\n\n' +
+      'RESET KOMPLETNY MAGAZYNU\n\n' +
+      'Usunie WSZYSTKO z importu Excel:\n' +
+      '• wszystkie importy (PZ, WZ)\n' +
+      '• wszystkie kartoteki K03 i K01\n' +
+      '• wszystkie rozliczenia FIFO\n' +
+      '• wszystkie partie magazynowe\n\n' +
+      'Zostaną: produkty, kontrahenci, konta użytkowników.\n\n' +
+      'Po resecie: wczytaj Excel → Zapisz → K03 od najstarszej WZ (czerwiec przed lipcem).\n\n' +
       'Kontynuować?'
     )) return
-    const typed = window.prompt('Potwierdź wpisując: RESET MAGAZYN')
-    if (normalizeText(typed) !== 'reset magazyn') {
-      setMessage('Reset anulowany — wpisz dokładnie: RESET MAGAZYN')
+    const typed = window.prompt('Potwierdź wpisując: RESET WSZYSTKO')
+    if (normalizeText(typed) !== 'reset wszystko') {
+      setMessage('Reset anulowany — wpisz dokładnie: RESET WSZYSTKO')
       return
     }
     setImportResetting(true)
-    setMessage('Reset magazynu — usuwanie importów…')
+    setMessage('Reset kompletny magazynu…')
     try {
-      const result = await purgeAllActiveExcelImports(supabase, {
+      const result = await purgeCompleteWarehouseReset(supabase, {
         onProgress: setMessage,
-        reason: 'Reset magazynu — ponowny import od zera'
+        reason: 'Reset kompletny — magazyn od zera'
       })
       invalidateFifoBaseCache()
       setImportPreview([])
@@ -7535,12 +7540,15 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setFileName('')
       setImportDuplicates([])
       setImportNewDocCount(0)
+      setK03FormsRaw([])
+      setWzQueueLines([])
+      setK03Snapshots([])
       importCheckCacheRef.current = null
       await loadImports()
       await loadHaccpDocs({ force: true, skipBusy: true })
-      await loadK03TraceData()
+      await loadK03TraceData({ repairPz: false })
       await loadFifoData()
-      setMessage(formatPurgeAllImportsResult(result) + ' Wczytaj plik Excel i kliknij Zapisz.')
+      setMessage(formatPurgeAllImportsResult(result))
     } catch (err) {
       setMessage(`Błąd resetu magazynu: ${err?.message || err}`)
     } finally {
@@ -8457,7 +8465,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>PZ, WZ, ilości, daty, produkty — <b>bez ceny netto</b>. Kartoteki K01–K07 i FIFO. Ceny i wartość magazynu: <b>Raporty → Wartość magazynu</b> (osobny import).</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'Reset magazynu (import od zera)'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
 
       {rows.length > 0 && <>
         <div className="summary">
@@ -8485,7 +8493,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>Wgraj operacje magazynowe: <b>PZ/WZ, daty, ilości, produkty</b> — bez ceny netto. Numery już w bazie są pomijane. <b>Wartość magazynu (ceny)</b> → Raporty → Wartość magazynu.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'Reset magazynu (import od zera)'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>
