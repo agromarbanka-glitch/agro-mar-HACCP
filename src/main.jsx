@@ -7159,6 +7159,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       let note = ''
 
       if (supabase) {
+        await repairPorzeczkaProductGroups(supabase).catch(() => {})
+        invalidateFifoBaseCache()
         const queue = await loadWzQueue(supabase, { repairPz: options.repairPz !== false })
         forms = queue.forms || []
         setWzQueueLines(queue.lines || [])

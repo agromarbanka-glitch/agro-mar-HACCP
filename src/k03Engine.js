@@ -349,10 +349,18 @@ function normalizeText(value) {
     .replace(/\s+/g, ' ')
 }
 
+/** Skrót Pcz / „porzeczka cz.” — tylko czarna. NIE dopasowuj „porzeczka czerwona” (cz ≠ cze…). */
+function isPorzeczkaCzarnaShorthand(text = '') {
+  const t = normalizeText(text)
+  if (t === 'pcz' || t === 'pczp') return true
+  if (/porzeczka\s+czarna\b/.test(t)) return true
+  if (t === 'porzeczka cz' || /porzeczka\s+cz\.\s*$/.test(t)) return true
+  return false
+}
+
 /** Porzeczka kolorowa (Excel: kolor / kolorowa / czerwona). Nie mylić z czarną. */
 export function isPorzeczkaKolorowaAlias(productName = '') {
   const text = normalizeText(productName)
-  if (/porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text)) return false
   if (text === 'pk' || text === 'pkp') return true
   return /porzeczka\s+(kolorowa|kolor|czerwona)\b/.test(text)
 }
@@ -364,10 +372,9 @@ export function isPorzeczkaCzerwonaAlias(productName) {
 
 /** Porzeczka czarna (Excel: czarna, cz., Pcz). */
 export function isPorzeczkaCzarnaAlias(productName = '') {
-  const text = normalizeText(productName)
   if (isPorzeczkaKolorowaAlias(productName)) return false
-  if (text === 'pcz' || text === 'pczp') return true
-  return /porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text)
+  const text = normalizeText(productName)
+  return isPorzeczkaCzarnaShorthand(text)
 }
 
 function isPorzeczkaKolorowaKey(lotKey, group = '') {
@@ -427,10 +434,10 @@ export function canonicalProductName(productName = '') {
   if (/^m1$/i.test(raw.trim()) || /malina\s+(klasa\s*)?(i|1)\b/.test(text)) return 'Malina klasa I'
   if (/^mpw$/i.test(raw.trim()) || /malina\s+(swieza\s*)?pw\b/.test(text)) return 'Malina PW'
   if (/^mex$/i.test(raw.trim()) || /malina\s+extra/.test(text)) return 'Malina extra'
-  if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'Porzeczka czarna pulpa'
-  if (/porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text) || text === 'pcz') return 'Porzeczka czarna'
   if (/porzeczka\s+kolor(\owa)?\s+pulpa/.test(text) || text === 'pkp') return 'Porzeczka kolorowa pulpa'
-  if (/porzeczka\s+kolor(\owa)?/.test(text) || /porzeczka\s+czerwona/.test(text) || text === 'pk') return 'Porzeczka kolorowa'
+  if (/porzeczka\s+(kolor(\owa)?|czerwona)\b/.test(text) || text === 'pk') return 'Porzeczka kolorowa'
+  if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'Porzeczka czarna pulpa'
+  if (isPorzeczkaCzarnaShorthand(text)) return /pulpa/.test(text) ? 'Porzeczka czarna pulpa' : 'Porzeczka czarna'
   return raw
 }
 
@@ -624,10 +631,10 @@ export function normalizeFifoProductKey(productName = '', product = null, lotGro
   if (/malina\s+extra/.test(text)) return 'malina extra'
   if (/malina/.test(text)) return text
 
-  if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'porzeczka czarna pulpa'
-  if (/porzeczka\s+czarna/.test(text) || /porzeczka\s+cz\.?/.test(text) || text === 'pcz') return 'porzeczka czarna'
   if (/porzeczka\s+(kolorowa|kolor|czerwona)\s+pulpa/.test(text) || text === 'pkp') return 'porzeczka kolorowa pulpa'
   if (/porzeczka\s+(kolorowa|kolor|czerwona)\b/.test(text) || text === 'pk') return 'porzeczka kolorowa'
+  if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'porzeczka czarna pulpa'
+  if (isPorzeczkaCzarnaShorthand(text)) return 'porzeczka czarna'
 
   if (/wisnia\s+(swieza\s*)?pw\b/.test(text)) return 'wisnia pw'
   if (/wisnia\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'wisnia i') return 'wisnia klasa i'
@@ -883,6 +890,31 @@ export function resolveFifoProductGroup(product, productName = '', lotGroup = ''
 export async function repairPorzeczkaProductGroups(client, { onProgress } = {}) {
   if (!client) return { products_fixed: 0, lots_fixed: 0 }
   onProgress?.('Synchronizacja grup porzeczek (czarna / kolorowa)…')
+
+  // Cofnij błąd: „czerwona” mylone ze skrótem „cz.” → czarna
+  const { data: allProducts } = await client.from('products').select('id, name, code, product_group')
+  for (const p of allProducts || []) {
+    const n = normalizeText(p.name)
+    const code = String(p.code || '').toUpperCase()
+    const wronglyBlack = (p.product_group === 'porzeczka_czarna' || /porzeczka\s+czarna/i.test(p.name || '')) &&
+      (isPorzeczkaKolorowaAlias(p.name) || code === 'PK' || code === 'PKP' || /czerwon|kolorow|kolor\b/.test(n))
+    if (wronglyBlack) {
+      const pulpa = /pulpa/.test(n) || code === 'PKP'
+      await client.from('products').update({
+        name: pulpa ? 'Porzeczka kolorowa pulpa' : 'Porzeczka kolorowa',
+        product_group: 'porzeczka_czerwona'
+      }).eq('id', p.id)
+      await client.from('lots').update({ product_group: 'porzeczka_czerwona' }).eq('product_id', p.id)
+    }
+  }
+  await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa' })
+    .or('raw_product_name.ilike.%porzeczka%czerwon%,raw_product_name.ilike.%porzeczka%kolorow%,raw_product_name.ilike.%porzeczka kolor %')
+    .not('raw_product_name', 'ilike', '%pulpa%')
+  await client.from('operation_items').update({ raw_product_name: 'Porzeczka kolorowa pulpa' })
+    .or('raw_product_name.ilike.%porzeczka%czerwon%pulpa%,raw_product_name.ilike.%porzeczka%kolorow%pulpa%')
+  await client.from('haccp_documents').update({ product_name: 'Porzeczka kolorowa' })
+    .or('product_name.ilike.%porzeczka%czerwon%,product_name.ilike.%porzeczka%kolorow%')
+    .not('product_name', 'ilike', '%pulpa%')
 
   const { data: products, error } = await client.from('products').select('id, name, code, product_group')
   if (error) throw error
