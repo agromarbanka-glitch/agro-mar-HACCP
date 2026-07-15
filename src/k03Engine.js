@@ -301,30 +301,30 @@ function fifoSourceFamily(variantKey = '') {
 
 const FIFO_SOURCE_PICKERS = {
   truskawka: {
-    hint: 'Z jakich PZ pobierać surowiec? Domyślnie truskawka z szypułką bierze tylko PZ szypułkowe – nie zabiera zwykłej truskawki innym WZ.',
+    hint: 'Każda klasa ma osobną pulę FIFO (truskawka ≠ truskawka z szypułką). Zaznacz tylko klasę PZ, z której ten WZ ma pobierać surowiec.',
     choices: [
       { key: 'truskawka', label: 'Truskawka (bez szypułki)' },
       { key: 'truskawka z szypulka', label: 'Truskawka z szypułką' }
     ],
     defaultKeysForVariant: {
-      truskawka: ['truskawka', 'truskawka z szypulka'],
+      truskawka: ['truskawka'],
       'truskawka z szypulka': ['truskawka z szypulka']
     }
   },
   malina: {
-    hint: 'Z jakich PZ pobierać surowiec? Przy przerobie pulpy domyślnie malina świeża PW (+ klasa I). Extra zaznacz tylko gdy faktycznie dodajesz do przerobu.',
+    hint: 'Każda klasa maliny ma osobną pulę (PW ≠ klasa I ≠ extra). Zaznacz tylko klasy faktycznie używane przy tym WZ.',
     choices: [
       { key: 'malina pw', label: 'Malina świeża PW (Mpw)' },
       { key: 'malina klasa i', label: 'Malina klasa I (M1)' },
       { key: 'malina extra', label: 'Malina extra (Mex)' }
     ],
     defaultKeysForVariant: {
-      'malina pulpa': ['malina pw', 'malina klasa i'],
+      'malina pulpa': ['malina pw'],
       'malina klasa i': ['malina klasa i'],
       'malina extra': ['malina extra'],
       'malina pw': ['malina pw'],
       'malina swieza': ['malina pw'],
-      _default: ['malina pw', 'malina klasa i']
+      _default: ['malina pw']
     }
   },
   porzeczka_czarna: {
@@ -530,10 +530,11 @@ export function collectExtraK03Variants(items = []) {
 export function buildFifoMatchSpecFromSourceKeys(variantKey, sourceKeys) {
   const keys = (sourceKeys || []).filter(Boolean)
   if (!keys.length) return null
+  const sorted = keys.slice().sort()
   return {
     mode: 'variant',
     variantKey,
-    poolKey: `variant:${variantKey}:${keys.slice().sort().join('+')}`,
+    poolKey: `class:${sorted.join('+')}`,
     sourceKeys: new Set(keys)
   }
 }
@@ -547,7 +548,7 @@ export function fifoSourcePickerForProduct(productName = '', product = null) {
   if ((picker.choices || []).length <= 1) return null
   const defaultKeys = picker.defaultKeysForVariant[variantKey]
     || picker.defaultKeysForVariant._default
-    || [...(FIFO_SALE_SOURCE_KEYS[variantKey] || [])]
+    || [variantKey]
   return {
     variantKey,
     family,
@@ -561,10 +562,10 @@ export function defaultFifoSourceKeys(productName = '', product = null) {
   const picker = fifoSourcePickerForProduct(productName, product)
   if (picker?.defaultKeys?.length) return picker.defaultKeys
   const variantKey = normalizeFifoProductKey(productName, product)
-  return [...(FIFO_SALE_SOURCE_KEYS[variantKey] || [])]
+  return [variantKey]
 }
 
-/** Specyfikacja puli FIFO dla sprzedaży – wariant (precyzyjnie) lub grupa (fallback). */
+/** Specyfikacja puli FIFO – domyślnie jedna klasa (bez łączenia wariantów). */
 export function resolveFifoMatchSpec(product, productName = '', lotGroup = '', options = {}) {
   const variantKey = normalizeFifoProductKey(productName || product?.name || '', product)
   const overrideKeys = options.fifoSourceKeys || options.fifo_source_keys
@@ -572,21 +573,13 @@ export function resolveFifoMatchSpec(product, productName = '', lotGroup = '', o
     const built = buildFifoMatchSpecFromSourceKeys(variantKey, overrideKeys)
     if (built) return built
   }
-  const explicitSources = FIFO_SALE_SOURCE_KEYS[variantKey]
-  if (explicitSources) {
-    const sourceKeys = new Set(explicitSources)
-    return {
-      mode: 'variant',
-      variantKey,
-      poolKey: `variant:${variantKey}:${explicitSources.slice().sort().join('+')}`,
-      sourceKeys
-    }
-  }
+  const strict = buildFifoMatchSpecFromSourceKeys(variantKey, [variantKey])
+  if (strict) return strict
   const group = resolveFifoProductGroup(product, productName, lotGroup)
   return {
     mode: 'group',
     variantKey,
-    poolKey: `group:${group}`,
+    poolKey: `class:${group}`,
     sourceKeys: new Set([group])
   }
 }
@@ -595,29 +588,22 @@ export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
   const product = productMap.get(lot.product_id)
   const name = product?.name || ''
   const lotKey = normalizeFifoProductKey(name, product)
-  const group = resolveFifoProductGroup(product, name, lot.product_group)
 
   if (matchSpec?.mode === 'variant') {
-    if (matchSpec.sourceKeys.has(lotKey)) return true
-    // Partie PZ z kodem T / product_group bez pełnej nazwy wariantu w kartotece produktu
-    if (matchSpec.variantKey === 'truskawka' && group === 'truskawka') {
-      if (lotKey === 'truskawka z szypulka') return matchSpec.sourceKeys.has('truskawka z szypulka')
-      return matchSpec.sourceKeys.has('truskawka') || matchSpec.sourceKeys.has('truskawka z szypulka')
-    }
-    return false
+    return matchSpec.sourceKeys.has(lotKey)
   }
+  const group = resolveFifoProductGroup(product, name, lot.product_group)
   return matchSpec?.sourceKeys?.has(group)
 }
 
 export function sameFifoPool(specA, specB) {
   if (!specA || !specB) return false
-  if (specA.poolKey && specB.poolKey && specA.poolKey === specB.poolKey) return true
-  if (specA.mode === 'variant' && specB.mode === 'variant') {
-    for (const k of specA.sourceKeys) {
-      if (specB.sourceKeys.has(k)) return true
-    }
+  if (specA.poolKey && specB.poolKey) return specA.poolKey === specB.poolKey
+  if (specA.sourceKeys?.size !== specB.sourceKeys?.size) return false
+  for (const k of specA.sourceKeys) {
+    if (!specB.sourceKeys.has(k)) return false
   }
-  return false
+  return specA.sourceKeys.size > 0
 }
 
 function looksLikeIsoDate(value) {
