@@ -633,7 +633,8 @@ export async function repairAllIncomingLotRemainingFromAllocations(client, { onP
   return { lots_synced: incomingIds.length }
 }
 
-function summarizeGroupInventory(lotState, productMap, matchSpec, cutoff, opMap) {
+function summarizeGroupInventory(lotState, productMap, matchSpec, cutoff, opMap, options = {}) {
+  const incomingOnly = options.incomingOnly !== false
   let remainingWithinCutoff = 0
   let remainingAfterCutoff = 0
   let purchasedTotal = 0
@@ -644,6 +645,9 @@ function summarizeGroupInventory(lotState, productMap, matchSpec, cutoff, opMap)
 
   for (const lot of lotState.values()) {
     if (!fifoLotMatchesMatchSpec(lot, productMap, matchSpec)) continue
+    const isIncoming = isIncomingLotOperation(opMap?.get(lot.source_operation_id))
+    if (incomingOnly && !isIncoming) continue
+
     lotCount += 1
     const initial = Number(lot.initial_qty || 0)
     const remaining = Number(lot.remaining_qty || 0)
@@ -671,6 +675,34 @@ function summarizeGroupInventory(lotState, productMap, matchSpec, cutoff, opMap)
     lotCount,
     lotCountWithinCutoff
   }
+}
+
+/** Audyt: ile kg PZ w innych klasach tej samej rodziny (np. szypułka obok truskawki). */
+function auditSiblingClassInventory(base, matchSpec, cutoff) {
+  const variant = matchSpec?.variantKey
+  if (!variant) return null
+  const siblings = []
+  if (variant === 'truskawka') {
+    siblings.push(buildFifoMatchSpecFromSourceKeys('truskawka z szypulka', ['truskawka z szypulka']))
+  } else if (variant === 'truskawka z szypulka') {
+    siblings.push(buildFifoMatchSpecFromSourceKeys('truskawka', ['truskawka']))
+  }
+  if (!siblings.length) return null
+
+  const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
+  const out = []
+  for (const spec of siblings) {
+    if (!spec) continue
+    resetIncomingLotsInPool(lotState, base.productMap, spec, base.opMap)
+    const inv = summarizeGroupInventory(lotState, base.productMap, spec, cutoff, base.opMap)
+    out.push({
+      classLabel: [...spec.sourceKeys].join(', '),
+      purchasedWithinCutoffKg: inv.purchasedWithinCutoff,
+      purchasedTotalKg: inv.purchasedTotal,
+      lotCount: inv.lotCount
+    })
+  }
+  return out
 }
 
 function summarizeGroupSales(base, matchSpec, targetSaleKey) {
@@ -746,6 +778,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   const frozenKeys = options.frozenKeys || new Set()
 
   const purchasedInventory = initialPoolInventory(base, matchSpec, cutoff)
+  const siblingAudit = auditSiblingClassInventory(base, matchSpec, cutoff)
   const salesSummary = summarizeGroupSales(base, matchSpec, saleKey)
   const priorReserve = reservePriorUnallocatedSales(base, new Map(), saleKey, matchSpec, workflowBySaleKey)
 
@@ -802,7 +835,8 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       lotCountWithinCutoff: purchasedInventory.lotCountWithinCutoff,
       priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
       priorUnallocatedWzKg: priorReserve.priorUnallocatedQty,
-      targetSaleQty: Number(sale.sale_qty || 0)
+      targetSaleQty: Number(sale.sale_qty || 0),
+      siblingClasses: siblingAudit
     }
   }
 }

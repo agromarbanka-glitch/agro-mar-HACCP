@@ -236,6 +236,13 @@ export function canonicalProductName(productName = '') {
   const raw = String(productName || '').trim()
   if (!raw) return raw
   const text = normalizeText(raw)
+  if (/^t$/i.test(raw.trim())) return 'Truskawka'
+  if (/^tsz$/i.test(raw.trim())) return 'Truskawka z szypułką'
+  if (/truskawka\s+(z\s*)?szyp|truskawka\s*szyp|\btsz\b/.test(text)) return 'Truskawka z szypułką'
+  if (/truskawk/.test(text)) return 'Truskawka'
+  if (/^m1$/i.test(raw.trim()) || /malina\s+(klasa\s*)?(i|1)\b/.test(text)) return 'Malina klasa I'
+  if (/^mpw$/i.test(raw.trim()) || /malina\s+(swieza\s*)?pw\b/.test(text)) return 'Malina PW'
+  if (/^mex$/i.test(raw.trim()) || /malina\s+extra/.test(text)) return 'Malina extra'
   if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'Porzeczka czarna pulpa'
   if (/porzeczka\s+czarna/.test(text)) return raw
   if (/porzeczka\s+kolorowa\s+pulpa/.test(text)) return 'Porzeczka czerwona pulpa'
@@ -245,6 +252,7 @@ export function canonicalProductName(productName = '') {
 
 export function productGroupForName(productName) {
   const text = normalizeText(productName)
+  if (text === 't' || text === 'tsz') return 'truskawka'
   if (text.includes('malin')) return 'malina'
   if (text.includes('wisn')) return 'wisnia'
   if (text.includes('porzeczka czarna')) return 'porzeczka_czarna'
@@ -380,7 +388,7 @@ const FIFO_SOURCE_PICKERS = {
 }
 
 /** Kanoniczny klucz wariantu produktu (T, Tsz, M1, Mex, Mp…) do dopasowania FIFO. */
-export function normalizeFifoProductKey(productName = '', product = null) {
+export function normalizeFifoProductKey(productName = '', product = null, lotGroup = '') {
   const text = normalizeText(productName || product?.name || '')
   if (!text) return 'inna'
   if (PRODUCT_CODES.has(text)) return text
@@ -390,10 +398,21 @@ export function normalizeFifoProductKey(productName = '', product = null) {
     for (const [key, val] of PRODUCT_CODES) {
       if (String(val).toLowerCase() === code) return key
     }
+    if (code === 't') return 'truskawka'
+    if (code === 'tsz') return 'truskawka z szypulka'
+    if (code === 'm1') return 'malina klasa i'
+    if (code === 'mpw') return 'malina pw'
+    if (code === 'mex') return 'malina extra'
   }
 
+  if (text === 't') return 'truskawka'
+  if (text === 'tsz') return 'truskawka z szypulka'
+  if (text === 'm1') return 'malina klasa i'
+  if (text === 'mpw') return 'malina pw'
+  if (text === 'mex') return 'malina extra'
+
   if (/truskawka\s+(z\s*)?szyp|truskawka\s*szyp|\btsz\b/.test(text)) return 'truskawka z szypulka'
-  if (/^truskawka\b/.test(text)) return 'truskawka'
+  if (/truskawk/.test(text)) return 'truskawka'
 
   if (/malina\s+pulpa/.test(text)) return 'malina pulpa'
   if (/malina\s+(swieza\s*)?pw\b/.test(text)) return 'malina pw'
@@ -587,12 +606,18 @@ export function resolveFifoMatchSpec(product, productName = '', lotGroup = '', o
 export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
   const product = productMap.get(lot.product_id)
   const name = product?.name || ''
-  const lotKey = normalizeFifoProductKey(name, product)
+  const lotKey = normalizeFifoProductKey(name, product, lot.product_group)
+  const group = resolveFifoProductGroup(product, name, lot.product_group)
 
   if (matchSpec?.mode === 'variant') {
-    return matchSpec.sourceKeys.has(lotKey)
+    if (matchSpec.sourceKeys.has(lotKey)) return true
+    if (matchSpec.sourceKeys.has('truskawka') && group === 'truskawka' && lotKey !== 'truskawka z szypulka') return true
+    if (matchSpec.sourceKeys.has('truskawka z szypulka') && lotKey === 'truskawka z szypulka') return true
+    if (matchSpec.sourceKeys.has('malina pw') && lotKey === 'malina pw') return true
+    if (matchSpec.sourceKeys.has('malina klasa i') && lotKey === 'malina klasa i') return true
+    if (matchSpec.sourceKeys.has('malina extra') && lotKey === 'malina extra') return true
+    return false
   }
-  const group = resolveFifoProductGroup(product, name, lot.product_group)
   return matchSpec?.sourceKeys?.has(group)
 }
 

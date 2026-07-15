@@ -1543,6 +1543,11 @@ function App() {
             wolne w magazynie (≤ {preview.cutoffDate}): {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg,
             dostępne dla tego WZ: {Number(preview.diagnostics.remainingWithinCutoffAfterReserveKg || 0).toLocaleString('pl-PL')} kg
             {Number(preview.diagnostics.allocatedByOtherWzKg || 0) > 0 ? ` (inne WZ: ${Number(preview.diagnostics.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg)` : ''}.
+            {(preview.diagnostics.siblingClasses || []).length > 0 && (
+              <> {(preview.diagnostics.siblingClasses || []).map((s, i) => (
+                <span key={i}> Inna klasa ({s.classLabel}): {Number(s.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg PZ ≤ {preview.cutoffDate}.</span>
+              ))}</>
+            )}
           </div>
         )}
         {mismatch && preview && <p className="status danger">
