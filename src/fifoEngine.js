@@ -1,7 +1,7 @@
 /**
  * FIFO – przeliczanie przyrostowe (braki) i pełne z ochroną zamrożonych K03.
  */
-import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo } from './k03Engine'
 
 function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
@@ -130,6 +130,18 @@ async function loadFifoBaseData(client, options = {}) {
 
   const productMap = new Map((products || []).map(p => [p.id, p]))
   const opMap = new Map((operations || []).map(o => [o.id, o]))
+  const lotSourceOpIds = [...new Set((lotsRaw || []).map(l => l.source_operation_id).filter(Boolean))]
+  const missingOpIds = lotSourceOpIds.filter(id => !opMap.has(id))
+  if (missingOpIds.length) {
+    const extraOps = await fetchInChunks(
+      client,
+      'operations',
+      'id, operation_type, operation_date, document_no, created_at',
+      'id',
+      missingOpIds
+    )
+    for (const o of extraOps) opMap.set(o.id, o)
+  }
   const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
   for (const item of saleItemsRaw || []) {
     if (item.operation_id) saleOpIds.add(item.operation_id)
@@ -759,8 +771,9 @@ function enrichAllocationRowsLocal(allocationRows, lotState, opMap) {
   return (allocationRows || []).map(row => {
     const lot = lotState.get(row.source_lot_id) || {}
     const pzOp = opMap.get(lot.source_operation_id) || {}
+    const pzNo = resolveFifoSourcePzNo(lot, opMap)
     return {
-      pz_no: pzOp.document_no || lot.lot_no || '',
+      pz_no: pzNo,
       pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
       supplier: '',
       qty: row.qty,
@@ -784,8 +797,9 @@ async function enrichAllocationRows(client, allocationRows) {
   return allocationRows.map(row => {
     const lot = lotMap.get(row.source_lot_id) || {}
     const pzOp = opMap.get(lot.source_operation_id) || {}
+    const pzNo = resolveFifoSourcePzNo(lot, opMap)
     return {
-      pz_no: pzOp.document_no || lot.lot_no || '',
+      pz_no: pzNo,
       pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
       supplier: '',
       qty: row.qty,

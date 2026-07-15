@@ -51,8 +51,20 @@ export function inferK03LotCode(productName, product, options = {}) {
   return inferProductCode(productName, product)
 }
 
+export function isInternalLotNumber(value = '') {
+  const text = String(value || '').trim()
+  return /^[A-Za-z]{1,8}\/\d{1,5}\/\d{4}$/.test(text)
+}
+
+/** Numer dokumentu PZ źródłowego — nigdy wewnętrzny numer partii (np. T/738/2026). */
+export function resolveFifoSourcePzNo(lot, opMap) {
+  const docNo = String(opMap?.get?.(lot?.source_operation_id)?.document_no || '').trim()
+  if (!docNo || isInternalLotNumber(docNo)) return ''
+  return docNo
+}
+
 export function formatK03PzNo(row) {
-  const raw = String(row?.pz_no_display ?? row?.pz_no ?? row?.source_lot_no ?? '').trim()
+  const raw = String(row?.pz_no_display ?? row?.pz_no ?? '').trim()
   if (!raw) return ''
   if (row?.isShortage) return raw
 
@@ -72,7 +84,7 @@ export function formatK03PzNo(row) {
   }
 
   if (isAgromarName(raw)) return ''
-  if (/^[a-z]\d+\/\d{3}\/\d{4}$/i.test(text)) return ''
+  if (isInternalLotNumber(text)) return ''
   return text.replace(/,\s*$/, '')
 }
 
@@ -1009,7 +1021,7 @@ export async function loadK03Forms(client) {
     if (wzDate && wzDate !== '0000-01-01' && pzDate && pzDate !== '0000-01-01' && pzDate > wzDate) continue
     if (!pzBySaleKey.has(key)) pzBySaleKey.set(key, [])
     pzBySaleKey.get(key).push({
-      pz_no: pzOp.document_no || lot.lot_no || '',
+      pz_no: resolveFifoSourcePzNo(lot, sourceOpMap),
       pz_date: pzDate,
       supplier: '',
       qty,
