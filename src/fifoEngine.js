@@ -807,6 +807,12 @@ async function syncPoolLotRemainingFromAllocations(client, base, matchSpec) {
 export async function repairAllIncomingLotRemainingFromAllocations(client, { onProgress } = {}) {
   if (!client) throw new Error('Brak Supabase.')
   onProgress?.('Synchronizacja kg partii PZ z FIFO…')
+  const { count, error: countErr } = await client
+    .from('fifo_allocations')
+    .select('id', { count: 'exact', head: true })
+  if (countErr) throw countErr
+  if (!Number(count || 0)) return { lots_synced: 0, skipped: true }
+
   const base = await loadFifoBaseData(client, { forceReload: true })
   const incomingIds = []
   for (const lot of base.lotState.values()) {

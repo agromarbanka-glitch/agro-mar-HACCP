@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -8221,7 +8221,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     try {
       const groups = groupImportRows(filteredRows)
-      setImportProgress('Przygotowanie zapisu…')
+      setImportProgress('Czyszczenie przed zapisem…')
       const prep = await prepareImportExcelSave(supabase, fileName)
       const prepMsg = formatPrepareImportResult(prep)
       if (prepMsg) setMessage(prepMsg)
@@ -8285,9 +8285,21 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       }
 
       setImportProgress('Naprawa PZ bez partii…')
-      const repairedMissingLots = await repairMissingIncomingLots(supabase, importDeps, {
-        onProgress: setImportProgress
-      })
+      const expectedIncomingLots = groupsToImport.length ? countIncomingItemsInGroups(groupsToImport) : 0
+      const lotsLookComplete =
+        saveResult &&
+        expectedIncomingLots > 0 &&
+        Number(saveResult.createdLots || 0) >= expectedIncomingLots
+
+      let repairedMissingLots = 0
+      if (lotsLookComplete) {
+        setImportProgress('Partie PZ utworzone — pomijam skan całej bazy…')
+      } else {
+        repairedMissingLots = await repairMissingIncomingLots(supabase, importDeps, {
+          onProgress: setImportProgress,
+          importedFileId: saveResult?.importedFileId || undefined
+        })
+      }
 
       const mergeMsg = formatMergeResult(mergeResult)
       const hadMergeOrSave = Boolean(mergeResult.importedItems || saveResult || repairedMissingLots)
@@ -8357,8 +8369,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       void (async () => {
         try {
-          setImportProgress('Przeliczanie remaining partii PZ…')
-          await repairAllIncomingLotRemainingFromAllocations(supabase, { onProgress: setImportProgress })
+          const hasAllocs = await hasAnyFifoAllocations(supabase)
+          if (hasAllocs) {
+            setImportProgress('Przeliczanie remaining partii PZ…')
+            await repairAllIncomingLotRemainingFromAllocations(supabase, { onProgress: setImportProgress })
+          }
           setImportProgress('Tworzenie kart K01…')
           const k01Added = importedFileId
             ? await syncAutoK01ForImportFile(importedFileId)

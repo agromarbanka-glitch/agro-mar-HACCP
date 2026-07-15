@@ -14,12 +14,12 @@ export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
-const OP_CHUNK = 250
-const ITEM_CHUNK = 500
-const NAME_CHUNK = 100
-const LOT_RPC_CHUNK = 600
-const LOT_CONCURRENCY = 24
-const ITEM_LOT_UPDATE_CHUNK = 80
+const OP_CHUNK = 400
+const ITEM_CHUNK = 800
+const NAME_CHUNK = 150
+const LOT_RPC_CHUNK = 1000
+const LOT_CONCURRENCY = 32
+const ITEM_LOT_UPDATE_CHUNK = 120
 const RETRY_ATTEMPTS = 3
 const RETRY_BASE_MS = 400
 
@@ -97,8 +97,12 @@ export async function getExistingOperationsForImport(client, groups) {
     }
   }
 
+  const docChunks = []
   for (let i = 0; i < documentNos.length; i += 200) {
-    const chunk = documentNos.slice(i, i + 200)
+    docChunks.push(documentNos.slice(i, i + 200))
+  }
+
+  await Promise.all(docChunks.map(async (chunk) => {
     const queryNos = [...new Set(chunk.flatMap(documentNoQueryVariants))]
     let data
     let error
@@ -124,12 +128,13 @@ export async function getExistingOperationsForImport(client, groups) {
       for (const op of data || []) {
         registerExistingOperation(op, importMetaById.get(op.imported_file_id))
       }
-      continue
+      return
     }
     for (const op of data || []) {
       registerExistingOperation(op)
     }
-  }
+  }))
+
   return { keys, details, orphanCount }
 }
 
@@ -359,11 +364,14 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
 }
 
 /** Pozycje przychodu (PZ) bez lot_id — np. przerwany import; tworzy partie i wiąże. */
-export async function repairMissingIncomingLots(client, deps, { onProgress } = {}) {
+export async function repairMissingIncomingLots(client, deps, { onProgress, importedFileId } = {}) {
+  if (importedFileId) {
+    return repairMissingIncomingLotsForImport(client, importedFileId, deps, { onProgress })
+  }
   const notify = msg => onProgress?.(msg)
   if (!client) return 0
 
-  notify('Sprawdzanie pozycji PZ bez partii…')
+  notify('Sprawdzanie pozycji PZ bez partii (cała baza)…')
   const PAGE = 500
   let offset = 0
   const toFix = []
@@ -383,6 +391,57 @@ export async function repairMissingIncomingLots(client, deps, { onProgress } = {
     toFix.push(...data)
     if (data.length < PAGE) break
     offset += PAGE
+  }
+
+  if (!toFix.length) return 0
+
+  notify(`Tworzenie ${toFix.length} brakujących partii PZ…`)
+  const incomingItems = toFix
+    .map(item => {
+      const qty = Math.abs(Number(item.qty) || 0)
+      const opDate = String(item.operations?.operation_date || '').slice(0, 10)
+      return {
+        direction: 'przychod',
+        group: { issueDate: opDate },
+        row: { productName: item.raw_product_name || '' },
+        productId: item.product_id,
+        itemQty: qty,
+        opId: item.operation_id,
+        itemId: item.id
+      }
+    })
+    .filter(i => i.itemQty > 0 && i.productId && i.opId && i.itemId)
+
+  if (!incomingItems.length) return 0
+  return attachLotsToIncomingItems(client, incomingItems, deps, notify)
+}
+
+/** Naprawa partii PZ tylko dla jednego pliku importu (szybkie po dużym imporcie). */
+export async function repairMissingIncomingLotsForImport(client, importedFileId, deps, { onProgress } = {}) {
+  const notify = msg => onProgress?.(msg)
+  if (!client || !importedFileId) return 0
+
+  notify('Sprawdzanie pozycji PZ bez partii (ten import)…')
+  const { data: ops, error: opsErr } = await withImportRetry(() =>
+    client.from('operations').select('id').eq('imported_file_id', importedFileId).eq('operation_type', 'przyjecie')
+  )
+  if (opsErr) throw opsErr
+  const opIds = (ops || []).map(o => o.id)
+  if (!opIds.length) return 0
+
+  const toFix = []
+  for (let i = 0; i < opIds.length; i += 100) {
+    const chunk = opIds.slice(i, i + 100)
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('operation_items')
+        .select('id, operation_id, product_id, qty, raw_product_name, operations!inner(id, operation_date, operation_type)')
+        .in('operation_id', chunk)
+        .eq('direction', 'przychod')
+        .is('lot_id', null)
+    )
+    if (error) throw error
+    toFix.push(...(data || []))
   }
 
   if (!toFix.length) return 0
@@ -888,7 +947,7 @@ async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
   return lotIds.length
 }
 
-async function insertOperationsForGroups(client, groups, importedFileId, contractorMap) {
+async function insertOperationsForGroups(client, groups, importedFileId, contractorMap, notify) {
   const allOpRows = groups.map(group => ({
     operation_type: group.operation,
     operation_date: group.issueDate,
@@ -901,7 +960,14 @@ async function insertOperationsForGroups(client, groups, importedFileId, contrac
 
   let insertedOps
   try {
-    insertedOps = await insertInChunks(client, 'operations', allOpRows, 'id, operation_type, document_no', OP_CHUNK)
+    const total = allOpRows.length
+    insertedOps = []
+    for (let i = 0; i < allOpRows.length; i += OP_CHUNK) {
+      const chunk = allOpRows.slice(i, i + OP_CHUNK)
+      notify?.(`Zapis dokumentów ${Math.min(i + chunk.length, total)} / ${total}…`)
+      const part = await insertInChunks(client, 'operations', chunk, 'id, operation_type, document_no', OP_CHUNK)
+      insertedOps.push(...part)
+    }
   } catch (err) {
     if (!String(err?.message || '').includes('duplicate')) throw err
     insertedOps = []
@@ -936,6 +1002,7 @@ async function insertItemsAndLotsForGroups(client, groups, opKeyToId, productMap
   const allItemRows = []
   const allItemMeta = []
 
+  notify?.(`Przygotowanie ${groups.length} dokumentów, ${groups.reduce((s, g) => s + (g.items?.length || 0), 0)} pozycji…`)
   for (const group of groups) {
     const opId = opKeyToId.get(operationImportKey(group))
     if (!opId) continue
@@ -961,6 +1028,7 @@ async function insertItemsAndLotsForGroups(client, groups, opKeyToId, productMap
 
   const allIncomingItems = []
   if (allItemRows.length) {
+    notify?.(`Zapis ${allItemRows.length} pozycji magazynowych…`)
     const insertedItems = await insertInChunks(client, 'operation_items', allItemRows, 'id', ITEM_CHUNK)
     for (let j = 0; j < insertedItems.length; j += 1) {
       const item = insertedItems[j]
@@ -1029,7 +1097,7 @@ export async function saveImportToSupabase(client, {
 
   notify(`Zapis ${groupsToImport.length} dokumentów…`)
   const { opKeyToId, importedOperations } = await insertOperationsForGroups(
-    client, groupsToImport, imported.id, contractorMap
+    client, groupsToImport, imported.id, contractorMap, notify
   )
 
   notify('Zapis pozycji i partii…')
@@ -1054,6 +1122,27 @@ export async function saveImportToSupabase(client, {
   }
 }
 
+/** Liczba pozycji PZ (przychód) w grupach importu — do weryfikacji utworzonych partii. */
+export function countIncomingItemsInGroups(groups) {
+  let n = 0
+  for (const group of groups || []) {
+    if (group.operation !== 'przyjecie') continue
+    for (const row of group.items || []) {
+      if (Math.abs(Number(row.qty) || 0) > 0) n += 1
+    }
+  }
+  return n
+}
+
+/** Szybkie sprawdzenie czy w bazie są jakiekolwiek alokacje FIFO. */
+export async function hasAnyFifoAllocations(client) {
+  if (!client) return false
+  const { count, error } = await withImportRetry(() =>
+    client.from('fifo_allocations').select('id', { count: 'exact', head: true })
+  )
+  if (error) throw error
+  return Number(count || 0) > 0
+}
 /** Szacuje ile linii doklejenie doda (bez zapisu do bazy). */
 export async function estimateMergeNewItems(client, existingGroups, details, deps) {
   if (!client || !existingGroups?.length) return 0
