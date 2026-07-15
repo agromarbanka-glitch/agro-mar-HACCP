@@ -6,7 +6,7 @@ import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocume
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
@@ -1222,6 +1222,28 @@ function App() {
     openK03UnfreezeDialog(line?.k03Form)
   }
 
+  async function freezeK03Line(line) {
+    if (!supabase || !line?.k03Form) return
+    const doc = line.k03Form
+    if (doc.frozen || doc.data?.frozen) {
+      setMessage('K03 jest już zamrożony.')
+      return
+    }
+    const reason = window.prompt('Powód zamrożenia (opcjonalnie):', 'Weryfikacja zakończona — blokada FIFO') || 'Zamrożenie ręczne'
+    try {
+      await freezeK03Workflow(supabase, doc, reason, userRole)
+      invalidateFifoBaseCache()
+      const frozenDoc = { ...doc, frozen: true, data: { ...doc.data, frozen: true, frozen_at: new Date().toISOString() } }
+      setWzQueueLines(lines => lines.map(l => l.key === line.key
+        ? { ...l, frozen: true, status: 'frozen', k03Form: frozenDoc }
+        : l))
+      setK03FormsRaw(forms => forms.map(f => f.id === doc.id ? frozenDoc : f))
+      setMessage(`K03 dla WZ ${line.document_no} zamrożony — FIFO i import nie zmienią tej kartoteki.`)
+    } catch (err) {
+      setMessage(`Błąd zamrożenia K03: ${err?.message || err}`)
+    }
+  }
+
   async function revertK03Line(line) {
     openK03RevertDialog(line)
   }
@@ -1369,12 +1391,8 @@ function App() {
 
   function toggleK03FifoSourceKey(sourceKey, checked) {
     setK03WzModal(m => {
-      const keys = new Set(m.fifoSourceKeys || [])
-      if (checked) keys.add(sourceKey)
-      else keys.delete(sourceKey)
-      const next = [...keys]
-      if (!next.length) return m
-      return { ...m, fifoSourceKeys: next, preview: null, confirmMismatch: false }
+      if (!checked) return m
+      return { ...m, fifoSourceKeys: [sourceKey], preview: null, confirmMismatch: false }
     })
   }
 
@@ -9049,6 +9067,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                     })()}
                     {hasK03 && <>
                       <button className="mini" onClick={() => openK03WzEditModal(line)}>Zmień decyzję</button>
+                      {!frozen && line.status === 'k03_ready' && <button type="button" className="mini" onClick={() => freezeK03Line(line)}>Zamroź</button>}
                       {frozen && <button type="button" className="mini secondary" onClick={() => unfreezeK03Line(line)}>Odmroź</button>}
                       {isAdmin(authProfile) && <button type="button" className="mini danger" onClick={() => revertK03Line(line)}>Cofnij</button>}
                     </>}

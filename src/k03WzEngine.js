@@ -31,7 +31,7 @@ function wzMonthKey(dateStr) {
   return String(dateStr || '').slice(0, 7)
 }
 
-async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacja K03 z FIFO') {
+async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacja K03 z FIFO', options = {}) {
   if (line.status === 'pending') return { skipped: 'pending' }
   if (line.frozen || line.status === 'frozen') return { skipped: 'frozen' }
   if (!line.workflow?.mode) return { skipped: 'pending' }
@@ -360,10 +360,11 @@ export async function loadWzQueue(client, options = {}) {
 export function applyK03WorkflowResultToQueue(line, result) {
   const doc = result?.doc
   if (!line || !doc) return null
+  const frozen = result.autoFrozen === true || doc.frozen === true || doc.data?.frozen === true
   return {
     ...line,
-    status: doc.frozen ? 'frozen' : 'k03_ready',
-    frozen: doc.frozen === true || doc.data?.frozen === true,
+    status: frozen ? 'frozen' : 'k03_ready',
+    frozen,
     workflow: result.workflow || line.workflow,
     k03Form: doc,
     haccp_doc_id: doc.haccp_doc_id || line.haccp_doc_id || null
@@ -556,8 +557,29 @@ export async function generateK03Workflow(client, line, options = {}) {
   }
 
   const canAutoFreeze = isK03CompleteAndValid(doc)
-  const haccpDocId = await saveK03Snapshot(client, doc, { freeze: false, userRole: changedBy })
+  const shouldFreeze = canAutoFreeze
+  const haccpDocId = await saveK03Snapshot(client, doc, { freeze: shouldFreeze, userRole: changedBy })
   if (haccpDocId) doc = { ...doc, haccp_doc_id: haccpDocId }
+  if (shouldFreeze) {
+    doc = {
+      ...doc,
+      frozen: true,
+      data: {
+        ...doc.data,
+        frozen: true,
+        frozen_at: new Date().toISOString()
+      }
+    }
+    await logK03Workflow(client, {
+      wz_no: line.document_no,
+      wz_date: wzDate,
+      product_name: line.product_name,
+      k03_key: k03Key,
+      change_type: 'k03_frozen',
+      change_reason: 'Automatyczne zamrożenie — kompletny K03 (FIFO zablokowane)',
+      changed_by: changedBy
+    })
+  }
 
   await logK03Workflow(client, {
     wz_no: line.document_no,
@@ -565,16 +587,12 @@ export async function generateK03Workflow(client, line, options = {}) {
     product_name: line.product_name,
     k03_key: k03Key,
     change_type: mismatch ? 'k03_quantity_warning_accepted' : (mode === 'przerob' ? 'k03_created_przerob' : 'k03_created_bez_przerobu'),
-    after_data: { workflow, sale_qty: saleQty, raw_total: rawTotal, shortage, auto_frozen: canAutoFreeze },
+    after_data: { workflow, sale_qty: saleQty, raw_total: rawTotal, shortage, auto_frozen: shouldFreeze },
     change_reason: options.reason || workflow.mode,
     changed_by: changedBy
   })
 
-  if (canAutoFreeze) {
-    doc = { ...doc, frozen: false, data: { ...doc.data, frozen: false } }
-  }
-
-  return { ok: true, doc, workflow, fifoResult, autoFrozen: false, haccpDocId: doc.haccp_doc_id || null }
+  return { ok: true, doc, workflow, fifoResult, autoFrozen: shouldFreeze, haccpDocId: doc.haccp_doc_id || null }
 }
 
 /**
@@ -618,7 +636,9 @@ export async function resyncOpenK03FromFifo(client, options = {}) {
 
   for (const line of lines) {
     try {
-      const r = await resyncK03Line(client, line, changedBy)
+      const r = await resyncK03Line(client, line, changedBy, 'Synchronizacja K03 z FIFO', {
+        frozenKeys: options.frozenKeys
+      })
       if (r.skipped === 'pending') {
         results.skippedPending++
         continue
