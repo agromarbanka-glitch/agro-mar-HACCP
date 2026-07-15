@@ -370,7 +370,7 @@ function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
     note += formatPostCutoffStockHint(diag.remainingAfterCutoffKg, cutoffDate, wzDate)
   }
   if ((diag.priorUnallocatedWzCount || 0) > 0) {
-    note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma pełnego rozliczenia FIFO – rozlicz je najpierw (kolejność od najstarszej daty WZ).`
+    note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze przypisanych PZ – rozlicz je od najstarszej daty WZ (kolejność FIFO).`
   }
   const soldBefore = Number(diag.soldBeforeTargetKg || 0)
   const pzCutoff = Number(diag.purchasedWithinCutoffKg || 0)
@@ -381,7 +381,7 @@ function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
   if (Number(diag.remainingWithinCutoffAfterReserveKg || 0) <= 0.5 &&
       Number(diag.purchasedWithinCutoffKg || 0) > 0 &&
       (diag.priorUnallocatedWzCount || 0) > 0) {
-    note += ' Wcześniejsze WZ bez K03 rezerwują cały dostępny surowiec – rozlicz je po kolei od najstarszej daty.'
+    note += ' Rozlicz wcześniejsze WZ przed kolejnymi – wtedy kg będą pobierane po kolei z magazynu.'
   }
   if (Number(diag.purchasedTotalKg || 0) > 0 && Number(diag.soldTotalKg || 0) > 0) {
     const delta = Math.round((Number(diag.purchasedTotalKg) - Number(diag.soldTotalKg)) * 1000) / 1000
