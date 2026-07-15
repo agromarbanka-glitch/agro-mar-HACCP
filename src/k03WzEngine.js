@@ -12,6 +12,7 @@ import {
   inferK03LotCode,
   productGroupForName,
   repairPzRowsFromLots,
+  formNeedsPzRepair,
   K03_ENGINE_VERSION
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
@@ -76,7 +77,7 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
       qty: line.qty,
       op: { document_no: line.document_no, operation_date: line.wz_date, contractor_id: null }
     },
-    await repairPzRowsFromLots(client, fifoResult.pzRows),
+    fifoResult.pzRows,
     productMap,
     new Map(),
     'baza',
@@ -285,7 +286,7 @@ async function logK03Workflow(client, entry) {
 }
 
 /** Ładuje kolejkę WZ z statusem K03. */
-export async function loadWzQueue(client) {
+export async function loadWzQueue(client, options = {}) {
   if (!client) {
     return { lines: [], diag: {}, message: 'Brak połączenia z bazą.', snapshots: [] }
   }
@@ -302,14 +303,18 @@ export async function loadWzQueue(client) {
   }
 
   const mergedForms = mergeK03Snapshots(forms, snapshots)
-  for (let i = 0; i < mergedForms.length; i++) {
-    const form = mergedForms[i]
-    if (form.data?.rawRows?.length) {
-      const rawRows = await repairPzRowsFromLots(client, form.data.rawRows, {
-        operation_id: form.data?.sale_operation_id,
-        product_id: form.data?.product_id
-      })
-      mergedForms[i] = { ...form, data: { ...form.data, rawRows } }
+  if (options.repairPz !== false) {
+    const repairTargets = mergedForms
+      .map((form, i) => ({ form, i }))
+      .filter(({ form }) => formNeedsPzRepair(form))
+    if (repairTargets.length) {
+      await Promise.all(repairTargets.map(async ({ form, i }) => {
+        const rawRows = await repairPzRowsFromLots(client, form.data.rawRows, {
+          operation_id: form.data?.sale_operation_id,
+          product_id: form.data?.product_id
+        })
+        mergedForms[i] = { ...form, data: { ...form.data, rawRows } }
+      }))
     }
   }
   const productMap = new Map()
@@ -463,24 +468,30 @@ export async function generateK03Workflow(client, line, options = {}) {
     }
   }
 
-  const fifoResult = await persistFifoForSale(client, line.operation_id, line.product_id, cutoffDate, {
-    k03_key: k03Key,
-    change_type: mode === 'przerob' ? 'k03_created_przerob' : 'k03_created_bez_przerobu',
-    change_reason: options.reason || (mode === 'przerob' ? 'Utworzenie K03 po przerobie' : 'Utworzenie K03 – brak przerobu'),
-    changed_by: changedBy,
-    ...fifoOpts
-  })
-  onProgress?.('k03_save')
-
+  onProgress?.('fifo_save')
   const productMap = new Map()
   if (line.product_id) productMap.set(line.product_id, { name: line.product_name, product_group: line.product_group })
 
   const lotRefDate = mode === 'przerob' ? przerobDate : wzDate
   const lotYear = String(lotRefDate || '').slice(0, 4) || String(new Date().getFullYear())
-  const lotSuggestForms = String(options.lotNo || '').trim()
-    ? []
-    : await loadK03LotSuggestForms(client, line.product_id, line.product_name, lotYear)
-  const lotNo = String(options.lotNo || '').trim() ||
+  const manualLotNo = String(options.lotNo || '').trim()
+
+  const [fifoResult, lotSuggestForms] = await Promise.all([
+    persistFifoForSale(client, line.operation_id, line.product_id, cutoffDate, {
+      k03_key: k03Key,
+      change_type: mode === 'przerob' ? 'k03_created_przerob' : 'k03_created_bez_przerobu',
+      change_reason: options.reason || (mode === 'przerob' ? 'Utworzenie K03 po przerobie' : 'Utworzenie K03 – brak przerobu'),
+      changed_by: changedBy,
+      fifoCache: preview._fifoCache,
+      ...fifoOpts
+    }),
+    manualLotNo
+      ? Promise.resolve([])
+      : loadK03LotSuggestForms(client, line.product_id, line.product_name, lotYear)
+  ])
+  onProgress?.('k03_save')
+
+  const lotNo = manualLotNo ||
     suggestLotNo(lotSuggestForms, line.product_name, line.product_id, productMap, lotRefDate, { mode })
 
   const fifoSourceKeys = options.fifoSourceKeys || options.fifo_source_keys || null
@@ -511,7 +522,7 @@ export async function generateK03Workflow(client, line, options = {}) {
       qty: line.qty,
       op: { document_no: line.document_no, operation_date: line.wz_date, contractor_id: null }
     },
-    await repairPzRowsFromLots(client, fifoResult.pzRows),
+    fifoResult.pzRows,
     productMap,
     emptyContractors,
     'baza',

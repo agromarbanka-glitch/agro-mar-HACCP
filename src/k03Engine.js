@@ -83,9 +83,21 @@ export function resolveK03PzNoFromRow(row) {
   return ''
 }
 
+/** Czy wiersze K03 wymagają uzupełnienia numerów PZ z bazy. */
+export function formNeedsPzRepair(form) {
+  return (form?.data?.rawRows || []).some(r =>
+    !r.isShortage && Number(r.qty || 0) > 0 && !resolveK03PzNoFromRow(r)
+  )
+}
+
 /** Uzupełnia brakujące numery PZ w wierszach K03 na podstawie partii magazynowych. */
 export async function repairPzRowsFromLots(client, rows, saleContext = null) {
   if (!client || !rows?.length) return rows || []
+
+  const needsRepair = rows.some(r =>
+    !r.isShortage && Number(r.qty || 0) > 0 && !resolveK03PzNoFromRow(r)
+  )
+  if (!needsRepair) return rows
 
   let lotMap = new Map()
   let opMap = new Map()

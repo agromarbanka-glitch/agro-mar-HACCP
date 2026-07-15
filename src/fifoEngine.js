@@ -895,6 +895,32 @@ function enrichAllocationRowsLocal(allocationRows, lotState, opMap) {
   })
 }
 
+function fifoMatchSpecKey(spec) {
+  if (!spec) return ''
+  if (spec.mode === 'variant' && spec.sourceKeys?.length) {
+    return `variant:${[...spec.sourceKeys].sort().join('|')}`
+  }
+  return String(spec.variantKey || spec.productGroup || '')
+}
+
+function canReuseFifoCache(cache, saleKey, cutoff, matchSpec) {
+  if (!cache?.base || !cache?.simulation) return false
+  if (cache.saleKey !== saleKey) return false
+  if (String(cache.cutoff || '').slice(0, 10) !== String(cutoff || '').slice(0, 10)) return false
+  return fifoMatchSpecKey(cache.matchSpec) === fifoMatchSpecKey(matchSpec)
+}
+
+async function finalizeFifoPzRows(client, allocationRows, lotState, opMap, cutoff) {
+  const allocLotIds = (allocationRows || []).map(r => r.source_lot_id).filter(Boolean)
+  await ensureOpMapForLots(client, lotState, opMap, allocLotIds)
+  const enriched = enrichAllocationRowsLocal(allocationRows, lotState, opMap)
+  const valid = enriched.filter(r => {
+    const pzDate = String(r.pz_date || '').slice(0, 10)
+    return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
+  })
+  return repairPzRowsFromLots(client, valid)
+}
+
 async function ensureOpMapForLots(client, lotState, opMap, lotIds) {
   const missingOpIds = []
   for (const lotId of lotIds || []) {
@@ -943,7 +969,7 @@ async function enrichAllocationRows(client, allocationRows) {
 
 /** Podgląd FIFO dla jednej pozycji WZ z datą graniczną (przerób lub WZ). */
 export async function previewFifoForSale(client, operationId, productId, cutoffDate, options = {}) {
-  const base = await loadFifoBaseData(client, { forceReload: true })
+  const base = await loadFifoBaseData(client, { forceReload: options.forceReload === true })
   const workflowBySaleKey = base.workflowBySaleKey || new Map()
   const saleKey = saleLineKey(operationId, productId)
   const sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
@@ -968,15 +994,9 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   })
 
   const current = simulation.results.get(saleKey) || { allocationRows: [], allocated: 0, shortage: Number(sale.sale_qty || 0) }
-  const allocLotIds = (current.allocationRows || []).map(r => r.source_lot_id).filter(Boolean)
-  await ensureOpMapForLots(client, simulation.lotState, base.opMap, allocLotIds)
-
-  const pzRows = enrichAllocationRowsLocal(current.allocationRows, simulation.lotState, base.opMap)
-  const pzRowsValid = pzRows.filter(r => {
-    const pzDate = String(r.pz_date || '').slice(0, 10)
-    return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
-  })
-  const excludedFuturePzQty = pzRows
+  const pzRowsOut = await finalizeFifoPzRows(client, current.allocationRows, simulation.lotState, base.opMap, cutoff)
+  const pzRowsValid = pzRowsOut
+  const excludedFuturePzQty = enrichAllocationRowsLocal(current.allocationRows, simulation.lotState, base.opMap)
     .filter(r => {
       const pzDate = String(r.pz_date || '').slice(0, 10)
       return pzDate && pzDate !== '0000-01-01' && pzDate > cutoff
@@ -987,7 +1007,6 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   const inventoryForSale = simulation.lotStateBeforeTarget
     ? summarizeGroupInventory(simulation.lotStateBeforeTarget, base.productMap, matchSpec, cutoff, base.opMap)
     : purchasedInventory
-  const pzRowsOut = await repairPzRowsFromLots(client, pzRowsValid)
 
   return {
     ok: true,
@@ -998,6 +1017,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     pzRows: pzRowsOut,
     cutoffDate: cutoff,
     excludedFuturePzQty,
+    _fifoCache: { base, simulation, matchSpec, cutoff, saleKey, pzRows: pzRowsOut },
     diagnostics: {
       productGroup: sale.sale_group,
       fifoVariant: matchSpec?.variantKey,
@@ -1025,12 +1045,53 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
 
 /** Zapisuje rozliczenie FIFO dla jednej pozycji WZ z datą graniczną. */
 export async function persistFifoForSale(client, operationId, productId, cutoffDate, logEntry = {}) {
-  const base = await loadFifoBaseData(client)
-  const workflowBySaleKey = base.workflowBySaleKey || new Map()
   const saleKey = saleLineKey(operationId, productId)
-  const sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
-  if (!sale) throw new Error('Nie znaleziono pozycji WZ w danych FIFO.')
-  const matchSpec = saleMatchSpecWithOptions(sale, logEntry)
+  const fifoCache = logEntry.fifoCache || logEntry._fifoCache
+  let base
+  let matchSpec
+  let fullSimulation
+  let sale
+  let cutoff
+
+  if (fifoCache?.base && fifoCache?.simulation) {
+    base = fifoCache.base
+    fullSimulation = fifoCache.simulation
+    matchSpec = fifoCache.matchSpec
+    sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
+    cutoff = String(cutoffDate || fifoCache.cutoff || sale?.sale_date || '9999-12-31').slice(0, 10)
+    if (!canReuseFifoCache(fifoCache, saleKey, cutoff, matchSpec)) {
+      base = null
+      fullSimulation = null
+      matchSpec = null
+    }
+  }
+
+  if (!base) {
+    base = await loadFifoBaseData(client)
+    sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
+    if (!sale) throw new Error('Nie znaleziono pozycji WZ w danych FIFO.')
+    matchSpec = saleMatchSpecWithOptions(sale, logEntry)
+    cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
+    if (fifoCache && canReuseFifoCache(fifoCache, saleKey, cutoff, matchSpec)) {
+      fullSimulation = fifoCache.simulation
+    } else {
+      const workflowBySaleKey = base.workflowBySaleKey || new Map()
+      const frozenKeys = logEntry.frozenKeys || new Set()
+      fullSimulation = runClassFifoSimulation(base, matchSpec, workflowBySaleKey, {
+        frozenKeys,
+        targetSaleKey: saleKey,
+        targetCutoff: cutoff,
+        targetMatchSpec: matchSpec
+      })
+    }
+  }
+
+  if (!sale) {
+    sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
+    if (!sale) throw new Error('Nie znaleziono pozycji WZ w danych FIFO.')
+  }
+  if (!matchSpec) matchSpec = saleMatchSpecWithOptions(sale, logEntry)
+  if (!cutoff) cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const frozenKeys = logEntry.frozenKeys || new Set()
 
   const existing = base.allocationsBySaleKey.get(saleKey) || []
@@ -1039,23 +1100,13 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
     allocated_qty: existing.reduce((s, a) => s + Number(a.qty || 0), 0)
   }
 
-  const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
-  const fullSimulation = runClassFifoSimulation(base, matchSpec, workflowBySaleKey, {
-    frozenKeys,
-    targetSaleKey: saleKey,
-    targetCutoff: cutoff,
-    targetMatchSpec: matchSpec
-  })
   await persistPoolFifoSimulation(client, base, matchSpec, fullSimulation, frozenKeys)
 
   const current = fullSimulation.results.get(saleKey) || { allocationRows: [], allocated: 0, shortage: 0 }
-  const allocLotIds = (current.allocationRows || []).map(r => r.source_lot_id).filter(Boolean)
-  await ensureOpMapForLots(client, fullSimulation.lotState, base.opMap, allocLotIds)
   const enrichedPzAll = enrichAllocationRowsLocal(current.allocationRows, fullSimulation.lotState, base.opMap)
-  const enrichedPz = (await repairPzRowsFromLots(client, enrichedPzAll)).filter(r => {
-    const pzDate = String(r.pz_date || '').slice(0, 10)
-    return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
-  })
+  const enrichedPz = fifoCache?.pzRows?.length && canReuseFifoCache(fifoCache, saleKey, cutoff, matchSpec)
+    ? fifoCache.pzRows
+    : await finalizeFifoPzRows(client, current.allocationRows, fullSimulation.lotState, base.opMap, cutoff)
   const excludedFuturePzQty = enrichedPzAll
     .filter(r => {
       const pzDate = String(r.pz_date || '').slice(0, 10)

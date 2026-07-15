@@ -1432,8 +1432,7 @@ function App() {
       const frozenNote = result.autoFrozen ? ' Kartoteka zamrożona automatycznie (kompletna i prawidłowa).' : ' Kartoteka zapisana — możesz ją zamrozić ręcznie po weryfikacji.'
       const editNote = wasEdit ? ' Decyzja K03 zmieniona.' : ''
       setK03WzModal(null)
-      await loadK03TraceData()
-      await loadFifoChangeLog()
+      await loadK03TraceData({ repairPz: false })
       setMessage(`K03 ${wasEdit ? 'zaktualizowany' : 'utworzony'} dla WZ ${wzNo} (${wzMode}).${editNote}${frozenNote}`)
     } catch (err) {
       setK03WzModal(m => ({ ...m, saving: false, savingStep: '', error: err?.message || String(err) }))
@@ -6968,7 +6967,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
 
 
-  async function loadK03TraceData() {
+  async function loadK03TraceData(options = {}) {
     setK03Loading(true)
     try {
       let forms = []
@@ -6976,7 +6975,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       let note = ''
 
       if (supabase) {
-        const queue = await loadWzQueue(supabase)
+        const queue = await loadWzQueue(supabase, { repairPz: options.repairPz !== false })
         forms = queue.forms || []
         setWzQueueLines(queue.lines || [])
         diag = queue.diag || diag
