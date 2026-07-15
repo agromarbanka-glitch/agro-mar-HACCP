@@ -1382,7 +1382,8 @@ function App() {
       const preview = await previewK03Workflow(supabase, k03WzModal.line, {
         mode: k03WzModal.mode,
         przerobDate: k03WzModal.przerobDate,
-        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal)
+        fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal),
+        frozenKeys: frozenKeysFromSnapshots(k03Snapshots)
       })
       if (!preview.ok) throw new Error(preview.error || 'Błąd podglądu FIFO.')
       setK03WzModal(m => ({ ...m, preview, loading: false }))
@@ -1406,6 +1407,7 @@ function App() {
         acceptQuantityMismatch: acceptMismatch || k03WzModal.confirmMismatch,
         changedBy: userRole,
         fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal),
+        frozenKeys: frozenKeysFromSnapshots(k03Snapshots),
         existingPreview: k03WzModal.preview?.ok ? k03WzModal.preview : undefined,
         onProgress: reportSaveStep
       }
@@ -1541,7 +1543,6 @@ function App() {
             wolne w magazynie (≤ {preview.cutoffDate}): {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg,
             dostępne dla tego WZ: {Number(preview.diagnostics.remainingWithinCutoffAfterReserveKg || 0).toLocaleString('pl-PL')} kg
             {Number(preview.diagnostics.allocatedByOtherWzKg || 0) > 0 ? ` (inne WZ: ${Number(preview.diagnostics.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg)` : ''}.
-            {preview.diagnostics.fifoRebuilt && ' Przeliczono FIFO puli truskawki (naprawa kg).'}
           </div>
         )}
         {mismatch && preview && <p className="status danger">

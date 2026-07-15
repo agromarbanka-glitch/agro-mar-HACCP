@@ -20,7 +20,9 @@ export const K03_WZ_ENGINE_VERSION = '1.4'
 
 function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
   const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys
-  return keys?.length ? { fifoSourceKeys: keys } : {}
+  const fifoOpts = keys?.length ? { fifoSourceKeys: keys } : {}
+  if (options.frozenKeys?.size) fifoOpts.frozenKeys = options.frozenKeys
+  return fifoOpts
 }
 
 function wzMonthKey(dateStr) {
@@ -373,10 +375,7 @@ function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
     note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je od najstarszej daty (kolejność FIFO).`
   }
   if (Number(diag.allocatedByOtherWzKg || 0) > 0.5) {
-    note += ` Inne WZ mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z tej puli.`
-  }
-  if (diag.fifoRebuilt) {
-    note += ' FIFO puli zostało automatycznie przeliczone wg stanu magazynu (kg).'
+    note += ` Inne WZ mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z tej puli (symulacja FIFO).`
   }
   const soldBefore = Number(diag.soldBeforeTargetKg || 0)
   const pzCutoff = Number(diag.purchasedWithinCutoffKg || 0)
