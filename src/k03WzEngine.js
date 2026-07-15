@@ -11,6 +11,7 @@ import {
   inferProductCode,
   inferK03LotCode,
   productGroupForName,
+  repairPzRowsFromLots,
   K03_ENGINE_VERSION
 } from './k03Engine'
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
@@ -75,7 +76,7 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
       qty: line.qty,
       op: { document_no: line.document_no, operation_date: line.wz_date, contractor_id: null }
     },
-    fifoResult.pzRows,
+    await repairPzRowsFromLots(client, fifoResult.pzRows),
     productMap,
     new Map(),
     'baza',
@@ -301,6 +302,16 @@ export async function loadWzQueue(client) {
   }
 
   const mergedForms = mergeK03Snapshots(forms, snapshots)
+  for (let i = 0; i < mergedForms.length; i++) {
+    const form = mergedForms[i]
+    if (form.data?.rawRows?.length) {
+      const rawRows = await repairPzRowsFromLots(client, form.data.rawRows, {
+        operation_id: form.data?.sale_operation_id,
+        product_id: form.data?.product_id
+      })
+      mergedForms[i] = { ...form, data: { ...form.data, rawRows } }
+    }
+  }
   const productMap = new Map()
   for (const f of mergedForms) {
     if (f.data?.product_id) {
@@ -500,7 +511,7 @@ export async function generateK03Workflow(client, line, options = {}) {
       qty: line.qty,
       op: { document_no: line.document_no, operation_date: line.wz_date, contractor_id: null }
     },
-    fifoResult.pzRows,
+    await repairPzRowsFromLots(client, fifoResult.pzRows),
     productMap,
     emptyContractors,
     'baza',

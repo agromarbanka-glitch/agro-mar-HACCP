@@ -1,7 +1,7 @@
 /**
  * FIFO – przeliczanie przyrostowe (braki) i pełne z ochroną zamrożonych K03.
  */
-import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo, isInternalLotNumber, repairPzRowsFromLots } from './k03Engine'
 
 function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
@@ -883,7 +883,7 @@ function enrichAllocationRowsLocal(allocationRows, lotState, opMap) {
     const lot = lotState.get(row.source_lot_id) || {}
     const pzOp = opMap.get(lot.source_operation_id) || {}
     const fullDoc = String(pzOp.document_no || '').trim()
-    const pzNo = resolveFifoSourcePzNo(lot, opMap) || (fullDoc && !/^[A-Za-z]{1,8}\/\d{1,5}\//.test(fullDoc) ? fullDoc : '')
+    const pzNo = resolveFifoSourcePzNo(lot, opMap) || (fullDoc && !isInternalLotNumber(fullDoc) ? fullDoc : '')
     return {
       pz_no: pzNo,
       pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
@@ -893,6 +893,26 @@ function enrichAllocationRowsLocal(allocationRows, lotState, opMap) {
       source_lot_id: row.source_lot_id
     }
   })
+}
+
+async function ensureOpMapForLots(client, lotState, opMap, lotIds) {
+  const missingOpIds = []
+  for (const lotId of lotIds || []) {
+    const lot = lotState?.get?.(lotId)
+    if (lot?.source_operation_id && !opMap.has(lot.source_operation_id)) {
+      missingOpIds.push(lot.source_operation_id)
+    }
+  }
+  if (!missingOpIds.length) return opMap
+  const extra = await fetchInChunks(
+    client,
+    'operations',
+    'id, operation_type, operation_date, document_no, created_at',
+    'id',
+    missingOpIds
+  )
+  for (const o of extra) opMap.set(o.id, o)
+  return opMap
 }
 
 async function enrichAllocationRows(client, allocationRows) {
@@ -948,9 +968,8 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   })
 
   const current = simulation.results.get(saleKey) || { allocationRows: [], allocated: 0, shortage: Number(sale.sale_qty || 0) }
-  const inventoryForSale = simulation.lotStateBeforeTarget
-    ? summarizeGroupInventory(simulation.lotStateBeforeTarget, base.productMap, matchSpec, cutoff, base.opMap)
-    : purchasedInventory
+  const allocLotIds = (current.allocationRows || []).map(r => r.source_lot_id).filter(Boolean)
+  await ensureOpMapForLots(client, simulation.lotState, base.opMap, allocLotIds)
 
   const pzRows = enrichAllocationRowsLocal(current.allocationRows, simulation.lotState, base.opMap)
   const pzRowsValid = pzRows.filter(r => {
@@ -965,6 +984,10 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     .reduce((s, r) => s + Number(r.qty || 0), 0)
   const allocatedValid = pzRowsValid.reduce((s, r) => s + Number(r.qty || 0), 0)
   const shortage = Math.max(0, Math.round((Number(sale.sale_qty || 0) - allocatedValid) * 1000) / 1000)
+  const inventoryForSale = simulation.lotStateBeforeTarget
+    ? summarizeGroupInventory(simulation.lotStateBeforeTarget, base.productMap, matchSpec, cutoff, base.opMap)
+    : purchasedInventory
+  const pzRowsOut = await repairPzRowsFromLots(client, pzRowsValid)
 
   return {
     ok: true,
@@ -972,7 +995,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     saleQty: Number(sale.sale_qty || 0),
     allocated: allocatedValid,
     shortage,
-    pzRows: pzRowsValid,
+    pzRows: pzRowsOut,
     cutoffDate: cutoff,
     excludedFuturePzQty,
     diagnostics: {
@@ -1026,8 +1049,10 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   await persistPoolFifoSimulation(client, base, matchSpec, fullSimulation, frozenKeys)
 
   const current = fullSimulation.results.get(saleKey) || { allocationRows: [], allocated: 0, shortage: 0 }
+  const allocLotIds = (current.allocationRows || []).map(r => r.source_lot_id).filter(Boolean)
+  await ensureOpMapForLots(client, fullSimulation.lotState, base.opMap, allocLotIds)
   const enrichedPzAll = enrichAllocationRowsLocal(current.allocationRows, fullSimulation.lotState, base.opMap)
-  const enrichedPz = enrichedPzAll.filter(r => {
+  const enrichedPz = (await repairPzRowsFromLots(client, enrichedPzAll)).filter(r => {
     const pzDate = String(r.pz_date || '').slice(0, 10)
     return !pzDate || pzDate === '0000-01-01' || pzDate <= cutoff
   })

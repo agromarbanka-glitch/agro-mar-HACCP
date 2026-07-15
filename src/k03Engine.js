@@ -52,10 +52,10 @@ export function inferK03LotCode(productName, product, options = {}) {
 }
 
 export function isInternalLotNumber(value = '') {
-  const text = String(value || '').trim()
-  if (/^[A-Za-z]{1,8}\/\d{1,5}\/\d{4}$/.test(text)) return true
-  if (/^[A-Za-z]{1,8}\/\d{1,5}\/\d{2,3}$/.test(text)) return true
-  return false
+  const text = String(value || '').trim().toUpperCase()
+  if (!text) return false
+  if (/^PZ[\s./-]/.test(text) || text.startsWith('WZ') || text.startsWith('FV') || text.startsWith('FS')) return false
+  return /^[A-Z]{1,8}\/\d{1,5}\/\d{2,4}$/.test(text)
 }
 
 /** Numer dokumentu PZ źródłowego — nigdy wewnętrzny numer partii (np. T/738/2026). */
@@ -81,6 +81,84 @@ export function resolveK03PzNoFromRow(row) {
   }
 
   return ''
+}
+
+/** Uzupełnia brakujące numery PZ w wierszach K03 na podstawie partii magazynowych. */
+export async function repairPzRowsFromLots(client, rows, saleContext = null) {
+  if (!client || !rows?.length) return rows || []
+
+  let lotMap = new Map()
+  let opMap = new Map()
+
+  async function loadLotsAndOps(lotIds) {
+    const ids = [...new Set((lotIds || []).filter(Boolean))].filter(id => !lotMap.has(id))
+    if (!ids.length) return
+    const lots = await fetchInChunks(client, 'lots', 'id, lot_no, production_date, source_operation_id', 'id', ids)
+    for (const l of lots) lotMap.set(l.id, l)
+    const opIds = [...new Set(lots.map(l => l.source_operation_id).filter(Boolean))].filter(id => !opMap.has(id))
+    if (!opIds.length) return
+    const ops = await fetchInChunks(client, 'operations', 'id, operation_date, document_no', 'id', opIds)
+    for (const o of ops) opMap.set(o.id, o)
+  }
+
+  function enrichRow(r, lot) {
+    const pzOp = opMap.get(lot.source_operation_id) || {}
+    const fullDoc = String(pzOp.document_no || '').trim()
+    const pzNo = resolveFifoSourcePzNo(lot, opMap) || (fullDoc && !isInternalLotNumber(fullDoc) ? fullDoc : '')
+    if (!pzNo) return r
+    const pzDate = String(pzOp.operation_date || lot.production_date || r.pz_date || '').slice(0, 10)
+    const supplier = formatK03Dostawca({ pz_no: pzNo }) || pzNo
+    return {
+      ...r,
+      pz_no: pzNo,
+      pz_no_display: pzNo,
+      supplier: supplier || pzNo,
+      pz_date: pzDate || r.pz_date,
+      source_lot_id: r.source_lot_id || lot.id,
+      source_lot_no: r.source_lot_no || lot.lot_no || ''
+    }
+  }
+
+  const initialLotIds = rows.filter(r => r.source_lot_id && !r.isShortage).map(r => r.source_lot_id)
+  await loadLotsAndOps(initialLotIds)
+
+  let out = rows.map(r => {
+    if (r.isShortage || resolveK03PzNoFromRow(r)) return r
+    if (!r.source_lot_id) return r
+    return enrichRow(r, lotMap.get(r.source_lot_id) || {})
+  })
+
+  const stillEmpty = out.filter(r => !r.isShortage && Number(r.qty || 0) > 0 && !resolveK03PzNoFromRow(r))
+  if (stillEmpty.length && saleContext?.operation_id) {
+    let allocQuery = client
+      .from('fifo_allocations')
+      .select('source_lot_id, qty')
+      .eq('operation_id', saleContext.operation_id)
+    if (saleContext.product_id) allocQuery = allocQuery.eq('product_id', saleContext.product_id)
+    const { data: allocs, error } = await allocQuery
+    if (!error && allocs?.length) {
+      await loadLotsAndOps(allocs.map(a => a.source_lot_id))
+      const usedLotIds = new Set(out.filter(r => r.source_lot_id).map(r => r.source_lot_id))
+      out = out.map(r => {
+        if (r.isShortage || resolveK03PzNoFromRow(r) || r.source_lot_id) return r
+        const qty = Number(r.qty || 0)
+        const pzDate = String(r.pz_date || '').slice(0, 10)
+        const match = allocs.find(a => {
+          if (usedLotIds.has(a.source_lot_id)) return false
+          if (Math.abs(Number(a.qty || 0) - qty) >= 0.001) return false
+          if (!pzDate || pzDate === '0000-01-01') return true
+          const lot = lotMap.get(a.source_lot_id)
+          const lotDate = String(opMap.get(lot?.source_operation_id)?.operation_date || lot?.production_date || '').slice(0, 10)
+          return lotDate === pzDate
+        })
+        if (!match) return r
+        usedLotIds.add(match.source_lot_id)
+        return enrichRow({ ...r, source_lot_id: match.source_lot_id }, lotMap.get(match.source_lot_id) || {})
+      })
+    }
+  }
+
+  return out
 }
 
 export function formatK03PzNo(row) {
