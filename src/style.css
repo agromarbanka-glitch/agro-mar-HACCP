@@ -568,6 +568,18 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
   background: rgba(15, 23, 42, 0.62);
   backdrop-filter: blur(2px);
 }
+.import-preview-backdrop {
+  z-index: 115;
+  background: rgba(15, 23, 42, 0.62);
+  backdrop-filter: blur(2px);
+}
+.haccp-modal.import-preview-modal {
+  width: min(960px, 100%);
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+}
+.import-preview-table { max-height: 60vh; overflow: auto; }
+.k03-shortage-row .cell-input { background: #fffbeb; border-color: #f59e0b; }
 .haccp-modal.k03-wz-modal {
   width: min(640px, 100%);
   max-height: calc(100vh - 56px);

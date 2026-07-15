@@ -4583,15 +4583,27 @@ function App() {
           {paper.rows.map((r, i) => {
             const shortageRow = rawRows[i]?.isShortage
             const rawPz = resolveK03PzNoFromRow(rawRows[i]) || rawRows[i]?.pz_no_display || ''
+            const rawDate = String(r.pzDate || '').replace(/^≤\s*/, '').slice(0, 10)
+            const rawDost = r.dostawca || rawRows[i]?.supplier || ''
+            const rawQty = r.qty !== '' ? Number(r.qty) : ''
             return <tr key={`k03-${i}`} className={shortageRow ? 'k03-shortage-row' : ''}>
               <td>{r.lp}</td>
               <td className="cell-wrap">
-                {shortageRow ? r.pzNo : <>
-                  <input className="cell-input no-print" type="text" defaultValue={rawPz} key={`k03-pz-${doc.id}-${i}-${rawPz}`} onBlur={e => { if (e.target.value !== rawPz) patchK03RawRow(doc, i, 'pz_no', e.target.value.trim()) }} />
-                  <span className="print-only">{r.pzNo}</span>
-                </>}
+                <input className="cell-input no-print" type="text" defaultValue={rawPz} placeholder={shortageRow ? 'Nr PZ (ręcznie)' : ''} key={`k03-pz-${doc.id}-${i}-${rawPz}`} onBlur={e => { if (e.target.value !== rawPz) patchK03RawRow(doc, i, 'pz_no', e.target.value.trim()) }} />
+                <span className="print-only">{rawPz || r.pzNo || '—'}</span>
               </td>
-              <td>{r.pzDate}</td><td className="cell-wrap">{r.dostawca}</td><td>{r.qty !== '' ? Number(r.qty).toLocaleString('pl-PL') : ''}</td>
+              <td>
+                <input className="cell-input no-print pz-date-input" type="date" defaultValue={rawDate} key={`k03-pzdate-${doc.id}-${i}-${rawDate}`} onBlur={e => { if (e.target.value && e.target.value !== rawDate) patchK03RawRow(doc, i, 'pz_date', e.target.value) }} />
+                <span className="print-only">{r.pzDate}</span>
+              </td>
+              <td className="cell-wrap">
+                <input className="cell-input no-print" type="text" defaultValue={rawDost} placeholder={shortageRow ? 'Dostawca' : ''} key={`k03-dost-${doc.id}-${i}-${rawDost}`} onBlur={e => { if (e.target.value !== rawDost) patchK03RawRow(doc, i, 'supplier', e.target.value.trim()) }} />
+                <span className="print-only">{rawDost}</span>
+              </td>
+              <td>
+                <input className="cell-input no-print" type="number" step="0.001" min="0" defaultValue={rawQty} key={`k03-qty-${doc.id}-${i}-${rawQty}`} onBlur={e => { const v = Number(e.target.value) || 0; if (v !== rawQty) patchK03RawRow(doc, i, 'qty', v) }} />
+                <span className="print-only">{rawQty !== '' ? Number(rawQty).toLocaleString('pl-PL') : ''}</span>
+              </td>
               {r.lp === 1
                 ? <><td className="right-start">1</td><td className="cell-wrap">{r.wzNo}</td><td>{r.wzDate}</td><td className="cell-wrap">{r.wzReceiver}</td><td>{Number(r.wzQty).toLocaleString('pl-PL')}</td><td className="cell-wrap">{r.signed}</td></>
                 : <><td className="right-start">{r.wzLp}</td><td></td><td></td><td></td><td></td><td></td></>}
@@ -7604,7 +7616,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     const { fileName, loading, operations, error } = importPreviewModal
     const filtered = operations || []
     return (
-      <div className="modal-backdrop" onClick={() => setImportPreviewModal(null)}>
+      <div className="modal-backdrop import-preview-backdrop" onClick={() => setImportPreviewModal(null)}>
         <div className="haccp-modal import-preview-modal" onClick={e => e.stopPropagation()}>
           <h3>Podgląd importu: {fileName || 'plik Excel'}</h3>
           <p className="hint">{loading ? 'Wczytywanie dokumentów…' : `${filtered.length} dokumentów w bazie. Możesz ręcznie poprawić datę PZ lub WZ.`}</p>
@@ -8718,7 +8730,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
           <td>{f.rows_count || f.row_count || '-'}</td>
           <td><span className="pill">{f.status || 'wczytany'}</span></td>
-          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id, f.filename || f.file_name)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
+          <td className="row-actions"><button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, f.filename || f.file_name)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
         </tr>)}</tbody>
       </table></div>}
       {importPreview.length > 0 && !importPreviewModal && <><h3>Ostatni podgląd ({importPreview.length} dokumentów)</h3><p className="hint">Kliknij „Podgląd” przy pliku, aby otworzyć okno z edycją dat PZ/WZ.</p></>}
@@ -9336,10 +9348,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </>}
     </div>
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
+    </>}
+
     {renderK03WzModal()}
     {renderImportPreviewModal()}
     {renderK03ActionDialog()}
-    </>}
 
     {activeTab === 'archiwum-pdf' && canSeeTab(authProfile, 'archiwum-pdf') && (
       <PdfDocumentsSection

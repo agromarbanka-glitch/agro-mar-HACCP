@@ -1305,11 +1305,21 @@ export function applyRawRowPatches(rawRows, patches) {
     if (patch.pz_no != null) {
       next.pz_no = patch.pz_no
       next.pz_no_display = patch.pz_no
+      if (String(patch.pz_no).trim()) next.isShortage = false
     }
     if (patch.pz_date != null) next.pz_date = patch.pz_date
     if (patch.supplier != null) next.supplier = patch.supplier
+    if (patch.qty != null) next.qty = Number(patch.qty) || 0
+    if (patch.isShortage != null) next.isShortage = patch.isShortage
     return next
   })
+}
+
+export function recalcK03TotalsFromRawRows(rawRows, saleQty) {
+  const rows = rawRows || []
+  const rawTotal = Math.round(rows.reduce((s, r) => s + Number(r.qty || 0), 0) * 1000) / 1000
+  const shortage = Math.max(0, Math.round((Number(saleQty || 0) - rawTotal) * 1000) / 1000)
+  return { rawTotal, shortage }
 }
 
 export function applyK03DocEdits(doc, edits = {}) {
@@ -1321,6 +1331,8 @@ export function applyK03DocEdits(doc, edits = {}) {
   const rawRows = Array.isArray(edits.rawRows)
     ? edits.rawRows
     : applyRawRowPatches(doc.data?.rawRows, edits.rawRowPatches)
+  const saleQty = Number(doc?.qty || 0)
+  const totals = recalcK03TotalsFromRawRows(rawRows, saleQty)
 
   const saleRows = (doc.data?.saleRows || []).map(r => ({
     ...r,
@@ -1337,7 +1349,9 @@ export function applyK03DocEdits(doc, edits = {}) {
       ...doc.data,
       wz_date: wzDate,
       rawRows,
-      saleRows
+      saleRows,
+      rawTotal: totals.rawTotal,
+      shortage: totals.shortage
     }
   }
 }
