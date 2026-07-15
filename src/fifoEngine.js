@@ -38,6 +38,28 @@ async function fetchInChunks(client, table, select, column, ids, chunkSize = 80)
   return results
 }
 
+/** Pobiera całą tabelę stronicowaniem (Supabase domyślnie zwraca max 1000 wierszy). */
+async function fetchAllPaginated(client, table, select, options = {}) {
+  const pageSize = options.pageSize || 2000
+  const orderCol = options.orderBy || 'id'
+  const filters = options.filters || []
+  const all = []
+  let offset = 0
+  while (true) {
+    let query = client.from(table).select(select).order(orderCol, { ascending: true }).range(offset, offset + pageSize - 1)
+    for (const f of filters) {
+      if (f.type === 'eq') query = query.eq(f.column, f.value)
+    }
+    const { data, error } = await query
+    if (error) throw error
+    if (!data?.length) break
+    all.push(...data)
+    if (data.length < pageSize) break
+    offset += pageSize
+  }
+  return all
+}
+
 export function frozenKeysFromSnapshots(snapshots = []) {
   const keys = new Set()
   for (const snap of snapshots) {
@@ -81,14 +103,24 @@ async function loadFifoBaseData(client, options = {}) {
   if (!options.forceReload && fifoBaseCache) {
     return fifoBaseCache
   }
-  const [{ data: products, error: productsErr }, { data: lotsRaw, error: lotsErr }, { data: operations, error: opsErr }, { data: saleItemsRaw, error: itemsErr }, { data: allocationsRaw, error: allocErr }, { data: k03Docs, error: k03Err }] = await Promise.all([
-    client.from('products').select('id, name, code, product_group'),
-    client.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
-    client.from('operations').select('id, operation_type, operation_date, document_no, created_at'),
-    client.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name').eq('direction', 'rozchod'),
-    client.from('fifo_allocations').select('id, operation_id, source_lot_id, product_id, qty'),
-    client.from('haccp_documents').select('operation_id, data').eq('document_type', 'K03')
+  const [products, lotsRaw, operations, saleItemsRaw, allocationsRaw, k03Docs] = await Promise.all([
+    fetchAllPaginated(client, 'products', 'id, name, code, product_group'),
+    fetchAllPaginated(client, 'lots', 'id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
+    fetchAllPaginated(client, 'operations', 'id, operation_type, operation_date, document_no, created_at'),
+    fetchAllPaginated(client, 'operation_items', 'id, operation_id, product_id, qty, direction, raw_product_name', {
+      filters: [{ type: 'eq', column: 'direction', value: 'rozchod' }]
+    }),
+    fetchAllPaginated(client, 'fifo_allocations', 'id, operation_id, source_lot_id, product_id, qty'),
+    fetchAllPaginated(client, 'haccp_documents', 'operation_id, data', {
+      filters: [{ type: 'eq', column: 'document_type', value: 'K03' }]
+    })
   ])
+  const productsErr = null
+  const lotsErr = null
+  const opsErr = null
+  const itemsErr = null
+  const allocErr = null
+  const k03Err = null
   if (productsErr) throw productsErr
   if (lotsErr) throw lotsErr
   if (opsErr) throw opsErr
@@ -833,6 +865,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       lotsMissingDateKg: purchasedInventory.lotsMissingDateKg,
       lotCountInGroup: purchasedInventory.lotCount,
       lotCountWithinCutoff: purchasedInventory.lotCountWithinCutoff,
+      lotsTotalLoaded: base.lotState?.size || 0,
       priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
       priorUnallocatedWzKg: priorReserve.priorUnallocatedQty,
       targetSaleQty: Number(sale.sale_qty || 0),

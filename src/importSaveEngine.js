@@ -81,17 +81,19 @@ export async function getExistingOperationsForImport(client, groups) {
     }
     const key = operationImportKey({ operation: op.operation_type, documentNo: op.document_no })
     keys.add(key)
-    if (!details.has(key)) {
-      details.set(key, {
-        documentNo: op.document_no,
-        operationType: op.operation_type,
-        operationId: op.id,
-        operationDate: op.operation_date || null,
-        importFilename: imp?.filename || null,
-        importDeleted: Boolean(imp?.deleted_at),
-        createdAt: op.created_at,
-        importedFileId: op.imported_file_id
-      })
+    const candidate = {
+      documentNo: op.document_no,
+      operationType: op.operation_type,
+      operationId: op.id,
+      operationDate: op.operation_date || null,
+      importFilename: imp?.filename || null,
+      importDeleted: Boolean(imp?.deleted_at),
+      createdAt: op.created_at,
+      importedFileId: op.imported_file_id
+    }
+    const existing = details.get(key)
+    if (!existing || String(candidate.createdAt || '') > String(existing.createdAt || '')) {
+      details.set(key, candidate)
     }
   }
 
@@ -234,18 +236,27 @@ export function partitionImportGroups(groups, existingKeys) {
 async function fetchOperationItemsByOpIds(client, opIds) {
   const byOp = new Map()
   const unique = [...new Set((opIds || []).filter(Boolean))]
-  for (let i = 0; i < unique.length; i += 100) {
-    const chunk = unique.slice(i, i + 100)
-    const { data, error } = await withImportRetry(() =>
-      client.from('operation_items')
-        .select('id, operation_id, product_id, qty, direction, raw_product_name, products(name)')
-        .in('operation_id', chunk)
-    )
-    if (error) throw error
-    for (const item of data || []) {
-      const list = byOp.get(item.operation_id) || []
-      list.push(item)
-      byOp.set(item.operation_id, list)
+  for (let i = 0; i < unique.length; i += 50) {
+    const chunk = unique.slice(i, i + 50)
+    let offset = 0
+    const pageSize = 1000
+    while (true) {
+      const { data, error } = await withImportRetry(() =>
+        client.from('operation_items')
+          .select('id, operation_id, product_id, qty, direction, raw_product_name, products(name)')
+          .in('operation_id', chunk)
+          .order('id', { ascending: true })
+          .range(offset, offset + pageSize - 1)
+      )
+      if (error) throw error
+      if (!data?.length) break
+      for (const item of data) {
+        const list = byOp.get(item.operation_id) || []
+        list.push(item)
+        byOp.set(item.operation_id, list)
+      }
+      if (data.length < pageSize) break
+      offset += pageSize
     }
   }
   return byOp
@@ -1337,6 +1348,83 @@ export async function removeDuplicateIncomingOperationItems(client, { onProgress
     )
   }
   throw rpcErr
+}
+
+/**
+ * Usuwa wszystkie aktywne importy Excel (PZ/WZ/partie/FIFO/K01 z importu).
+ * Po resecie wgraj plik Excel od nowa — wszystkie dokumenty trafią jako nowe.
+ */
+export async function purgeAllActiveExcelImports(client, { onProgress, reason = 'Reset magazynu — ponowny import od zera' } = {}) {
+  const notify = msg => onProgress?.(msg)
+  if (!client) throw new Error('Brak Supabase.')
+
+  notify('Pobieranie listy importów…')
+  const { data: files, error: listErr } = await withImportRetry(() =>
+    client.from('imported_files').select('id, filename, created_at').is('deleted_at', null).order('created_at', { ascending: true })
+  )
+  if (listErr) throw listErr
+
+  const active = files || []
+  let filesPurged = 0
+  let operations = 0
+  let lots = 0
+
+  for (const f of active) {
+    notify(`Usuwanie importu ${filesPurged + 1}/${active.length}: ${f.filename || f.id}…`)
+    let result = null
+    try {
+      const { data, error: rpcErr } = await withImportRetry(() =>
+        client.rpc('delete_import_excel_admin', {
+          p_imported_file_id: f.id,
+          p_reason: String(reason).trim(),
+          p_user_role: 'admin'
+        })
+      )
+      if (rpcErr) {
+        if (!/function.*does not exist/i.test(String(rpcErr.message || ''))) throw rpcErr
+        result = await purgeImportDataClientSide(client, f.id)
+        await withImportRetry(() =>
+          client.from('imported_files').update({
+            deleted_at: new Date().toISOString(),
+            deleted_by_role: 'admin',
+            delete_reason: String(reason).trim(),
+            status: 'usuniety'
+          }).eq('id', f.id)
+        )
+      } else {
+        result = data
+      }
+    } catch (err) {
+      result = await purgeImportDataClientSide(client, f.id)
+      await withImportRetry(() =>
+        client.from('imported_files').update({
+          deleted_at: new Date().toISOString(),
+          deleted_by_role: 'admin',
+          delete_reason: `${String(reason).trim()} (fallback)`,
+          status: 'usuniety'
+        }).eq('id', f.id)
+      )
+    }
+    operations += Number(result?.operations || 0)
+    lots += Number(result?.lots || 0) + Number(result?.orphan_lots || 0)
+    filesPurged += 1
+  }
+
+  notify('Sprzątanie osieroconych partii i FIFO…')
+  try {
+    await cleanupOrphanedDeletedImports(client)
+  } catch (_) { /* v40 */ }
+
+  try {
+    await withImportRetry(() => client.rpc('purge_orphan_import_lots'))
+  } catch (_) { /* opcjonalne RPC */ }
+
+  return { filesPurged, operations, lots, importFilesTotal: active.length }
+}
+
+export function formatPurgeAllImportsResult(result) {
+  if (!result?.filesPurged) return 'Reset: brak aktywnych importów do usunięcia.'
+  return `Reset magazynu: usunięto ${result.filesPurged} importów (${result.operations} operacji, ${result.lots} partii). Wgraj Excel od nowa.`
 }
 
 export function formatImportNetworkError(err) {

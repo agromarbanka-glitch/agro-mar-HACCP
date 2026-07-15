@@ -4,11 +4,11 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeAllActiveExcelImports, formatPurgeAllImportsResult } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
-import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations } from './fifoEngine'
+import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import {
@@ -289,6 +289,7 @@ function App() {
   const [k01SupplierBusyId, setK01SupplierBusyId] = useState(null)
   const [importDeleting, setImportDeleting] = useState(false)
   const [importCleaning, setImportCleaning] = useState(false)
+  const [importResetting, setImportResetting] = useState(false)
   const [importDeduping, setImportDeduping] = useState(false)
   const [importSaving, setImportSaving] = useState(false)
   const [importProgress, setImportProgress] = useState('')
@@ -1537,7 +1538,8 @@ function App() {
               <>Źródła PZ (ręczny wybór): {[...(preview.diagnostics.fifoSourceVariants || [])].join(', ')} · </>
             )}
             PZ łącznie {Number(preview.diagnostics.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg
-            ({preview.diagnostics.lotCountInGroup || 0} partii),
+            ({preview.diagnostics.lotCountInGroup || 0} partii
+            {Number(preview.diagnostics.lotsTotalLoaded || 0) > 0 ? ` / ${preview.diagnostics.lotsTotalLoaded} partii w bazie` : ''}),
             z datą ≤ {preview.cutoffDate}: {Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
             ({preview.diagnostics.lotCountWithinCutoff || 0} partii),
             wolne w magazynie (≤ {preview.cutoffDate}): {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg,
@@ -6730,10 +6732,10 @@ function isIncomingLotOperation(op) {
 
 async function recalculateFifoClientSide() {
   const [{ data: products, error: productsErr }, { data: lotsRaw, error: lotsErr }, { data: operations, error: opsErr }, { data: saleItemsRaw, error: itemsErr }] = await Promise.all([
-    supabase.from('products').select('id, name, code, product_group'),
-    supabase.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
-    supabase.from('operations').select('id, operation_type, operation_date, document_no, created_at'),
-    supabase.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name').eq('direction', 'rozchod')
+    supabase.from('products').select('id, name, code, product_group').limit(50000),
+    supabase.from('lots').select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status').limit(50000),
+    supabase.from('operations').select('id, operation_type, operation_date, document_no, created_at').limit(50000),
+    supabase.from('operation_items').select('id, operation_id, product_id, qty, direction, raw_product_name').eq('direction', 'rozchod').limit(50000)
   ])
   if (productsErr) throw productsErr
   if (lotsErr) throw lotsErr
@@ -7069,6 +7071,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         .select('id, lot_no, production_date, initial_qty, remaining_qty, status, product_id, product_group, storage_chamber_id, source_operation_id, created_at')
         .order('production_date', { ascending: true })
         .order('created_at', { ascending: true })
+        .limit(50000)
       if (lotsErr) throw lotsErr
 
       const { data: allocationsRaw, error: allocErr } = await supabase
@@ -7484,6 +7487,49 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setMessage(`Błąd sprzątania: ${err?.message || err}. Uruchom w Supabase: JEDNORAZOWE-wyczysc-osierocone-importy.sql`)
     } finally {
       setImportCleaning(false)
+    }
+  }
+
+  async function runResetAllWarehouseImports() {
+    if (!supabase) return
+    if (!isAdmin(authProfile)) {
+      setMessage('Tylko administrator może zresetować magazyn z importu Excel.')
+      return
+    }
+    if (!window.confirm(
+      'RESET MAGAZYNU Z IMPORTU EXCEL\n\n' +
+      'Usunie WSZYSTKIE aktywne importy: PZ, WZ, partie, rozliczenia FIFO i K01 wygenerowane z importu.\n\n' +
+      'Po resecie wczytaj ten sam plik Excel i kliknij Zapisz — wszystkie dokumenty trafią jako nowe.\n\n' +
+      'Kontynuować?'
+    )) return
+    const typed = window.prompt('Potwierdź wpisując: RESET MAGAZYN')
+    if (normalizeText(typed) !== 'reset magazyn') {
+      setMessage('Reset anulowany — wpisz dokładnie: RESET MAGAZYN')
+      return
+    }
+    setImportResetting(true)
+    setMessage('Reset magazynu — usuwanie importów…')
+    try {
+      const result = await purgeAllActiveExcelImports(supabase, {
+        onProgress: setMessage,
+        reason: 'Reset magazynu — ponowny import od zera'
+      })
+      invalidateFifoBaseCache()
+      setImportPreview([])
+      setRows([])
+      setFileName('')
+      setImportDuplicates([])
+      setImportNewDocCount(0)
+      importCheckCacheRef.current = null
+      await loadImports()
+      await loadHaccpDocs({ force: true, skipBusy: true })
+      await loadK03TraceData()
+      await loadFifoData()
+      setMessage(formatPurgeAllImportsResult(result) + ' Wczytaj plik Excel i kliknij Zapisz.')
+    } catch (err) {
+      setMessage(`Błąd resetu magazynu: ${err?.message || err}`)
+    } finally {
+      setImportResetting(false)
     }
   }
 
@@ -8286,6 +8332,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           const repairMsg = formatRepairWarehouseResult(repair)
           await loadHaccpDocs({ force: true, skipBusy: true })
           await loadK03TraceData()
+          invalidateFifoBaseCache()
           const k01Msg = k01Added > 0 ? ` Utworzono ${k01Added} kart K01.` : ''
           const dedupeNote = repairMsg !== 'Duplikaty: brak do usunięcia.' && repairMsg !== 'Naprawiono: brak do usunięcia.' ? ` ${repairMsg}` : ''
           setMessage(`${importMsgBase}${dedupeNote}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
@@ -8395,7 +8442,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>PZ, WZ, ilości, daty, produkty — <b>bez ceny netto</b>. Kartoteki K01–K07 i FIFO. Ceny i wartość magazynu: <b>Raporty → Wartość magazynu</b> (osobny import).</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'Reset magazynu (import od zera)'}</button>}</div>
 
       {rows.length > 0 && <>
         <div className="summary">
@@ -8423,7 +8470,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>Wgraj operacje magazynowe: <b>PZ/WZ, daty, ilości, produkty</b> — bez ceny netto. Numery już w bazie są pomijane. <b>Wartość magazynu (ceny)</b> → Raporty → Wartość magazynu.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'Reset magazynu (import od zera)'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>
