@@ -348,6 +348,18 @@ function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap) {
   }
 }
 
+/** Odejmuje z partii rozliczenia FIFO innych WZ (także „późniejszych” w sortowaniu). */
+function applyOtherSalesAllocations(base, lotState, excludeSaleKey, matchSpec, workflowBySaleKey = null) {
+  for (const sale of base.sortedSales) {
+    if (sale.key === excludeSaleKey) continue
+    const wf = workflowBySaleKey?.get(sale.key) || null
+    const saleSpec = effectiveSaleMatchSpec(sale, wf)
+    if (!sameFifoPool(saleSpec, matchSpec)) continue
+    const existing = base.allocationsBySaleKey.get(sale.key) || []
+    if (existing.length) deductAllocationsFromLots(existing, lotState)
+  }
+}
+
 /** Rezerwuje FIFO dla wcześniejszych WZ bez pełnego rozliczenia (kolejność chronologiczna). */
 function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatchSpec = null, workflowBySaleKey = null) {
   const targetIdx = base.sortedSales.findIndex(s => s.key === targetSaleKey)
@@ -366,11 +378,6 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatch
     const existing = base.allocationsBySaleKey.get(sale.key) || []
     const saleQty = Number(sale.sale_qty || 0)
     const allocatedQty = existing.reduce((s, a) => s + Number(a.qty || 0), 0)
-
-    if (existing.length && allocatedQty > 0.001) {
-      deductAllocationsFromLots(existing, lotState)
-    }
-
     const missing = saleQty - allocatedQty
     if (missing <= 0.001) continue
 
@@ -502,6 +509,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const inventoryBefore = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
   const salesSummary = summarizeGroupSales(base, matchSpec, saleKey)
+  applyOtherSalesAllocations(base, lotState, saleKey, matchSpec, workflowBySaleKey)
   const priorReserve = reservePriorUnallocatedSales(base, lotState, saleKey, matchSpec, workflowBySaleKey)
   const inventoryAfterReserve = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
   const sim = simulateAllocation({ ...sale, matchSpec }, lotState, base.productMap, cutoff, base.opMap)
@@ -572,6 +580,7 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   }
 
   resetIncomingLotsToInitial(base.lotState, base.opMap)
+  applyOtherSalesAllocations(base, base.lotState, saleKey, matchSpec, workflowBySaleKey)
   reservePriorUnallocatedSales(base, base.lotState, saleKey, matchSpec, workflowBySaleKey)
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
