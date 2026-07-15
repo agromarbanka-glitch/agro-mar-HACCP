@@ -53,7 +53,9 @@ export function inferK03LotCode(productName, product, options = {}) {
 
 export function isInternalLotNumber(value = '') {
   const text = String(value || '').trim()
-  return /^[A-Za-z]{1,8}\/\d{1,5}\/\d{4}$/.test(text)
+  if (/^[A-Za-z]{1,8}\/\d{1,5}\/\d{4}$/.test(text)) return true
+  if (/^[A-Za-z]{1,8}\/\d{1,5}\/\d{2,3}$/.test(text)) return true
+  return false
 }
 
 /** Numer dokumentu PZ źródłowego — nigdy wewnętrzny numer partii (np. T/738/2026). */
@@ -61,6 +63,24 @@ export function resolveFifoSourcePzNo(lot, opMap) {
   const docNo = String(opMap?.get?.(lot?.source_operation_id)?.document_no || '').trim()
   if (!docNo || isInternalLotNumber(docNo)) return ''
   return docNo
+}
+
+/** Nr PZ do kolumny K03 – nigdy wewnętrzny numer partii magazynowej (T/885/202). */
+export function resolveK03PzNoFromRow(row) {
+  if (row?.isShortage) return String(row?.pz_no || '').trim()
+
+  const direct = String(row?.pz_no || '').trim()
+  if (direct && !isInternalLotNumber(direct)) {
+    const formatted = formatK03PzNo({ pz_no: direct })
+    if (formatted) return formatted
+  }
+
+  for (const field of [row?.supplier, row?.pz_no_display]) {
+    const formatted = formatK03PzNo({ pz_no: field })
+    if (formatted) return formatted
+  }
+
+  return ''
 }
 
 export function formatK03PzNo(row) {
@@ -147,12 +167,13 @@ export function buildK03PaperData(doc) {
 
   const rows = Array.from({ length: maxRows }).map((_, i) => {
     const r = rawRows[i] || {}
-    const pzNo = formatK03PzNo(r) || (r.isShortage ? (r.pz_no || '') : '')
+    const pzNo = resolveK03PzNoFromRow(r) || (r.isShortage ? (r.pz_no || '') : '')
+    const dostawca = formatK03Dostawca({ ...r, pz_no: pzNo || r.supplier || r.pz_no }) || pzNo
     return {
       lp: i + 1,
       pzNo,
       pzDate: r.pz_date || '',
-      dostawca: pzNo,
+      dostawca,
       qty: r.qty ? Number(r.qty) : '',
       wzLp: i + 1,
       wzNo: i === 0 ? (saleRow.wz_no || doc?.document_no || '') : '',
@@ -729,7 +750,18 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   const receiver = formatK03Receiver(contractorMap.get(op?.contractor_id)?.name || saleLine.receiver_name || '')
   const cutoffDate = String(fifoCutoffDate || wzDate || '').slice(0, 10)
 
-  const incomingRows = (pzRows || []).filter(r => Number(r.qty || 0) > 0)
+  const incomingRows = (pzRows || []).filter(r => Number(r.qty || 0) > 0).map(r => {
+    const pzNo = resolveK03PzNoFromRow(r)
+    const supplier = formatK03Dostawca({ ...r, pz_no: pzNo || r.supplier || r.pz_no }) || String(r.supplier || '').trim()
+    return {
+      ...r,
+      pz_no: pzNo,
+      pz_no_display: pzNo || r.pz_no_display || '',
+      supplier,
+      source_lot_id: r.source_lot_id || null,
+      source_lot_no: r.source_lot_no || ''
+    }
+  })
   let excludedFuturePzRows = []
   let rawRowsBase = incomingRows
   if (cutoffDate && cutoffDate !== '0000-01-01') {
@@ -988,50 +1020,13 @@ export async function loadK03Forms(client) {
     }
   }
 
-  const sourceLotIds = Array.from(new Set(allocations.map(a => a.source_lot_id).filter(Boolean)))
-  const sourceLots = sourceLotIds.length
-    ? await fetchInChunks(client, 'lots', 'id, lot_no, production_date, source_operation_id, product_id', 'id', sourceLotIds)
-    : []
-  const sourceOpIds = Array.from(new Set(sourceLots.map(l => l.source_operation_id).filter(Boolean)))
-  const sourceOps = sourceOpIds.length
-    ? await fetchInChunks(client, 'operations', 'id, operation_date, document_no, invoice_no, contractor_id', 'id', sourceOpIds)
-    : []
-  const contractorIds = Array.from(new Set([
-    ...Array.from(saleOpIds).map(id => opMap.get(id)?.contractor_id),
-    ...sourceOps.map(o => o.contractor_id)
-  ].filter(Boolean)))
+  const contractorIds = Array.from(new Set(
+    Array.from(saleOpIds).map(id => opMap.get(id)?.contractor_id).filter(Boolean)
+  ))
   const contractors = contractorIds.length
     ? await fetchInChunks(client, 'contractors', 'id, name', 'id', contractorIds)
     : []
-
-  const lotMap = new Map(sourceLots.map(l => [l.id, l]))
-  const sourceOpMap = new Map(sourceOps.map(o => [o.id, o]))
   const contractorMap = new Map(contractors.map(c => [c.id, c]))
-
-  const pzBySaleKey = new Map()
-  for (const alloc of allocations) {
-    if (!saleOpIds.has(alloc.operation_id)) continue
-    const lot = lotMap.get(alloc.source_lot_id) || {}
-    const pzOp = sourceOpMap.get(lot.source_operation_id) || {}
-    const qty = Number(alloc.qty || 0)
-    if (qty <= 0) continue
-    const sale = Array.from(saleLines.values()).find(s =>
-      s.operation_id === alloc.operation_id &&
-      (s.product_id === alloc.product_id || (!s.product_id && !alloc.product_id))
-    )
-    const key = sale?.key || saleLineKey(alloc.operation_id, alloc.product_id)
-    const wzDate = String(sale?.op?.operation_date || '').slice(0, 10)
-    const pzDate = String(pzOp.operation_date || lot.production_date || '').slice(0, 10)
-    if (wzDate && wzDate !== '0000-01-01' && pzDate && pzDate !== '0000-01-01' && pzDate > wzDate) continue
-    if (!pzBySaleKey.has(key)) pzBySaleKey.set(key, [])
-    pzBySaleKey.get(key).push({
-      pz_no: resolveFifoSourcePzNo(lot, sourceOpMap),
-      pz_date: pzDate,
-      supplier: '',
-      qty,
-      source_lot_no: lot.lot_no || ''
-    })
-  }
 
   const saleOpIdList = Array.from(saleOpIds)
   const outputLots = saleOpIdList.length
@@ -1045,7 +1040,7 @@ export async function loadK03Forms(client) {
 
   const forms = finalizeK03LotNumbers(
     Array.from(saleLines.values())
-      .map(line => buildK03FormDoc(line, pzBySaleKey.get(line.key) || [], productMap, contractorMap, 'baza'))
+      .map(line => buildK03FormDoc(line, [], productMap, contractorMap, 'baza'))
       .sort((a, b) =>
         String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
         String(a.document_no || '').localeCompare(String(b.document_no || '')) ||

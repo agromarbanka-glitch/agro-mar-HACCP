@@ -882,11 +882,12 @@ function enrichAllocationRowsLocal(allocationRows, lotState, opMap) {
   return (allocationRows || []).map(row => {
     const lot = lotState.get(row.source_lot_id) || {}
     const pzOp = opMap.get(lot.source_operation_id) || {}
-    const pzNo = resolveFifoSourcePzNo(lot, opMap)
+    const fullDoc = String(pzOp.document_no || '').trim()
+    const pzNo = resolveFifoSourcePzNo(lot, opMap) || (fullDoc && !/^[A-Za-z]{1,8}\/\d{1,5}\//.test(fullDoc) ? fullDoc : '')
     return {
       pz_no: pzNo,
       pz_date: String(pzOp.operation_date || lot.production_date || '').slice(0, 10),
-      supplier: '',
+      supplier: pzNo || fullDoc,
       qty: row.qty,
       source_lot_no: lot.lot_no || '',
       source_lot_id: row.source_lot_id

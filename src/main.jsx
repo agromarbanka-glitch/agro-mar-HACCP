@@ -5,7 +5,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeAllActiveExcelImports, formatPurgeAllImportsResult } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache } from './fifoEngine'
@@ -1429,7 +1429,7 @@ function App() {
       const wasEdit = k03WzModal.editMode
       const wzNo = k03WzModal.line.document_no
       const wzMode = k03WzModal.mode === 'przerob' ? 'przerób' : 'brak przerobu'
-      const frozenNote = result.autoFrozen ? ' Kartoteka zamrożona automatycznie (kompletna i prawidłowa).' : ' Kartoteka pozostaje robocza (niespójność ilości – uzupełnij i odmroź ręcznie po korekcie).'
+      const frozenNote = result.autoFrozen ? ' Kartoteka zamrożona automatycznie (kompletna i prawidłowa).' : ' Kartoteka zapisana — możesz ją zamrozić ręcznie po weryfikacji.'
       const editNote = wasEdit ? ' Decyzja K03 zmieniona.' : ''
       setK03WzModal(null)
       await loadK03TraceData()
@@ -1565,7 +1565,7 @@ function App() {
         </p>}
         {preview?.pzRows?.length > 0 && <div className="table-wrap small"><table>
           <thead><tr><th>Nr PZ (z importu)</th><th>Partia mag.</th><th>Data PZ</th><th>Dostawca</th><th>Ilość kg</th></tr></thead>
-          <tbody>{preview.pzRows.map((r, i) => <tr key={i}><td>{formatK03PzNo(r) || '—'}</td><td>{r.source_lot_no || '—'}</td><td>{r.pz_date}</td><td>{r.supplier}</td><td>{Number(r.qty || 0).toLocaleString('pl-PL')}</td></tr>)}</tbody>
+          <tbody>{preview.pzRows.map((r, i) => <tr key={i}><td>{resolveK03PzNoFromRow(r) || '—'}</td><td>{r.source_lot_no || '—'}</td><td>{r.pz_date}</td><td>{r.supplier || resolveK03PzNoFromRow(r) || '—'}</td><td>{Number(r.qty || 0).toLocaleString('pl-PL')}</td></tr>)}</tbody>
         </table></div>}
         </div>}
       </div>
@@ -4469,7 +4469,7 @@ function App() {
         <table className="k03-table"><colgroup><col className="col-lp"/><col className="col-pz"/><col className="col-date"/><col className="col-dost"/><col className="col-qty"/><col className="col-lp"/><col className="col-wz"/><col className="col-date"/><col className="col-odb"/><col className="col-qty"/><col className="col-sign"/></colgroup><thead><tr><th colSpan="5">Dane dotyczące dostaw surowców składających się na partię (PZ)</th><th className="right-start" colSpan="6">Dane dotyczące sprzedaży (WZ)</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th className="right-start">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>
           {paper.rows.map((r, i) => {
             const shortageRow = rawRows[i]?.isShortage
-            const rawPz = rawRows[i]?.pz_no_display ?? rawRows[i]?.pz_no ?? ''
+            const rawPz = resolveK03PzNoFromRow(rawRows[i]) || rawRows[i]?.pz_no_display || ''
             return <tr key={`k03-${i}`} className={shortageRow ? 'k03-shortage-row' : ''}>
               <td>{r.lp}</td>
               <td className="cell-wrap">

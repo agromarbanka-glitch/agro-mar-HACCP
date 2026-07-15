@@ -32,6 +32,7 @@ function wzMonthKey(dateStr) {
 async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacja K03 z FIFO') {
   if (line.status === 'pending') return { skipped: 'pending' }
   if (line.frozen || line.status === 'frozen') return { skipped: 'frozen' }
+  if (!line.workflow?.mode) return { skipped: 'pending' }
   if (!line.operation_id || !line.product_id) throw new Error('Brak powiązania WZ z bazą.')
 
   const mode = line.workflow?.mode || 'bez_przerobu'
@@ -106,8 +107,8 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
   })
 
   const canAutoFreeze = isK03CompleteAndValid(doc)
-  await saveK03Snapshot(client, doc, { freeze: canAutoFreeze, userRole: changedBy })
-  return { ok: true, autoFrozen: canAutoFreeze, doc, shortage }
+  await saveK03Snapshot(client, doc, { freeze: false, userRole: changedBy })
+  return { ok: true, autoFrozen: false, doc, shortage }
 }
 
 /** K03 kompletny i prawidłowy – można zamrozić automatycznie. */
@@ -256,13 +257,11 @@ function normalizeKey(value) {
 
 function resolveWzStatus(form, snap) {
   const frozen = snap?.data?.frozen === true
-  const hasWorkflow = Boolean(snap?.data?.k03_workflow)
-  const hasSnapshot = Boolean(snap)
-  const hasAllocations = (form.data?.rawRows || []).some(r => !r.isShortage && Number(r.qty || 0) > 0)
+  const hasWorkflow = Boolean(snap?.data?.k03_workflow?.mode || form.data?.k03_workflow?.mode)
+  const hasSnapshotRows = Boolean(snap?.data?.rawRows?.length)
 
   if (frozen) return 'frozen'
-  if (hasWorkflow || (hasSnapshot && snap?.data?.rawRows?.length)) return 'k03_ready'
-  if (hasAllocations) return 'legacy_auto'
+  if (hasWorkflow && hasSnapshotRows) return 'k03_ready'
   return 'pending'
 }
 
@@ -522,7 +521,7 @@ export async function generateK03Workflow(client, line, options = {}) {
   }
 
   const canAutoFreeze = isK03CompleteAndValid(doc)
-  await saveK03Snapshot(client, doc, { freeze: canAutoFreeze, userRole: changedBy })
+  await saveK03Snapshot(client, doc, { freeze: false, userRole: changedBy })
 
   await logK03Workflow(client, {
     wz_no: line.document_no,
@@ -536,19 +535,10 @@ export async function generateK03Workflow(client, line, options = {}) {
   })
 
   if (canAutoFreeze) {
-    doc = { ...doc, frozen: true, data: { ...doc.data, frozen: true, frozen_at: new Date().toISOString() } }
-    await logK03Workflow(client, {
-      wz_no: line.document_no,
-      wz_date: wzDate,
-      product_name: line.product_name,
-      k03_key: k03Key,
-      change_type: 'k03_frozen',
-      change_reason: 'Automatyczne zamrożenie – kompletny i prawidłowy K03',
-      changed_by: changedBy
-    })
+    doc = { ...doc, frozen: false, data: { ...doc.data, frozen: false } }
   }
 
-  return { ok: true, doc, workflow, fifoResult, autoFrozen: canAutoFreeze }
+  return { ok: true, doc, workflow, fifoResult, autoFrozen: false }
 }
 
 /**
