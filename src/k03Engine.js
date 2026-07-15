@@ -747,7 +747,11 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   rawRowsBase = rawRowsBase.sort((a, b) =>
     String(a.pz_date || '').localeCompare(String(b.pz_date || '')) ||
     String(a.pz_no || '').localeCompare(String(b.pz_no || ''))
-  )
+  ).map(r => ({
+    ...r,
+    source_lot_id: r.source_lot_id || null,
+    source_lot_no: r.source_lot_no || ''
+  }))
 
   const excludedFuturePz = excludedFuturePzRows.length > 0
   const excludedFuturePzQty = excludedFuturePzRows.reduce((sum, r) => sum + Number(r.qty || 0), 0)
