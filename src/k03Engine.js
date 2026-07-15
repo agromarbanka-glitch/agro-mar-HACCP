@@ -594,11 +594,18 @@ export function resolveFifoMatchSpec(product, productName = '', lotGroup = '', o
 export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
   const product = productMap.get(lot.product_id)
   const name = product?.name || ''
-  if (matchSpec?.mode === 'variant') {
-    const lotKey = normalizeFifoProductKey(name, product)
-    return matchSpec.sourceKeys.has(lotKey)
-  }
+  const lotKey = normalizeFifoProductKey(name, product)
   const group = resolveFifoProductGroup(product, name, lot.product_group)
+
+  if (matchSpec?.mode === 'variant') {
+    if (matchSpec.sourceKeys.has(lotKey)) return true
+    // Partie PZ z kodem T / product_group bez pełnej nazwy wariantu w kartotece produktu
+    if (matchSpec.variantKey === 'truskawka' && group === 'truskawka') {
+      if (lotKey === 'truskawka z szypulka') return matchSpec.sourceKeys.has('truskawka z szypulka')
+      return matchSpec.sourceKeys.has('truskawka') || matchSpec.sourceKeys.has('truskawka z szypulka')
+    }
+    return false
+  }
   return matchSpec?.sourceKeys?.has(group)
 }
 

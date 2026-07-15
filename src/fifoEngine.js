@@ -42,10 +42,23 @@ export function frozenKeysFromSnapshots(snapshots = []) {
   const keys = new Set()
   for (const snap of snapshots) {
     if (snap?.data?.frozen !== true) continue
-    const key = snap.data?.k03_key || snap.data?.form_id
-    if (key) keys.add(key)
+    const k03Key = snap.data?.k03_key || snap.data?.form_id
+    if (k03Key) {
+      keys.add(k03Key)
+      if (k03Key.startsWith('K03-')) keys.add(k03Key.replace(/^K03-/, ''))
+    }
+    const opId = snap.data?.sale_operation_id || snap.operation_id
+    const productId = snap.data?.product_id
+    if (opId && productId) keys.add(saleLineKey(opId, productId))
   }
   return keys
+}
+
+function isFrozenSaleKey(saleKey, frozenKeys) {
+  if (!saleKey || !frozenKeys?.size) return false
+  if (frozenKeys.has(saleKey)) return true
+  if (frozenKeys.has(`K03-${saleKey}`)) return true
+  return false
 }
 
 export function frozenOperationIdsFromSnapshots(snapshots = []) {
@@ -407,12 +420,102 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatch
   return { priorUnallocatedQty, priorUnallocatedCount }
 }
 
+function saleInMonthlyReplayScope(sale, targetSale, replayMonth) {
+  const sd = String(sale?.sale_date || '').slice(0, 10)
+  const td = String(targetSale?.sale_date || '').slice(0, 10)
+  if (!replayMonth || !sd || sd === '0000-01-01') return false
+  if (sd.slice(0, 7) !== replayMonth) return false
+  return !td || sd <= td
+}
+
+function poolPurchasedKg(base, matchSpec) {
+  let total = 0
+  for (const lot of base.lotState.values()) {
+    if (!fifoLotMatchesMatchSpec(lot, base.productMap, matchSpec)) continue
+    if (!isIncomingLotOperation(base.opMap.get(lot.source_operation_id))) continue
+    total += Number(lot.initial_qty || 0)
+  }
+  return Math.round(total * 1000) / 1000
+}
+
+function poolAllocatedKgOnLots(base, matchSpec) {
+  const poolLotIds = new Set(poolIncomingLotIds(base.lotState, base.productMap, matchSpec, base.opMap))
+  let total = 0
+  for (const a of base.allocationsRaw || []) {
+    if (!poolLotIds.has(a.source_lot_id)) continue
+    total += Number(a.qty || 0)
+  }
+  return Math.round(total * 1000) / 1000
+}
+
+/** remaining_qty partii PZ w puli – z bazy, z limitem initial_qty (naprawa po błędnych alokacjach). */
+function buildPoolLotStateFromWarehouse(base, matchSpec, options = {}) {
+  const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
+  const poolLotIds = poolIncomingLotIds(lotState, base.productMap, matchSpec, base.opMap)
+  const usedByLot = new Map()
+  for (const a of base.allocationsRaw || []) {
+    if (!poolLotIds.includes(a.source_lot_id)) continue
+    usedByLot.set(a.source_lot_id, (usedByLot.get(a.source_lot_id) || 0) + Number(a.qty || 0))
+  }
+  for (const lotId of poolLotIds) {
+    const lot = lotState.get(lotId)
+    if (!lot) continue
+    const initial = Number(lot.initial_qty || 0)
+    const used = usedByLot.get(lotId) || 0
+    const corrupt = used > initial + 0.001
+    if (options.resetCorrupt && corrupt) {
+      lot.remaining_qty = initial
+    } else if (corrupt) {
+      lot.remaining_qty = 0
+    } else {
+      const fromDb = Number(lot.remaining_qty ?? initial)
+      lot.remaining_qty = Math.min(initial, Math.max(0, fromDb))
+      if (used > 0.001) lot.remaining_qty = Math.min(lot.remaining_qty, Math.max(0, initial - used))
+    }
+    lot.status = lot.remaining_qty > 0.0005 ? 'aktywna' : 'zuzyta'
+    lotState.set(lotId, lot)
+  }
+  return lotState
+}
+
+function tryWarehouseTargetAllocation(base, matchSpec, sale, saleKey, cutoff, targetSpec) {
+  const lotState = buildPoolLotStateFromWarehouse(base, matchSpec, { resetCorrupt: true })
+  restoreAllocationsToLots(base.allocationsBySaleKey.get(saleKey) || [], lotState)
+  const inv = summarizeGroupInventory(lotState, base.productMap, matchSpec, cutoff, base.opMap)
+  const saleQty = Number(sale.sale_qty || 0)
+  if (inv.remainingWithinCutoff + 0.001 < saleQty) return null
+
+  const sim = simulateAllocation(
+    { ...sale, matchSpec: targetSpec },
+    lotState,
+    base.productMap,
+    cutoff,
+    base.opMap
+  )
+  const rows = sim.allocationRows.map(r => ({
+    operation_id: sale.operation_id,
+    source_lot_id: r.source_lot_id,
+    product_id: r.product_id,
+    qty: r.qty
+  }))
+  return {
+    lotState,
+    lotStateBeforeTarget: new Map(Array.from(lotState.entries()).map(([k, v]) => [k, { ...v }])),
+    results: new Map([[saleKey, { ...sim, allocationRows: rows }]]),
+    allocatedBeforeTargetKg: Math.max(0, Math.round((inv.purchasedWithinCutoff - inv.remainingWithinCutoff) * 1000) / 1000),
+    fromWarehouse: true
+  }
+}
+
 function simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, options = {}) {
   const targetSaleKey = options.targetSaleKey
   const targetCutoff = String(options.targetCutoff || '').slice(0, 10)
   const targetSpec = options.targetMatchSpec || matchSpec
   const frozenKeys = options.frozenKeys || new Set()
   const wfMap = workflowBySaleKey || base.workflowBySaleKey || new Map()
+  const targetSale = base.saleByKey?.get(targetSaleKey) || base.sortedSales.find(s => s.key === targetSaleKey)
+  const replayMonth = options.replayMonth || targetCutoff.slice(0, 7)
+  const targetIdx = base.sortedSales.findIndex(s => s.key === targetSaleKey)
 
   const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
   resetIncomingLotsInPool(lotState, base.productMap, matchSpec, base.opMap)
@@ -421,16 +524,23 @@ function simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, options = {}) 
   let lotStateBeforeTarget = null
   let allocatedBeforeTargetKg = 0
 
-  for (const sale of base.sortedSales) {
+  for (let i = 0; i < base.sortedSales.length; i += 1) {
+    const sale = base.sortedSales[i]
+    if (targetIdx >= 0 && i > targetIdx) break
+
     const wf = wfMap.get(sale.key) || null
     const saleSpec = effectiveSaleMatchSpec(sale, wf)
     if (!sameFifoPool(saleSpec, matchSpec)) continue
+
+    if (sale.key !== targetSaleKey && replayMonth && !saleInMonthlyReplayScope(sale, targetSale, replayMonth)) {
+      continue
+    }
 
     if (sale.key === targetSaleKey) {
       lotStateBeforeTarget = new Map(Array.from(lotState.entries()).map(([k, v]) => [k, { ...v }]))
     }
 
-    if (frozenKeys.has(sale.key)) {
+    if (isFrozenSaleKey(sale.key, frozenKeys)) {
       const existing = base.allocationsBySaleKey.get(sale.key) || []
       const allocated = existing.reduce((s, a) => s + Number(a.qty || 0), 0)
       deductAllocationsFromLots(existing, lotState)
@@ -445,6 +555,7 @@ function simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, options = {}) 
         shortage: Math.max(0, Number(sale.sale_qty || 0) - allocated)
       })
       if (sale.key !== targetSaleKey) allocatedBeforeTargetKg += allocated
+      if (sale.key === targetSaleKey) break
       continue
     }
 
@@ -470,9 +581,10 @@ function simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, options = {}) 
     }))
     results.set(sale.key, { ...sim, allocationRows: rows })
     if (sale.key !== targetSaleKey) allocatedBeforeTargetKg += sim.allocated
+    if (sale.key === targetSaleKey) break
   }
 
-  return { lotState, results, lotStateBeforeTarget, allocatedBeforeTargetKg }
+  return { lotState, results, lotStateBeforeTarget, allocatedBeforeTargetKg, fromWarehouse: false }
 }
 
 async function persistPoolFifoSimulation(client, base, matchSpec, simulation, frozenKeys = new Set()) {
@@ -483,7 +595,7 @@ async function persistPoolFifoSimulation(client, base, matchSpec, simulation, fr
   for (const sale of base.sortedSales) {
     const saleSpec = effectiveSaleMatchSpec(sale, wfMap.get(sale.key) || null)
     if (!sameFifoPool(saleSpec, matchSpec)) continue
-    if (frozenKeys.has(sale.key)) continue
+    if (isFrozenSaleKey(sale.key, frozenKeys)) continue
     for (const a of base.allocationsBySaleKey.get(sale.key) || []) {
       if (a.id) allocIdsToDelete.push(a.id)
     }
@@ -492,7 +604,7 @@ async function persistPoolFifoSimulation(client, base, matchSpec, simulation, fr
 
   const insertRows = []
   for (const [sk, sim] of results) {
-    if (frozenKeys.has(sk)) continue
+    if (isFrozenSaleKey(sk, frozenKeys)) continue
     insertRows.push(...(sim.allocationRows || []))
   }
   for (let i = 0; i < insertRows.length; i += 200) {
@@ -693,7 +805,7 @@ async function enrichAllocationRows(client, allocationRows) {
 
 /** Podgląd FIFO dla jednej pozycji WZ z datą graniczną (przerób lub WZ). */
 export async function previewFifoForSale(client, operationId, productId, cutoffDate, options = {}) {
-  const base = await loadFifoBaseData(client)
+  const base = await loadFifoBaseData(client, { forceReload: true })
   const workflowBySaleKey = base.workflowBySaleKey || new Map()
   const saleKey = saleLineKey(operationId, productId)
   const sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
@@ -704,17 +816,36 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
   const matchSpec = saleMatchSpecWithOptions(sale, options)
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
   const frozenKeys = options.frozenKeys || new Set()
+  const replayMonth = cutoff.slice(0, 7)
+
+  await syncPoolLotRemainingFromAllocations(client, base, matchSpec)
 
   const purchasedInventory = initialPoolInventory(base, matchSpec, cutoff)
+  const warehouseInventory = summarizeGroupInventory(
+    buildPoolLotStateFromWarehouse(base, matchSpec, { resetCorrupt: true }),
+    base.productMap,
+    matchSpec,
+    cutoff,
+    base.opMap
+  )
   const salesSummary = summarizeGroupSales(base, matchSpec, saleKey)
   const priorReserve = reservePriorUnallocatedSales(base, new Map(), saleKey, matchSpec, workflowBySaleKey)
 
-  const simulation = simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, {
-    targetSaleKey: saleKey,
-    targetCutoff: cutoff,
-    targetMatchSpec: matchSpec,
-    frozenKeys
-  })
+  const poolOverAllocated = poolAllocatedKgOnLots(base, matchSpec) > poolPurchasedKg(base, matchSpec) + 0.5
+
+  let simulation = null
+  if (!poolOverAllocated) {
+    simulation = tryWarehouseTargetAllocation(base, matchSpec, sale, saleKey, cutoff, matchSpec)
+  }
+  if (!simulation) {
+    simulation = simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, {
+      targetSaleKey: saleKey,
+      targetCutoff: cutoff,
+      targetMatchSpec: matchSpec,
+      frozenKeys,
+      replayMonth
+    })
+  }
 
   const current = simulation.results.get(saleKey) || { allocationRows: [], allocated: 0, shortage: Number(sale.sale_qty || 0) }
   const inventoryForSale = simulation.lotStateBeforeTarget
@@ -753,9 +884,12 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       soldTotalKg: salesSummary.soldTotal,
       soldBeforeTargetKg: salesSummary.soldBeforeTarget,
       remainingWithinCutoffKg: inventoryForSale.remainingWithinCutoff,
-      remainingAfterCutoffKg: purchasedInventory.remainingAfterCutoff,
+      remainingAfterCutoffKg: warehouseInventory.remainingAfterCutoff || purchasedInventory.remainingAfterCutoff,
       remainingWithinCutoffAfterReserveKg: inventoryForSale.remainingWithinCutoff,
+      warehouseWithinCutoffKg: warehouseInventory.remainingWithinCutoff,
       allocatedByOtherWzKg: simulation.allocatedBeforeTargetKg,
+      fifoFromWarehouse: Boolean(simulation.fromWarehouse),
+      fifoReplayMonth: replayMonth,
       lotsMissingDateKg: purchasedInventory.lotsMissingDateKg,
       lotCountInGroup: purchasedInventory.lotCount,
       lotCountWithinCutoff: purchasedInventory.lotCountWithinCutoff,
@@ -783,11 +917,13 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   }
 
   const cutoff = String(cutoffDate || sale.sale_date || '9999-12-31').slice(0, 10)
+  const replayMonth = cutoff.slice(0, 7)
   const simulation = simulateFullPoolFifo(base, matchSpec, workflowBySaleKey, {
     targetSaleKey: saleKey,
     targetCutoff: cutoff,
     targetMatchSpec: matchSpec,
-    frozenKeys
+    frozenKeys,
+    replayMonth
   })
   await persistPoolFifoSimulation(client, base, matchSpec, simulation, frozenKeys)
 
@@ -929,7 +1065,7 @@ export async function recalculateFifoIncremental(client, options = {}) {
     const allocatedQty = existing.reduce((sum, a) => sum + Number(a.qty || 0), 0)
     const saleQty = Number(sale.sale_qty || 0)
 
-    if (frozenKeys.has(sale.key)) {
+    if (isFrozenSaleKey(sale.key, frozenKeys)) {
       skippedFrozen += 1
       if (i % 25 === 0) onProgress?.({ phase: 'running', current: i + 1, total, processed, skippedComplete, skippedFrozen })
       continue
@@ -1028,7 +1164,7 @@ export async function recalculateFifoFullProtected(client, options = {}) {
   const shortages = []
 
   for (const sale of sortedSales) {
-    if (frozenKeys.has(sale.key)) {
+    if (isFrozenSaleKey(sale.key, frozenKeys)) {
       skippedFrozen += 1
       continue
     }
@@ -1076,7 +1212,7 @@ export async function countIncompleteSales(client, frozenKeys = new Set()) {
   let complete = 0
   let frozen = 0
   for (const sale of base.sortedSales) {
-    if (frozenKeys.has(sale.key)) {
+    if (isFrozenSaleKey(sale.key, frozenKeys)) {
       frozen += 1
       continue
     }

@@ -1540,7 +1540,9 @@ function App() {
             ({preview.diagnostics.lotCountInGroup || 0} partii),
             z datą ≤ {preview.cutoffDate}: {Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
             ({preview.diagnostics.lotCountWithinCutoff || 0} partii),
-            wolne w magazynie (≤ {preview.cutoffDate}): {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg,
+            wolne w magazynie (≤ {preview.cutoffDate}): {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
+            {Number(preview.diagnostics.warehouseWithinCutoffKg || 0) > 0.5 && Number(preview.diagnostics.warehouseWithinCutoffKg) !== Number(preview.diagnostics.remainingWithinCutoffKg || 0)
+              ? ` (stan fizyczny partii: ${Number(preview.diagnostics.warehouseWithinCutoffKg).toLocaleString('pl-PL')} kg)` : ''},
             dostępne dla tego WZ: {Number(preview.diagnostics.remainingWithinCutoffAfterReserveKg || 0).toLocaleString('pl-PL')} kg
             {Number(preview.diagnostics.allocatedByOtherWzKg || 0) > 0 ? ` (inne WZ: ${Number(preview.diagnostics.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg)` : ''}.
           </div>
