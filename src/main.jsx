@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -6591,7 +6591,22 @@ function App() {
             const freshRange = importGroupDateRange(fresh)
             if (freshRange) loadMsg += ` Daty nowych: ${freshRange}.`
           } else {
-            loadMsg += ` Brak nowych — nic nie zostanie zapisane.`
+            loadMsg += ` Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ/WZ.`
+            try {
+              const mergeEstimate = await estimateMergeNewItems(supabase, duplicates, details, {
+                normalizeText,
+                canonicalProductName,
+                normalizeFifoProductKey
+              })
+              if (mergeEstimate > 0) {
+                loadMsg = loadMsg.replace(
+                  / Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ\/WZ\./,
+                  ` Do doklejenia z Excela: ok. ${mergeEstimate} pozycji w istniejących PZ/WZ.`
+                )
+              }
+            } catch {
+              /* szacunek opcjonalny */
+            }
           }
           const fileMax = fileDateRange.split(' … ').pop()
           const freshMax = importGroupDateRange(fresh).split(' … ').pop()
@@ -8153,7 +8168,44 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setImportDuplicateDetails(details)
       setImportOrphanCount(orphanCount)
 
-      if (!groupsToImport.length) {
+      const importDeps = {
+        normalizeText,
+        productGroupForName,
+        baseCodeForProduct,
+        canonicalProductName,
+        normalizeFifoProductKey
+      }
+
+      let mergeResult = { importedItems: 0, createdLots: 0, mergedDocuments: 0 }
+      if (duplicateCount) {
+        setImportProgress('Doklejanie brakujących pozycji do istniejących PZ/WZ…')
+        mergeResult = await appendNewItemsFromExistingDocuments(supabase, duplicates, details, importDeps, {
+          onProgress: setImportProgress
+        })
+      }
+
+      let saveResult = null
+      if (groupsToImport.length) {
+        groupsToImport.sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
+        saveResult = await saveImportToSupabase(supabase, {
+          groupsToImport,
+          rowsCount: rows.length,
+          fileName,
+          duplicateCount,
+          deps: importDeps,
+          onProgress: setImportProgress
+        })
+      }
+
+      setImportProgress('Naprawa PZ bez partii…')
+      const repairedMissingLots = await repairMissingIncomingLots(supabase, importDeps, {
+        onProgress: setImportProgress
+      })
+
+      const mergeMsg = formatMergeResult(mergeResult)
+      const hadMergeOrSave = Boolean(mergeResult.importedItems || saveResult || repairedMissingLots)
+
+      if (!hadMergeOrSave) {
         setImportProgress('Korygowanie dat WZ, czyszczenie duplikatów i K01…')
         let k01Added = 0
         let repairMsg = ''
@@ -8177,7 +8229,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         }
         setMessage(
           duplicateCount
-            ? `Brak nowych dokumentów do zapisu. W pliku ${duplicateCount} numerów PZ/WZ jest już w bazie.` +
+            ? `Brak nowych dokumentów do zapisu. W pliku ${duplicateCount} numerów PZ/WZ jest już w bazie — brak brakujących pozycji w Excelu.` +
               (repairMsg && repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : '') +
               (k01Added
                 ? ` Uzupełniono ${k01Added} brakujących kart K01 — sprawdź listę (wyczyść filtr dat Od/Do).`
@@ -8188,21 +8240,22 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         return
       }
 
-      groupsToImport.sort((a, b) => String(a.issueDate || '').localeCompare(String(b.issueDate || '')) || String(a.documentNo || '').localeCompare(String(b.documentNo || '')))
-
-      const importDeps = { normalizeText, productGroupForName, baseCodeForProduct, canonicalProductName }
-      const { importedFileId, importedOperations, importedItems, createdLots } = await saveImportToSupabase(supabase, {
-        groupsToImport,
-        rowsCount: rows.length,
-        fileName,
-        duplicateCount,
-        deps: importDeps,
-        onProgress: setImportProgress
-      })
+      const importedFileId = saveResult?.importedFileId
+      const importedOperations = saveResult?.importedOperations || 0
+      const importedItems = (saveResult?.importedItems || 0) + (mergeResult.importedItems || 0)
+      const createdLots = (saveResult?.createdLots || 0) + (mergeResult.createdLots || 0) + (repairedMissingLots || 0)
 
       const importMsgBase =
-        `Import zapisany: ${importedOperations} nowych dokumentów, ${importedItems} pozycji, ${createdLots} partii.` +
-        (duplicateCount ? ` Pominięto duplikatów: ${duplicateCount}.` : '') +
+        (saveResult
+          ? `Import zapisany: ${importedOperations} nowych dokumentów, ${saveResult.importedItems} pozycji, ${saveResult.createdLots} partii.`
+          : '') +
+        (mergeMsg ? (saveResult ? ' ' : '') + mergeMsg : '') +
+        (repairedMissingLots && !mergeResult.createdLots
+          ? ` Naprawiono ${repairedMissingLots} partii PZ bez lot_id.`
+          : repairedMissingLots && mergeResult.createdLots
+            ? ` (+ ${repairedMissingLots} naprawionych partii).`
+            : '') +
+        (duplicateCount && saveResult ? ` Pominięto duplikatów: ${duplicateCount}.` : '') +
         (orphanCount ? ` Wyczyszczono osierocone wpisy z usuniętych importów.` : '')
 
       setK03UnfreezeSuggestions([])
@@ -8217,13 +8270,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       void (async () => {
         try {
+          setImportProgress('Przeliczanie remaining partii PZ…')
+          await repairAllIncomingLotRemainingFromAllocations(supabase, { onProgress: setImportProgress })
           setImportProgress('Tworzenie kart K01…')
-          const k01Added = await syncAutoK01ForImportFile(importedFileId)
+          const k01Added = importedFileId
+            ? await syncAutoK01ForImportFile(importedFileId)
+            : await syncAutoK01Documents(null, { minProductionDate: '2026-06-01' })
           setImportProgress('Korygowanie dat K01…')
           const repair = await repairWarehouseImportDuplicates(supabase, {
             onProgress: setImportProgress,
-            importedFileId,
-            light: true,
+            importedFileId: importedFileId || undefined,
+            light: Boolean(importedFileId),
             importGroups: groups
           })
           const repairMsg = formatRepairWarehouseResult(repair)

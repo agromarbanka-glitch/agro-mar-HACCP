@@ -6,9 +6,10 @@
  * - jeden przebieg zapisu + create_incoming_lots_batch v48
  * - K01 i lekki repair po zapisie w tle (main.jsx)
  * - duplikaty PZ/WZ po numerze dokumentu → pomijane (FIFO)
+ * - brakujące pozycje w istniejących PZ → doklejane z Excela (append)
  * - WZ: data z Excela (Data wystawienia), nie ostatni dzień miesiąca z numeru
  */
-export const IMPORT_SAVE_ENGINE_VERSION = '2.1'
+export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'
@@ -155,22 +156,27 @@ function defaultNormalizeText(value) {
   return String(value || '').trim().toLowerCase()
 }
 
-/** Klucz pozycji do porównania import ↔ baza (produkt + kg). */
-export function importItemMatchKey(row, deps = {}) {
-  const norm = deps.normalizeText || defaultNormalizeText
+function productFifoMatchKey(name, product, deps = {}) {
   const canon = deps.canonicalProductName || (s => s)
-  const name = norm(canon(row.productName) || row.productName || '')
+  const fifo = deps.normalizeFifoProductKey
+  const canonical = canon(String(name || '').trim()) || String(name || '').trim()
+  if (fifo) return fifo(canonical, product || { name: canonical })
+  const norm = deps.normalizeText || defaultNormalizeText
+  return norm(canonical)
+}
+
+/** Klucz pozycji do porównania import ↔ baza (klasa FIFO + kg). */
+export function importItemMatchKey(row, deps = {}) {
+  const nameKey = productFifoMatchKey(row.productName, null, deps)
   const qty = Math.round(Math.abs(Number(row.qty) || 0) * 1000) / 1000
-  return `${name}|${qty}`
+  return `${nameKey}|${qty}`
 }
 
 function storedItemMatchKey(item, deps = {}) {
-  const norm = deps.normalizeText || defaultNormalizeText
-  const canon = deps.canonicalProductName || (s => s)
   const raw = item.raw_product_name || item.products?.name || ''
-  const name = norm(canon(raw) || raw)
+  const nameKey = productFifoMatchKey(raw, item.products, deps)
   const qty = Math.round(Math.abs(Number(item.qty) || 0) * 1000) / 1000
-  return `${name}|${qty}`
+  return `${nameKey}|${qty}`
 }
 
 function itemKeyCounts(items, deps, kind) {
@@ -339,6 +345,62 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
   }
 
   return { importedItems, createdLots, mergedDocuments, unchangedDocuments, changedDocuments, mergedOperationIds: [...mergedOpIds] }
+}
+
+/** Pozycje przychodu (PZ) bez lot_id — np. przerwany import; tworzy partie i wiąże. */
+export async function repairMissingIncomingLots(client, deps, { onProgress } = {}) {
+  const notify = msg => onProgress?.(msg)
+  if (!client) return 0
+
+  notify('Sprawdzanie pozycji PZ bez partii…')
+  const PAGE = 500
+  let offset = 0
+  const toFix = []
+
+  while (true) {
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('operation_items')
+        .select('id, operation_id, product_id, qty, raw_product_name, operations!inner(id, operation_date, operation_type)')
+        .eq('direction', 'przychod')
+        .is('lot_id', null)
+        .eq('operations.operation_type', 'przyjecie')
+        .range(offset, offset + PAGE - 1)
+    )
+    if (error) throw error
+    if (!data?.length) break
+    toFix.push(...data)
+    if (data.length < PAGE) break
+    offset += PAGE
+  }
+
+  if (!toFix.length) return 0
+
+  notify(`Tworzenie ${toFix.length} brakujących partii PZ…`)
+  const incomingItems = toFix
+    .map(item => {
+      const qty = Math.abs(Number(item.qty) || 0)
+      const opDate = String(item.operations?.operation_date || '').slice(0, 10)
+      return {
+        direction: 'przychod',
+        group: { issueDate: opDate },
+        row: { productName: item.raw_product_name || '' },
+        productId: item.product_id,
+        itemQty: qty,
+        opId: item.operation_id,
+        itemId: item.id
+      }
+    })
+    .filter(i => i.itemQty > 0 && i.productId && i.opId && i.itemId)
+
+  if (!incomingItems.length) return 0
+  return attachLotsToIncomingItems(client, incomingItems, deps, notify)
+}
+
+export function formatMergeResult(merge) {
+  if (!merge?.importedItems && !merge?.createdLots) return ''
+  const docs = merge.mergedDocuments ? ` (${merge.mergedDocuments} dokumentów)` : ''
+  return `Doklejono ${merge.importedItems} brakujących pozycji z Excela${docs}, utworzono ${merge.createdLots || 0} partii.`
 }
 
 /** Pobiera zapis operacji + pozycje — do wykrywania zmian na rozpisanych PZ/WZ. */
