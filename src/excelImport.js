@@ -233,7 +233,8 @@ export function forwardFillExcelRows(rows) {
 
     const prevDocumentNo = last.documentNo
     if (looksLikeWarehouseDocumentNo(documentNo) && prevDocumentNo && documentNo !== prevDocumentNo) {
-      last.issueDate = inferDateFromDocumentNo(documentNo) || ''
+      // Nowy dokument — nie ustawiaj daty z numeru WZ (MM/RRRR daje błędny ostatni dzień miesiąca).
+      last.issueDate = documentNoHasExplicitDate(documentNo) ? (inferDateFromDocumentNo(documentNo) || '') : ''
     }
 
     let issueDate = String(row.issueDate || '').trim()
@@ -291,9 +292,16 @@ export function documentNoHasExplicitDate(documentNo) {
   return /\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/.test(normalizeDocumentNo(documentNo))
 }
 
-/** Data z numeru PZ/WZ: pełna DD/MM/RRRR albo (stary format) ostatni dzień miesiąca MM/RRRR. */
+/** WZ ma format WZ/NNN/MM/RRRR — w numerze nie ma dnia sprzedaży. */
+export function isWzMonthYearDocument(documentNo) {
+  const norm = normalizeDocumentNo(documentNo)
+  return /^WZ\//i.test(norm) && documentNoHasMonthYear(norm)
+}
+
+/** Data z numeru PZ: pełna DD/MM/RRRR. WZ bez dnia w numerze zwraca ''. */
 export function inferDateFromDocumentNo(documentNo) {
   const norm = normalizeDocumentNo(documentNo)
+  if (isWzMonthYearDocument(norm)) return ''
   const full = norm.match(/\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/)
   if (full) {
     const day = Number(full[1])
@@ -319,13 +327,15 @@ export function documentNoHasMonthYear(documentNo) {
   return /\/(\d{1,2})\/(\d{4})$/.test(norm)
 }
 
-/** Data dokumentu: numer PZ (dzień) → numer WZ/PZ (miesiąc/rok) → Excel → numer. */
+/** Data dokumentu: PZ z dniem w numerze → Excel (WZ i reszta) → numer (legacy MM/RRRR). */
 export function resolveDocumentIssueDate(issueDate, documentNo) {
+  const parsed = parseExcelDate(issueDate)
   const fromDocNo = inferDateFromDocumentNo(documentNo)
   if (fromDocNo && documentNoHasExplicitDate(documentNo)) return fromDocNo
-  if (fromDocNo && documentNoHasMonthYear(documentNo)) return fromDocNo
-  const parsed = parseExcelDate(issueDate)
+  // WZ/NNN/MM/RRRR — dzień tylko z „Data wystawienia” (FIFO!)
+  if (isWzMonthYearDocument(documentNo)) return parsed || fromDocNo
   if (parsed) return parsed
+  if (fromDocNo && documentNoHasMonthYear(documentNo)) return fromDocNo
   return fromDocNo
 }
 

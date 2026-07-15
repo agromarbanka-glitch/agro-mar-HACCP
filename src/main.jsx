@@ -8143,14 +8143,18 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setImportOrphanCount(orphanCount)
 
       if (!groupsToImport.length) {
-        setImportProgress('Korygowanie dat, czyszczenie duplikatów i K01…')
+        setImportProgress('Korygowanie dat WZ, czyszczenie duplikatów i K01…')
         let k01Added = 0
         let repairMsg = ''
         try {
-          const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setImportProgress })
+          const repair = await repairWarehouseImportDuplicates(supabase, {
+            onProgress: setImportProgress,
+            importGroups: groups
+          })
           repairMsg = formatRepairWarehouseResult(repair)
           k01Added = await syncAutoK01Documents(null, { minProductionDate: '2026-06-01' })
           await loadHaccpDocs({ force: true, skipBusy: true })
+          await loadK03TraceData()
         } catch (k01Err) {
           setMessage(
             (duplicateCount
@@ -8208,10 +8212,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           const repair = await repairWarehouseImportDuplicates(supabase, {
             onProgress: setImportProgress,
             importedFileId,
-            light: true
+            light: true,
+            importGroups: groups
           })
           const repairMsg = formatRepairWarehouseResult(repair)
           await loadHaccpDocs({ force: true, skipBusy: true })
+          await loadK03TraceData()
           const k01Msg = k01Added > 0 ? ` Utworzono ${k01Added} kart K01.` : ''
           const dedupeNote = repairMsg !== 'Duplikaty: brak do usunięcia.' && repairMsg !== 'Naprawiono: brak do usunięcia.' ? ` ${repairMsg}` : ''
           setMessage(`${importMsgBase}${dedupeNote}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)

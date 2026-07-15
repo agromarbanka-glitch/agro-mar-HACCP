@@ -28,7 +28,7 @@ Nigdy nie łącz tych ścieżek ani komunikatów UI.
 ## Daty
 
 - PZ z dniem w numerze (`PZ/018/07/07/2026`) → data z numeru, nie forward-fill z Excela.
-- WZ `numer/MM/RRRR` → miesiąc/rok z numeru, nie data z Excela.
+- WZ `WZ/NNN/MM/RRRR` → **dzień z „Data wystawienia” w Excelu** (np. 01.07), nie ostatni dzień miesiąca z numeru.
 
 ## Supabase (wymagane migracje)
 

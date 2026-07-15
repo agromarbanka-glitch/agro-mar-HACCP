@@ -6,10 +6,11 @@
  * - jeden przebieg zapisu + create_incoming_lots_batch v48
  * - K01 i lekki repair po zapisie w tle (main.jsx)
  * - duplikaty PZ/WZ po numerze dokumentu → pomijane (FIFO)
+ * - WZ: data z Excela (Data wystawienia), nie ostatni dzień miesiąca z numeru
  */
-export const IMPORT_SAVE_ENGINE_VERSION = '2.0'
+export const IMPORT_SAVE_ENGINE_VERSION = '2.1'
 
-import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear } from './excelImport.js'
+import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
 const OP_CHUNK = 250
@@ -995,6 +996,47 @@ async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
 /**
  * Poprawia daty tylko operacji z danego importu (szybkie — bez skanowania całej bazy).
  */
+/** Poprawia daty WZ wg daty wystawienia z Excela (np. 01.07 zamiast błędnego 31.07). */
+export async function repairWzDatesFromImportGroups(client, groups, { onProgress } = {}) {
+  if (!client || !groups?.length) return { wz_dates_fixed: 0 }
+  onProgress?.('Korygowanie dat WZ z Excela…')
+  let fixed = 0
+  const seen = new Set()
+
+  for (const group of groups) {
+    const docNo = normalizeDocumentNo(group?.documentNo)
+    if (!isWzMonthYearDocument(docNo)) continue
+    if (seen.has(docNo)) continue
+    seen.add(docNo)
+
+    const correct = String(group?.issueDate || '').slice(0, 10)
+    if (!correct) continue
+
+    const { data: ops, error } = await withImportRetry(() =>
+      client.from('operations').select('id, operation_date').eq('document_no', docNo)
+    )
+    if (error) throw error
+
+    for (const op of ops || []) {
+      const current = String(op.operation_date || '').slice(0, 10)
+      if (!current || current === correct) continue
+
+      await withImportRetry(() =>
+        client.from('operations').update({ operation_date: correct }).eq('id', op.id)
+      )
+      await withImportRetry(() =>
+        client
+          .from('haccp_documents')
+          .update({ document_date: correct })
+          .eq('operation_id', op.id)
+          .eq('document_type', 'K03')
+      )
+      fixed += 1
+    }
+  }
+  return { wz_dates_fixed: fixed }
+}
+
 export async function repairDatesForImportFile(client, importedFileId, { onProgress } = {}) {
   if (!client || !importedFileId) return { dates_fixed: 0 }
   onProgress?.('Korygowanie dat PZ z tego importu…')
@@ -1014,7 +1056,7 @@ export async function repairDatesForImportFile(client, importedFileId, { onProgr
     if (!ops?.length) break
 
     for (const op of ops) {
-      if (!documentNoHasExplicitDate(op.document_no) && !documentNoHasMonthYear(op.document_no)) continue
+      if (!documentNoHasExplicitDate(op.document_no)) continue
       const correct = inferDateFromDocumentNo(op.document_no)
       const current = String(op.operation_date || '').slice(0, 10)
       if (!correct || correct === current) continue
@@ -1042,11 +1084,20 @@ export async function repairDatesForImportFile(client, importedFileId, { onProgr
 }
 
 /** Lekkie czyszczenie po zapisie importu — tylko ten plik + K01 (bez ciężkiego RPC po całej bazie). */
-export async function repairAfterImportSave(client, importedFileId, { onProgress } = {}) {
+export async function repairAfterImportSave(client, importedFileId, { onProgress, importGroups } = {}) {
+  const wzRepair = importGroups?.length
+    ? await repairWzDatesFromImportGroups(client, importGroups, { onProgress })
+    : { wz_dates_fixed: 0 }
   const dateRepair = await repairDatesForImportFile(client, importedFileId, { onProgress })
   onProgress?.('Sprawdzanie zduplikowanych kart K01…')
   const k01Removed = await removeDuplicateK01Documents(client, { onProgress })
-  return { dates_fixed: dateRepair.dates_fixed || 0, k01_removed: k01Removed, items_removed: 0, lots_removed: 0 }
+  return {
+    dates_fixed: dateRepair.dates_fixed || 0,
+    wz_dates_fixed: wzRepair.wz_dates_fixed || 0,
+    k01_removed: k01Removed,
+    items_removed: 0,
+    lots_removed: 0
+  }
 }
 
 /**
@@ -1144,9 +1195,11 @@ export function formatRepairWarehouseResult(result = {}) {
   const lots = result.lots_removed ?? 0
   const k01 = result.k01_removed ?? 0
   const dates = result.dates_fixed ?? 0
-  if (!items && !lots && !k01 && !dates) return 'Duplikaty: brak do usunięcia.'
+  const wzDates = result.wz_dates_fixed ?? 0
+  if (!items && !lots && !k01 && !dates && !wzDates) return 'Duplikaty: brak do usunięcia.'
   const parts = []
   if (dates) parts.push(`${dates} dat PZ`)
+  if (wzDates) parts.push(`${wzDates} dat WZ`)
   if (items) parts.push(`${items} pozycji`)
   if (lots) parts.push(`${lots} partii`)
   if (k01) parts.push(`${k01} kart K01`)
@@ -1157,20 +1210,30 @@ export function formatRepairWarehouseResult(result = {}) {
  * Pełne czyszczenie duplikatów magazynu: pozycje PZ + K01 (FIFO).
  * RPC v46 gdy dostępne; K01 zawsze też z przeglądarki (np. ten sam PZ z wielu importów).
  */
-export async function repairWarehouseImportDuplicates(client, { onProgress, importedFileId, light = false } = {}) {
+export async function repairWarehouseImportDuplicates(client, { onProgress, importedFileId, light = false, importGroups } = {}) {
   if (!client) throw new Error('Brak Supabase.')
   if (light && importedFileId) {
-    return repairAfterImportSave(client, importedFileId, { onProgress })
+    return repairAfterImportSave(client, importedFileId, { onProgress, importGroups })
   }
 
   const notify = msg => onProgress?.(msg)
 
+  const wzRepair = importGroups?.length
+    ? await repairWzDatesFromImportGroups(client, importGroups, { onProgress })
+    : { wz_dates_fixed: 0 }
   const dateRepair = importedFileId
     ? await repairDatesForImportFile(client, importedFileId, { onProgress })
     : await repairDatesFromDocumentNumbers(client, { onProgress })
   notify('Czyszczenie duplikatów magazynu (FIFO)…')
 
-  let result = { items_removed: 0, lots_removed: 0, k01_removed: 0, dates_fixed: dateRepair.dates_fixed || 0, mode: 'client' }
+  let result = {
+    items_removed: 0,
+    lots_removed: 0,
+    k01_removed: 0,
+    dates_fixed: dateRepair.dates_fixed || 0,
+    wz_dates_fixed: wzRepair.wz_dates_fixed || 0,
+    mode: 'client'
+  }
   try {
     const rpc = await removeDuplicateIncomingOperationItems(client, { onProgress })
     result = { ...result, ...rpc, dates_fixed: (dateRepair.dates_fixed || 0) + (rpc.dates_fixed || 0) }
