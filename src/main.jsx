@@ -7822,23 +7822,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   async function syncAutoK01Documents(lotsData = null, { minProductionDate = null } = {}) {
     if (!supabase) return 0
 
-    const k01Existing = []
-    let k01Offset = 0
-    const k01Page = 1000
-    while (true) {
-      const { data: chunk, error: k01Err } = await supabase
-        .from('haccp_documents')
-        .select('id, document_type, lot_id, lot_no, operation_id, document_no, document_date, product_name, qty')
-        .eq('document_type', 'K01')
-        .order('id', { ascending: true })
-        .range(k01Offset, k01Offset + k01Page - 1)
-      if (k01Err) throw k01Err
-      k01Existing.push(...(chunk || []))
-      if (!chunk?.length || chunk.length < k01Page) break
-      k01Offset += k01Page
-    }
-    const existingLotIds = new Set(k01Existing.map(d => d.lot_id).filter(Boolean))
-
     let lots = lotsData
     if (!lots) {
       const since = minProductionDate || (() => {
@@ -7846,13 +7829,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         d.setDate(d.getDate() - 120)
         return d.toISOString().slice(0, 10)
       })()
-      let query = supabase
+      const { data: lotsRaw, error: lotsErr } = await supabase
         .from('lots')
         .select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, storage_chamber_id')
         .gte('production_date', since)
         .order('id', { ascending: true })
         .limit(20000)
-      const { data: lotsRaw, error: lotsErr } = await query
       if (lotsErr) throw lotsErr
       const productIds = Array.from(new Set((lotsRaw || []).map(l => l.product_id).filter(Boolean)))
       const chamberIds = Array.from(new Set((lotsRaw || []).map(l => l.storage_chamber_id).filter(Boolean)))
@@ -7869,10 +7851,41 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       }))
     }
 
-    const candidateLots = (lots || []).filter(l => !existingLotIds.has(l.id))
+    const candidateLots = lots || []
     if (!candidateLots.length) return 0
 
-    const opIds = Array.from(new Set(candidateLots.map(l => l.source_operation_id).filter(Boolean)))
+    const lotIds = candidateLots.map(l => l.id).filter(Boolean)
+    let k01Existing = []
+    if (lotIds.length) {
+      const rows = await fetchSupabaseInChunks(
+        'haccp_documents',
+        'id, document_type, lot_id, lot_no, operation_id, document_no, document_date, product_name, qty',
+        'lot_id',
+        lotIds
+      )
+      k01Existing = rows.filter(d => d.document_type === 'K01')
+    } else {
+      let k01Offset = 0
+      const k01Page = 1000
+      while (true) {
+        const { data: chunk, error: k01Err } = await supabase
+          .from('haccp_documents')
+          .select('id, document_type, lot_id, lot_no, operation_id, document_no, document_date, product_name, qty')
+          .eq('document_type', 'K01')
+          .order('id', { ascending: true })
+          .range(k01Offset, k01Offset + k01Page - 1)
+        if (k01Err) throw k01Err
+        k01Existing.push(...(chunk || []))
+        if (!chunk?.length || chunk.length < k01Page) break
+        k01Offset += k01Page
+      }
+    }
+    const existingLotIds = new Set(k01Existing.map(d => d.lot_id).filter(Boolean))
+
+    const pendingLots = candidateLots.filter(l => !existingLotIds.has(l.id))
+    if (!pendingLots.length) return 0
+
+    const opIds = Array.from(new Set(pendingLots.map(l => l.source_operation_id).filter(Boolean)))
     const operations = opIds.length
       ? await fetchSupabaseInChunks(
         'operations',
@@ -7882,7 +7895,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       )
       : []
 
-    const trace = { lots: candidateLots, operations }
+    const trace = { lots: pendingLots, operations }
     const pending = buildSyntheticK01DocsFromTrace(trace, k01Existing, {
       defaultSignature: defaultK01Employee || ''
     })
@@ -7891,8 +7904,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     let inserted = 0
     const insertErrors = []
     const payloads = pending.map(doc => buildK01InsertPayload(doc))
-    for (let i = 0; i < payloads.length; i += 50) {
-      const chunk = payloads.slice(i, i + 50)
+    for (let i = 0; i < payloads.length; i += 100) {
+      const chunk = payloads.slice(i, i + 100)
       const { error } = await supabase.from('haccp_documents').insert(chunk)
       if (error) insertErrors.push(error.message || String(error))
       else inserted += chunk.length
@@ -8180,30 +8193,35 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setK03UnfreezeSuggestions([])
       setK03UnfreezeBannerOpen(false)
 
-      setMessage(`${importMsgBase} Tworzenie kart K01…`)
       importCheckCacheRef.current = null
-      await loadImports()
+      void loadImports()
 
-      try {
-        setImportProgress('Tworzenie kart K01 z tego importu…')
-        const k01Added = await syncAutoK01ForImportFile(importedFileId)
+      setImportProgress('')
+      setImportSaving(false)
+      setMessage(`${importMsgBase} Magazyn zapisany (ok. 1–3 min). K01 tworzy się w tle…`)
 
-        setImportProgress('Korygowanie dat i usuwanie duplikatów K01…')
-        const repair = await repairWarehouseImportDuplicates(supabase, {
-          onProgress: setImportProgress,
-          importedFileId,
-          light: true
-        })
-        const repairMsg = formatRepairWarehouseResult(repair)
-
-        await loadHaccpDocs({ force: true, skipBusy: true })
-
-        const k01Msg = k01Added > 0 ? ` Utworzono ${k01Added} kart K01.` : ' K01: partie już miały karty.'
-        const dedupeNote = repairMsg !== 'Duplikaty: brak do usunięcia.' ? ` ${repairMsg}` : ''
-        setMessage(`${importMsgBase}${dedupeNote}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
-      } catch (k01Err) {
-        setMessage(`${importMsgBase} Błąd K01/czyszczenia: ${k01Err?.message || k01Err} — Kartoteki → Odśwież.`)
-      }
+      void (async () => {
+        try {
+          setImportProgress('Tworzenie kart K01…')
+          const k01Added = await syncAutoK01ForImportFile(importedFileId)
+          setImportProgress('Korygowanie dat K01…')
+          const repair = await repairWarehouseImportDuplicates(supabase, {
+            onProgress: setImportProgress,
+            importedFileId,
+            light: true
+          })
+          const repairMsg = formatRepairWarehouseResult(repair)
+          await loadHaccpDocs({ force: true, skipBusy: true })
+          const k01Msg = k01Added > 0 ? ` Utworzono ${k01Added} kart K01.` : ''
+          const dedupeNote = repairMsg !== 'Duplikaty: brak do usunięcia.' && repairMsg !== 'Naprawiono: brak do usunięcia.' ? ` ${repairMsg}` : ''
+          setMessage(`${importMsgBase}${dedupeNote}${k01Msg} FIFO: PZ/FIFO → „Uzupełnij braki FIFO”.`)
+        } catch (k01Err) {
+          setMessage(`${importMsgBase} K01 w tle: ${k01Err?.message || k01Err} — Kartoteki → Odśwież.`)
+        } finally {
+          setImportProgress('')
+        }
+      })()
+      return
     } catch (err) {
       setMessage(formatImportNetworkError(err))
     } finally {

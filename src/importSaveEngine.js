@@ -5,11 +5,10 @@
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear } from './excelImport.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
-const OP_CHUNK = 50
-const ITEM_CHUNK = 80
+const OP_CHUNK = 250
+const ITEM_CHUNK = 500
 const NAME_CHUNK = 100
-const DOC_BATCH_SIZE = 40
-const LOT_RPC_CHUNK = 35
+const LOT_RPC_CHUNK = 600
 const LOT_CONCURRENCY = 24
 const ITEM_LOT_UPDATE_CHUNK = 80
 const RETRY_ATTEMPTS = 3
@@ -700,17 +699,10 @@ async function syncLotSequencesForProducts(client, productIds) {
 
 async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
   let total = 0
-  const productIds = [...new Set(incomingItems.map(i => i.productId).filter(Boolean))]
-  await syncLotSequencesForProducts(client, productIds)
-
   const chunkCount = Math.ceil(incomingItems.length / LOT_RPC_CHUNK)
   for (let i = 0; i < incomingItems.length; i += LOT_RPC_CHUNK) {
     const slice = incomingItems.slice(i, i + LOT_RPC_CHUNK)
-    if (chunkCount === 1) {
-      notify(`Tworzenie ${incomingItems.length} partii…`)
-    } else {
-      notify(`Tworzenie partii ${Math.min(i + slice.length, incomingItems.length)} / ${incomingItems.length}…`)
-    }
+    notify(`Tworzenie partii ${Math.min(i + slice.length, incomingItems.length)} / ${incomingItems.length}…`)
     const payload = slice.map(meta => ({
       item_id: meta.itemId,
       product_id: meta.productId,
@@ -737,6 +729,7 @@ async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
         /unikalnego numeru partii|generate_lot_no|lot_no/i.test(String(error.message || ''))
       ) {
         notify('Synchronizacja numerów partii…')
+        const productIds = [...new Set(slice.map(s => s.productId).filter(Boolean))]
         await syncLotSequencesForProducts(client, productIds)
         continue
       }
@@ -744,6 +737,7 @@ async function createIncomingLotsBatchRpc(client, incomingItems, deps, notify) {
     }
     if (lastErr) throw lastErr
   }
+  if (chunkCount > 1) notify(`Utworzono ${total} partii.`)
   return total
 }
 
@@ -887,20 +881,15 @@ async function insertItemsAndLotsForGroups(client, groups, opKeyToId, productMap
   }
 
   if (allIncomingItems.length) {
-    const validIncoming = await filterIncomingWithExistingOps(client, allIncomingItems)
-    if (validIncoming.length < allIncomingItems.length) {
-      throw new Error(
-        `Brak ${allIncomingItems.length - validIncoming.length} operacji przy tworzeniu partii (import mógł zostać przerwany). Kliknij „Zapisz import” ponownie.`
-      )
-    }
+    notify(`Tworzenie ${allIncomingItems.length} partii…`)
     try {
-      createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
+      createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
     } catch (lotErr) {
       const lotMsg = String(lotErr?.message || '')
       if (!/lots_lot_no_key|duplicate key.*lot|lots_source_operation_id_fkey/i.test(lotMsg)) throw lotErr
       notify('Pozostałości partii w bazie – pełne sprzątanie…')
       await runFullImportLotCleanup(client, fileName, importedFileId)
-      createdLots = await attachLotsToIncomingItems(client, validIncoming, deps, notify)
+      createdLots = await attachLotsToIncomingItems(client, allIncomingItems, deps, notify)
     }
   }
 
@@ -943,35 +932,18 @@ export async function saveImportToSupabase(client, {
     ensureContractorIds(client, allContractorNames)
   ])
 
-  notify('Synchronizacja numerów partii…')
-  await syncLotSequencesForProducts(client, [...productMap.values()])
+  notify(`Zapis ${groupsToImport.length} dokumentów…`)
+  const { opKeyToId, importedOperations } = await insertOperationsForGroups(
+    client, groupsToImport, imported.id, contractorMap
+  )
 
-  let importedOperations = 0
-  let importedItems = 0
-  let createdLots = 0
-  let rozchodItems = 0
-
-  const batchCount = Math.ceil(groupsToImport.length / DOC_BATCH_SIZE)
-  notify(`Zapis ${groupsToImport.length} dokumentów w ${batchCount} paczkach…`)
-
-  for (let b = 0; b < groupsToImport.length; b += DOC_BATCH_SIZE) {
-    const batch = groupsToImport.slice(b, b + DOC_BATCH_SIZE)
-    const batchNo = Math.floor(b / DOC_BATCH_SIZE) + 1
-    notify(`Paczka ${batchNo}/${batchCount}: dokumenty ${b + 1}–${b + batch.length} / ${groupsToImport.length}…`)
-
-    const { opKeyToId, importedOperations: batchOps } = await insertOperationsForGroups(
-      client, batch, imported.id, contractorMap
-    )
-    importedOperations += batchOps
-
-    notify(`Paczka ${batchNo}/${batchCount}: pozycje i partie…`)
-    const batchResult = await insertItemsAndLotsForGroups(
-      client, batch, opKeyToId, productMap, deps, notify, fileName, imported.id
-    )
-    importedItems += batchResult.importedItems
-    rozchodItems += batchResult.rozchodItems
-    createdLots += batchResult.createdLots
-  }
+  notify('Zapis pozycji i partii…')
+  const batchResult = await insertItemsAndLotsForGroups(
+    client, groupsToImport, opKeyToId, productMap, deps, notify, fileName, imported.id
+  )
+  const importedItems = batchResult.importedItems
+  const rozchodItems = batchResult.rozchodItems
+  const createdLots = batchResult.createdLots
 
   const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
   await withImportRetry(() =>
