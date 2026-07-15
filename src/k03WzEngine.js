@@ -224,6 +224,20 @@ function suggestLotNo(existingForms, productName, productId, productMap, referen
   return `${code}/${String(seq).padStart(3, '0')}/${year}`
 }
 
+async function loadK03LotSuggestForms(client, productId, productName, year) {
+  const { data, error } = await client
+    .from('haccp_documents')
+    .select('lot_no, product_name, data')
+    .eq('document_type', 'K03')
+    .ilike('lot_no', `%/${year}`)
+  if (error) throw error
+  const nameKey = normalizeKey(productName)
+  return (data || []).filter(d =>
+    (d.data?.product_id === productId || normalizeKey(d.product_name) === nameKey) &&
+    String(d.lot_no || '').includes(`/${year}`)
+  )
+}
+
 /** Proponowany numer partii wyrobu gotowego dla K03 (przerób). */
 export function suggestK03LotNo(existingForms, line, referenceDate, options = {}) {
   const productMap = new Map()
@@ -443,15 +457,16 @@ export async function generateK03Workflow(client, line, options = {}) {
   })
   onProgress?.('k03_save')
 
-  const { forms } = await loadK03Forms(client)
-  const baseForm = forms.find(f => f.id === k03Key)
-  if (!baseForm) throw new Error('Nie znaleziono pozycji WZ po zapisie FIFO.')
-
   const productMap = new Map()
   if (line.product_id) productMap.set(line.product_id, { name: line.product_name, product_group: line.product_group })
 
+  const lotRefDate = mode === 'przerob' ? przerobDate : wzDate
+  const lotYear = String(lotRefDate || '').slice(0, 4) || String(new Date().getFullYear())
+  const lotSuggestForms = String(options.lotNo || '').trim()
+    ? []
+    : await loadK03LotSuggestForms(client, line.product_id, line.product_name, lotYear)
   const lotNo = String(options.lotNo || '').trim() ||
-    suggestLotNo(forms, line.product_name, line.product_id, productMap, mode === 'przerob' ? przerobDate : wzDate, { mode })
+    suggestLotNo(lotSuggestForms, line.product_name, line.product_id, productMap, lotRefDate, { mode })
 
   const fifoSourceKeys = options.fifoSourceKeys || options.fifo_source_keys || null
   const workflow = {
