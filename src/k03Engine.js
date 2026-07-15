@@ -1321,13 +1321,26 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
     payload.data.unfreeze_reason = doc.data?.unfreeze_reason || ''
   }
 
-  const { data: existingRows, error: findErr } = await client
+  let existing = null
+  const { data: byKey, error: keyErr } = await client
     .from('haccp_documents')
     .select('id, data')
     .eq('document_type', 'K03')
-    .limit(10000)
-  if (findErr) throw findErr
-  const existing = (existingRows || []).find(r => r.data?.k03_key === doc.id)
+    .filter('data->>k03_key', 'eq', doc.id)
+    .limit(1)
+    .maybeSingle()
+  if (!keyErr && byKey) existing = byKey
+  if (!existing && doc.data?.sale_operation_id) {
+    const { data: byOp, error: opErr } = await client
+      .from('haccp_documents')
+      .select('id, data')
+      .eq('document_type', 'K03')
+      .eq('operation_id', doc.data.sale_operation_id)
+      .limit(5)
+    if (!opErr && byOp?.length) {
+      existing = byOp.find(r => r.data?.k03_key === doc.id || r.data?.form_id === doc.id) || null
+    }
+  }
 
   if (existing?.id) {
     if (existing.data?.frozen === true && !freeze && !unfreeze) {

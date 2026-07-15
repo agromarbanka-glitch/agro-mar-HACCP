@@ -40,7 +40,7 @@ async function fetchInChunks(client, table, select, column, ids, chunkSize = 80)
 
 /** Pobiera całą tabelę stronicowaniem (Supabase domyślnie zwraca max 1000 wierszy). */
 async function fetchAllPaginated(client, table, select, options = {}) {
-  const pageSize = options.pageSize || 2000
+  const pageSize = options.pageSize || 5000
   const orderCol = options.orderBy || 'id'
   const filters = options.filters || []
   const all = []
@@ -99,14 +99,19 @@ export function invalidateFifoBaseCache() {
   fifoBaseCache = null
 }
 
+/** Wczytuje dane FIFO w tle (np. przy otwarciu modala K03). */
+export function prefetchFifoBaseData(client) {
+  if (!client) return Promise.resolve(null)
+  return loadFifoBaseData(client).catch(() => null)
+}
+
 async function loadFifoBaseData(client, options = {}) {
   if (!options.forceReload && fifoBaseCache) {
     return fifoBaseCache
   }
-  const [products, lotsRaw, operations, saleItemsRaw, allocationsRaw, k03Docs] = await Promise.all([
+  const [products, lotsRaw, saleItemsRaw, allocationsRaw, k03Docs] = await Promise.all([
     fetchAllPaginated(client, 'products', 'id, name, code, product_group'),
     fetchAllPaginated(client, 'lots', 'id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, status'),
-    fetchAllPaginated(client, 'operations', 'id, operation_type, operation_date, document_no, created_at'),
     fetchAllPaginated(client, 'operation_items', 'id, operation_id, product_id, qty, direction, raw_product_name', {
       filters: [{ type: 'eq', column: 'direction', value: 'rozchod' }]
     }),
@@ -115,33 +120,30 @@ async function loadFifoBaseData(client, options = {}) {
       filters: [{ type: 'eq', column: 'document_type', value: 'K03' }]
     })
   ])
-  const productsErr = null
-  const lotsErr = null
-  const opsErr = null
-  const itemsErr = null
-  const allocErr = null
-  const k03Err = null
-  if (productsErr) throw productsErr
-  if (lotsErr) throw lotsErr
-  if (opsErr) throw opsErr
-  if (itemsErr) throw itemsErr
-  if (allocErr) throw allocErr
-  if (k03Err) throw k03Err
 
-  const productMap = new Map((products || []).map(p => [p.id, p]))
-  const opMap = new Map((operations || []).map(o => [o.id, o]))
-  const lotSourceOpIds = [...new Set((lotsRaw || []).map(l => l.source_operation_id).filter(Boolean))]
-  const missingOpIds = lotSourceOpIds.filter(id => !opMap.has(id))
-  if (missingOpIds.length) {
-    const extraOps = await fetchInChunks(
+  const neededOpIds = new Set()
+  for (const item of saleItemsRaw || []) {
+    if (item.operation_id) neededOpIds.add(item.operation_id)
+  }
+  for (const lot of lotsRaw || []) {
+    if (lot.source_operation_id) neededOpIds.add(lot.source_operation_id)
+  }
+  for (const doc of k03Docs || []) {
+    const opId = doc.data?.sale_operation_id || doc.operation_id
+    if (opId) neededOpIds.add(opId)
+  }
+  const operations = neededOpIds.size
+    ? await fetchInChunks(
       client,
       'operations',
       'id, operation_type, operation_date, document_no, created_at',
       'id',
-      missingOpIds
+      [...neededOpIds]
     )
-    for (const o of extraOps) opMap.set(o.id, o)
-  }
+    : []
+
+  const productMap = new Map((products || []).map(p => [p.id, p]))
+  const opMap = new Map((operations || []).map(o => [o.id, o]))
   const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
   for (const item of saleItemsRaw || []) {
     if (item.operation_id) saleOpIds.add(item.operation_id)
@@ -240,13 +242,34 @@ async function persistLot(client, lot) {
   if (error) throw error
 }
 
-async function persistLotsBatch(client, lotState, lotIds) {
+async function persistLotsBatch(client, lotState, lotIds, baseLotState = null) {
   const ids = Array.from(new Set((lotIds || []).filter(Boolean)))
   if (!ids.length) return
-  await Promise.all(ids.map(id => {
+  const toUpdate = ids.filter(id => {
+    const lot = lotState.get(id)
+    if (!lot) return false
+    if (!baseLotState) return true
+    const base = baseLotState.get(id)
+    if (!base) return true
+    return Math.abs(Number(base.remaining_qty || 0) - Number(lot.remaining_qty || 0)) >= 0.001 ||
+      String(base.status || '') !== String(lot.status || '')
+  })
+  if (!toUpdate.length) return
+  await Promise.all(toUpdate.map(id => {
     const lot = lotState.get(id)
     return lot ? persistLot(client, lot) : Promise.resolve()
   }))
+}
+
+function allocationRowsSignature(rows) {
+  return (rows || [])
+    .map(r => `${r.source_lot_id}|${Number(r.qty || 0).toFixed(3)}`)
+    .sort()
+    .join(';')
+}
+
+function allocationsUnchanged(simRows, dbAllocs) {
+  return allocationRowsSignature(simRows) === allocationRowsSignature(dbAllocs)
 }
 
 function saleMatchSpecWithOptions(sale, options = {}) {
@@ -671,23 +694,28 @@ function runClassFifoSimulation(base, matchSpec, workflowBySaleKey, options = {}
   return { lotState, results, lotStateBeforeTarget, allocatedBeforeTargetKg }
 }
 
-async function persistPoolFifoSimulation(client, base, matchSpec, simulation, frozenKeys = new Set()) {
+async function persistPoolFifoSimulation(client, base, matchSpec, simulation, frozenKeys = new Set(), options = {}) {
   const { lotState, results } = simulation
+  const targetSaleKey = options.targetSaleKey || null
 
   const allocIdsToDelete = []
+  const insertRows = []
+  const affectedSaleKeys = []
+
   for (const sk of results.keys()) {
     if (isFrozenSaleKey(sk, frozenKeys)) continue
-    for (const a of base.allocationsBySaleKey.get(sk) || []) {
+    const sim = results.get(sk)
+    const existing = base.allocationsBySaleKey.get(sk) || []
+    const simRows = sim?.allocationRows || []
+    if (targetSaleKey && sk !== targetSaleKey && allocationsUnchanged(simRows, existing)) continue
+    affectedSaleKeys.push(sk)
+    for (const a of existing) {
       if (a.id) allocIdsToDelete.push(a.id)
     }
+    insertRows.push(...simRows)
   }
   if (allocIdsToDelete.length) await deleteAllocations(client, allocIdsToDelete)
 
-  const insertRows = []
-  for (const [sk, sim] of results) {
-    if (isFrozenSaleKey(sk, frozenKeys)) continue
-    insertRows.push(...(sim.allocationRows || []))
-  }
   for (let i = 0; i < insertRows.length; i += 200) {
     const chunk = insertRows.slice(i, i + 200)
     if (!chunk.length) continue
@@ -696,14 +724,38 @@ async function persistPoolFifoSimulation(client, base, matchSpec, simulation, fr
   }
 
   const poolLotIds = poolIncomingLotIds(base.lotState, base.productMap, matchSpec, base.opMap)
+  const changedLotIds = []
   for (const lotId of poolLotIds) {
     const simLot = lotState.get(lotId)
     const baseLot = base.lotState.get(lotId)
     if (!simLot || !baseLot) continue
+    const qtyChanged = Math.abs(Number(baseLot.remaining_qty || 0) - Number(simLot.remaining_qty || 0)) >= 0.001
+    const statusChanged = String(baseLot.status || '') !== String(simLot.status || '')
+    if (!qtyChanged && !statusChanged) continue
     baseLot.remaining_qty = simLot.remaining_qty
     baseLot.status = simLot.status
+    changedLotIds.push(lotId)
   }
-  if (poolLotIds.length) await persistLotsBatch(client, base.lotState, poolLotIds)
+  if (changedLotIds.length) await persistLotsBatch(client, base.lotState, changedLotIds)
+  return affectedSaleKeys
+}
+
+function patchFifoBaseCacheFromSimulation(simulation, affectedSaleKeys, matchSpec) {
+  if (!fifoBaseCache || !simulation) return
+  for (const sk of affectedSaleKeys || []) {
+    const sim = simulation.results.get(sk)
+    if (!sim) continue
+    fifoBaseCache.allocationsBySaleKey.set(sk, (sim.allocationRows || []).map(r => ({ ...r })))
+  }
+  const poolLotIds = poolIncomingLotIds(fifoBaseCache.lotState, fifoBaseCache.productMap, matchSpec, fifoBaseCache.opMap)
+  for (const lotId of poolLotIds) {
+    const simLot = simulation.lotState.get(lotId)
+    const baseLot = fifoBaseCache.lotState.get(lotId)
+    if (simLot && baseLot) {
+      baseLot.remaining_qty = simLot.remaining_qty
+      baseLot.status = simLot.status
+    }
+  }
 }
 
 function initialPoolInventory(base, matchSpec, cutoff) {
@@ -1100,7 +1152,8 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
     allocated_qty: existing.reduce((s, a) => s + Number(a.qty || 0), 0)
   }
 
-  await persistPoolFifoSimulation(client, base, matchSpec, fullSimulation, frozenKeys)
+  const affectedSaleKeys = await persistPoolFifoSimulation(client, base, matchSpec, fullSimulation, frozenKeys, { targetSaleKey: saleKey })
+  patchFifoBaseCacheFromSimulation(fullSimulation, affectedSaleKeys, matchSpec)
 
   const current = fullSimulation.results.get(saleKey) || { allocationRows: [], allocated: 0, shortage: 0 }
   const enrichedPzAll = enrichAllocationRowsLocal(current.allocationRows, fullSimulation.lotState, base.opMap)
@@ -1157,8 +1210,6 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
     change_reason: logEntry.change_reason || 'Rozliczenie FIFO dla K03',
     changed_by: logEntry.changed_by || 'operator'
   })
-
-  invalidateFifoBaseCache()
 
   return {
     ok: true,

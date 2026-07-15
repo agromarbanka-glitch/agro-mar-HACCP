@@ -357,6 +357,19 @@ export async function loadWzQueue(client, options = {}) {
   }
 }
 
+export function applyK03WorkflowResultToQueue(line, result) {
+  const doc = result?.doc
+  if (!line || !doc) return null
+  return {
+    ...line,
+    status: doc.frozen ? 'frozen' : 'k03_ready',
+    frozen: doc.frozen === true || doc.data?.frozen === true,
+    workflow: result.workflow || line.workflow,
+    k03Form: doc,
+    haccp_doc_id: doc.haccp_doc_id || line.haccp_doc_id || null
+  }
+}
+
 function validatePrzerobDate(mode, przerobDate, wzDate) {
   if (mode !== 'przerob') return null
   if (!przerobDate) return 'Podaj datę przerobu.'
@@ -543,7 +556,8 @@ export async function generateK03Workflow(client, line, options = {}) {
   }
 
   const canAutoFreeze = isK03CompleteAndValid(doc)
-  await saveK03Snapshot(client, doc, { freeze: false, userRole: changedBy })
+  const haccpDocId = await saveK03Snapshot(client, doc, { freeze: false, userRole: changedBy })
+  if (haccpDocId) doc = { ...doc, haccp_doc_id: haccpDocId }
 
   await logK03Workflow(client, {
     wz_no: line.document_no,
@@ -560,7 +574,7 @@ export async function generateK03Workflow(client, line, options = {}) {
     doc = { ...doc, frozen: false, data: { ...doc.data, frozen: false } }
   }
 
-  return { ok: true, doc, workflow, fifoResult, autoFrozen: false }
+  return { ok: true, doc, workflow, fifoResult, autoFrozen: false, haccpDocId: doc.haccp_doc_id || null }
 }
 
 /**

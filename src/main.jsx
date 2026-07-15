@@ -6,9 +6,9 @@ import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocume
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeAllActiveExcelImports, formatPurgeAllImportsResult } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
-import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
+import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
-import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache } from './fifoEngine'
+import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import {
@@ -1354,10 +1354,12 @@ function App() {
 
   function openK03WzModal(line, mode) {
     setK03WzModal(buildK03WzModalState(line, mode, false))
+    if (supabase) prefetchFifoBaseData(supabase)
   }
 
   function openK03WzEditModal(line) {
     setK03WzModal(buildK03WzModalState(line, line.workflow?.mode || 'bez_przerobu', true))
+    if (supabase) prefetchFifoBaseData(supabase)
   }
 
   function k03WzFifoSourceKeys(modal) {
@@ -1427,12 +1429,26 @@ function App() {
       }
       if (!result.ok) throw new Error(result.message || 'Nie udało się utworzyć K03.')
       const wasEdit = k03WzModal.editMode
-      const wzNo = k03WzModal.line.document_no
+      const savedLine = k03WzModal.line
+      const wzNo = savedLine.document_no
       const wzMode = k03WzModal.mode === 'przerob' ? 'przerób' : 'brak przerobu'
       const frozenNote = result.autoFrozen ? ' Kartoteka zamrożona automatycznie (kompletna i prawidłowa).' : ' Kartoteka zapisana — możesz ją zamrozić ręcznie po weryfikacji.'
       const editNote = wasEdit ? ' Decyzja K03 zmieniona.' : ''
       setK03WzModal(null)
-      await loadK03TraceData({ repairPz: false })
+      const updatedLine = applyK03WorkflowResultToQueue(savedLine, result)
+      if (updatedLine) {
+        setWzQueueLines(lines => lines.map(l => l.key === updatedLine.key ? updatedLine : l))
+        setK03FormsRaw(forms => {
+          const idx = forms.findIndex(f => f.id === result.doc.id)
+          if (idx >= 0) {
+            const next = [...forms]
+            next[idx] = result.doc
+            return next
+          }
+          return forms
+        })
+      }
+      loadFifoChangeLog()
       setMessage(`K03 ${wasEdit ? 'zaktualizowany' : 'utworzony'} dla WZ ${wzNo} (${wzMode}).${editNote}${frozenNote}`)
     } catch (err) {
       setK03WzModal(m => ({ ...m, saving: false, savingStep: '', error: err?.message || String(err) }))
