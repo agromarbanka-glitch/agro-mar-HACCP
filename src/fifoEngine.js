@@ -38,14 +38,15 @@ async function fetchInChunks(client, table, select, column, ids, chunkSize = 80)
   return results
 }
 
-/** Pobiera całą tabelę stronicowaniem (Supabase domyślnie zwraca max 1000 wierszy). */
+/** Pobiera całą tabelę stronicowaniem (Supabase domyślnie zwraca max 1000 wierszy na zapytanie). */
 async function fetchAllPaginated(client, table, select, options = {}) {
-  const pageSize = options.pageSize || 5000
+  const pageSize = options.pageSize || 1000
   const orderCol = options.orderBy || 'id'
   const filters = options.filters || []
+  const maxRows = options.maxRows ?? Number.POSITIVE_INFINITY
   const all = []
   let offset = 0
-  while (true) {
+  while (all.length < maxRows) {
     let query = client.from(table).select(select).order(orderCol, { ascending: true }).range(offset, offset + pageSize - 1)
     for (const f of filters) {
       if (f.type === 'eq') query = query.eq(f.column, f.value)
@@ -57,7 +58,7 @@ async function fetchAllPaginated(client, table, select, options = {}) {
     if (data.length < pageSize) break
     offset += pageSize
   }
-  return all
+  return all.slice(0, maxRows)
 }
 
 export function frozenKeysFromSnapshots(snapshots = []) {
@@ -408,24 +409,19 @@ function toAllocationRows(sale, allocs) {
  * Zamrożone K03 i wcześniejsze WZ z zapisanym FIFO – używają zapisanych przypisań,
  * nie świeżej symulacji (unika podwójnego pobierania tych samych PZ).
  */
-function resolveSaleLockedAllocations(sale, base, frozenKeys, targetIdx, saleIndex) {
+function resolveSaleLockedAllocations(sale, base, frozenKeys) {
   const isFrozen = isFrozenSaleKey(sale.key, frozenKeys)
   const dbAllocs = base.allocationsBySaleKey.get(sale.key) || []
   const snapAllocs = base.frozenAllocationsBySaleKey?.get(sale.key) || []
   const dbQty = allocationTotal(dbAllocs)
   const snapQty = allocationTotal(snapAllocs)
-  const hasWorkflow = Boolean(base.workflowBySaleKey?.get(sale.key))
-  const isPriorCommitted = saleIndex < targetIdx && (hasWorkflow || dbQty > 0.001)
 
-  if (isFrozen) {
-    if (snapQty >= dbQty - 0.001 && snapQty > 0.001) return snapAllocs
-    if (dbQty > 0.001) return dbAllocs
-    if (snapQty > 0.001) return snapAllocs
-    return []
-  }
+  if (!isFrozen) return null
 
-  if (isPriorCommitted && dbQty > 0.001) return dbAllocs
-  return null
+  if (snapQty >= dbQty - 0.001 && snapQty > 0.001) return snapAllocs
+  if (dbQty > 0.001) return dbAllocs
+  if (snapQty > 0.001) return snapAllocs
+  return []
 }
 
 async function loadK03WorkflowBySaleKey(client, options = {}) {
@@ -460,12 +456,19 @@ function restoreAllocationsToLots(allocations, lotState) {
 }
 
 function deductAllocationsFromLots(allocations, lotState) {
+  let actualTotal = 0
   for (const alloc of allocations || []) {
     const lot = lotState.get(alloc.source_lot_id)
     if (!lot) continue
-    lot.remaining_qty = Math.max(0, Number(lot.remaining_qty || 0) - Number(alloc.qty || 0))
+    const available = Number(lot.remaining_qty || 0)
+    const requested = Number(alloc.qty || 0)
+    const take = Math.min(available, requested)
+    lot.remaining_qty = Math.max(0, available - take)
+    lot.status = lot.remaining_qty > 0.0005 ? 'aktywna' : lot.status
     lotState.set(lot.id, lot)
+    actualTotal += take
   }
+  return actualTotal
 }
 
 /** Przy podglądzie K03 – stany PZ od initial_qty, tylko w puli produktu (szybciej niż cały magazyn). */
@@ -645,10 +648,9 @@ function runClassFifoSimulation(base, matchSpec, workflowBySaleKey, options = {}
       lotStateBeforeTarget = new Map(Array.from(lotState.entries()).map(([k, v]) => [k, { ...v }]))
     }
 
-    const locked = resolveSaleLockedAllocations(sale, base, frozenKeys, targetIdx, i)
+    const locked = resolveSaleLockedAllocations(sale, base, frozenKeys)
     if (locked !== null) {
-      deductAllocationsFromLots(locked, lotState)
-      const allocated = allocationTotal(locked)
+      const allocated = deductAllocationsFromLots(locked, lotState)
       const rows = toAllocationRows(sale, locked)
       results.set(sale.key, {
         allocationRows: rows,
@@ -1027,7 +1029,7 @@ async function enrichAllocationRows(client, allocationRows) {
 
 /** Podgląd FIFO dla jednej pozycji WZ z datą graniczną (przerób lub WZ). */
 export async function previewFifoForSale(client, operationId, productId, cutoffDate, options = {}) {
-  const base = await loadFifoBaseData(client, { forceReload: options.forceReload === true })
+  const base = await loadFifoBaseData(client, { forceReload: true })
   const workflowBySaleKey = base.workflowBySaleKey || new Map()
   const saleKey = saleLineKey(operationId, productId)
   const sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
