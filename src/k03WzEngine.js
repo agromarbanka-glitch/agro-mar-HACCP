@@ -540,7 +540,12 @@ export async function generateK03Workflow(client, line, options = {}) {
     productMap,
     emptyContractors,
     'baza',
-    { fifoCutoffDate: cutoffDate, workflow, lotNo }
+    {
+      fifoCutoffDate: cutoffDate,
+      workflow,
+      lotNo,
+      manualRawRows: options.manualRawRows?.length ? options.manualRawRows : undefined
+    }
   )
 
   doc = {
@@ -552,7 +557,8 @@ export async function generateK03Workflow(client, line, options = {}) {
       shortage,
       rawTotal,
       quantitiesMatch: !mismatch,
-      quantity_warning_accepted: mismatch && acceptQuantityMismatch
+      quantity_warning_accepted: mismatch && acceptQuantityMismatch,
+      manual_pz_entry: Boolean(options.manualRawRows?.length)
     }
   }
 

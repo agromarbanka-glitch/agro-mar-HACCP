@@ -1744,3 +1744,96 @@ export function formatCleanupResult(cleanup) {
   }
   return `Wyczyszczono: ${imports} import(ów), ${ops} operacji, ${lots} partii.`
 }
+
+/** Podgląd operacji z zapisanego importu (bez zagnieżdżonego select — omija limity PostgREST). */
+export async function fetchImportPreviewOperations(client, importedFileId) {
+  if (!client || !importedFileId) return []
+
+  const allOps = []
+  const pageSize = 200
+  let offset = 0
+  while (true) {
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, operation_type, operation_date, document_no, invoice_no, notes')
+        .eq('imported_file_id', importedFileId)
+        .order('operation_date', { ascending: false })
+        .order('document_no', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+    )
+    if (error) throw error
+    if (!data?.length) break
+    allOps.push(...data)
+    if (data.length < pageSize) break
+    offset += pageSize
+  }
+
+  const itemsByOp = new Map()
+  const opIds = allOps.map(o => o.id)
+  for (let i = 0; i < opIds.length; i += 50) {
+    const chunk = opIds.slice(i, i + 50)
+    let itemOffset = 0
+    while (true) {
+      const { data: items, error: itemsErr } = await withImportRetry(() =>
+        client
+          .from('operation_items')
+          .select('operation_id, qty, direction, raw_product_name')
+          .in('operation_id', chunk)
+          .order('id', { ascending: true })
+          .range(itemOffset, itemOffset + 999)
+      )
+      if (itemsErr) throw itemsErr
+      if (!items?.length) break
+      for (const item of items) {
+        const list = itemsByOp.get(item.operation_id) || []
+        list.push(item)
+        itemsByOp.set(item.operation_id, list)
+      }
+      if (items.length < 1000) break
+      itemOffset += 1000
+    }
+  }
+
+  return allOps.map(op => ({
+    ...op,
+    operation_items: itemsByOp.get(op.id) || []
+  }))
+}
+
+/** Ręczna korekta daty dokumentu PZ lub WZ z rejestru importu. */
+export async function saveWarehouseOperationDate(client, operationId, newDate, { operationType } = {}) {
+  if (!client || !operationId) throw new Error('Brak operacji do zapisu.')
+  const correct = String(newDate || '').slice(0, 10)
+  if (!correct || correct === '0000-01-01') throw new Error('Podaj poprawną datę.')
+
+  const { error: opErr } = await withImportRetry(() =>
+    client.from('operations').update({ operation_date: correct }).eq('id', operationId)
+  )
+  if (opErr) throw opErr
+
+  const isIncoming = operationType === 'przyjecie'
+  if (isIncoming) {
+    await withImportRetry(() =>
+      client.from('lots').update({ production_date: correct }).eq('source_operation_id', operationId)
+    )
+    await withImportRetry(() =>
+      client
+        .from('haccp_documents')
+        .update({ document_date: correct })
+        .eq('operation_id', operationId)
+        .eq('document_type', 'K01')
+    )
+  } else {
+    await withImportRetry(() =>
+      client
+        .from('haccp_documents')
+        .update({ document_date: correct })
+        .eq('operation_id', operationId)
+        .eq('document_type', 'K03')
+    )
+  }
+
+  invalidateFifoBaseCache()
+  return { operation_date: correct }
+}

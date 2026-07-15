@@ -964,8 +964,10 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   const receiver = formatK03Receiver(contractorMap.get(op?.contractor_id)?.name || saleLine.receiver_name || '')
   const cutoffDate = String(fifoCutoffDate || wzDate || '').slice(0, 10)
 
-  const incomingRows = (pzRows || []).filter(r => Number(r.qty || 0) > 0).map(r => {
-    const pzNo = resolveK03PzNoFromRow(r)
+  const incomingRows = (options.manualRawRows?.length ? options.manualRawRows : (pzRows || []))
+    .filter(r => Number(r.qty || 0) > 0)
+    .map(r => {
+    const pzNo = resolveK03PzNoFromRow(r) || String(r.pz_no || '').trim()
     const supplier = formatK03Dostawca({ ...r, pz_no: pzNo || r.supplier || r.pz_no }) || String(r.supplier || '').trim()
     return {
       ...r,
@@ -973,7 +975,8 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
       pz_no_display: pzNo || r.pz_no_display || '',
       supplier,
       source_lot_id: r.source_lot_id || null,
-      source_lot_no: r.source_lot_no || ''
+      source_lot_no: r.source_lot_no || '',
+      isShortage: r.isShortage === true && !pzNo
     }
   })
   let excludedFuturePzRows = []
@@ -1005,7 +1008,8 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   const allocatedTotal = rawRowsBase.reduce((sum, r) => sum + Number(r.qty || 0), 0)
   const shortage = Math.max(0, Math.round((saleQty - allocatedTotal) * 1000) / 1000)
   const cutoffLabel = cutoffDate !== '0000-01-01' ? cutoffDate : wzDate
-  const rawRows = shortage > 0
+  const manualMode = Boolean(options.manualRawRows?.length)
+  const rawRows = shortage > 0 && !manualMode
     ? [...rawRowsBase, {
       pz_no: source === 'excel' ? 'Zapisz do bazy i przelicz FIFO' : 'BRAK SUROWCA',
       pz_date: cutoffLabel && cutoffLabel !== '0000-01-01' ? `≤ ${cutoffLabel}` : '',
@@ -1014,7 +1018,16 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
       source_lot_no: '',
       isShortage: true
     }]
-    : rawRowsBase
+    : manualMode && shortage > 0.0005
+      ? [...rawRowsBase, {
+        pz_no: '',
+        pz_date: cutoffLabel && cutoffLabel !== '0000-01-01' ? cutoffLabel : '',
+        supplier: '',
+        qty: shortage,
+        source_lot_no: '',
+        isShortage: true
+      }]
+      : rawRowsBase
 
   const rawTotal = allocatedTotal
   const quantityWarningAccepted = workflow?.quantity_warning_accepted === true

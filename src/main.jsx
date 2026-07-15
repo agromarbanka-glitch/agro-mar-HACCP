@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -315,6 +315,9 @@ function App() {
   const [dashboardMonth, setDashboardMonth] = useState(() => new Date().toISOString().slice(0, 7))
   const [importRows, setImportRows] = useState([])
   const [importPreview, setImportPreview] = useState([])
+  const [importPreviewModal, setImportPreviewModal] = useState(null)
+  const [importOpEditDates, setImportOpEditDates] = useState({})
+  const [importOpDateSaving, setImportOpDateSaving] = useState(null)
   const [importDuplicates, setImportDuplicates] = useState([])
   const [importNewDocCount, setImportNewDocCount] = useState(0)
   const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
@@ -1371,8 +1374,61 @@ function App() {
       saving: false,
       savingStep: '',
       error: '',
-      confirmMismatch: false
+      confirmMismatch: false,
+      manualRows: []
     }
+  }
+
+  function k03ManualRowsFromPreview(preview) {
+    if (!preview?.ok) return []
+    const rows = (preview.pzRows || []).map((r, i) => ({
+      id: `fifo-${i}`,
+      pz_no: resolveK03PzNoFromRow(r) || '',
+      pz_date: String(r.pz_date || '').slice(0, 10),
+      supplier: r.supplier || resolveK03PzNoFromRow(r) || '',
+      qty: Number(r.qty || 0),
+      source_lot_no: r.source_lot_no || '',
+      source_lot_id: r.source_lot_id || null,
+      isShortage: false
+    }))
+    const shortage = Number(preview.shortage || 0)
+    if (shortage > 0.0005) {
+      rows.push({
+        id: 'shortage',
+        pz_no: '',
+        pz_date: String(preview.cutoffDate || '').slice(0, 10),
+        supplier: '',
+        qty: shortage,
+        source_lot_no: '',
+        source_lot_id: null,
+        isShortage: true
+      })
+    }
+    return rows
+  }
+
+  function updateK03ManualRow(rowId, patch) {
+    setK03WzModal(m => {
+      if (!m) return m
+      const manualRows = (m.manualRows || []).map(r => r.id === rowId ? { ...r, ...patch, isShortage: patch.pz_no ? false : r.isShortage } : r)
+      return { ...m, manualRows }
+    })
+  }
+
+  function addK03ManualRow() {
+    setK03WzModal(m => {
+      if (!m) return m
+      const manualRows = [...(m.manualRows || []), {
+        id: `manual-${Date.now()}`,
+        pz_no: '',
+        pz_date: String(m.preview?.cutoffDate || m.line?.wz_date || '').slice(0, 10),
+        supplier: '',
+        qty: 0,
+        source_lot_no: '',
+        isShortage: false
+      }]
+      return { ...m, manualRows }
+    })
   }
 
   function openK03WzModal(line, mode) {
@@ -1393,7 +1449,7 @@ function App() {
   function toggleK03FifoSourceKey(sourceKey, checked) {
     setK03WzModal(m => {
       if (!checked) return m
-      return { ...m, fifoSourceKeys: [sourceKey], preview: null, confirmMismatch: false }
+      return { ...m, fifoSourceKeys: [sourceKey], preview: null, confirmMismatch: false, manualRows: [] }
     })
   }
 
@@ -1421,6 +1477,9 @@ function App() {
       setK03WzModal(m => m ? ({ ...m, savingStep: K03_SAVE_STEP_LABELS[step] || step }) : m)
     }
     try {
+      const manualRawRows = (acceptMismatch || k03WzModal.confirmMismatch) && k03WzModal.manualRows?.length
+        ? k03WzModal.manualRows.filter(r => Number(r.qty || 0) > 0)
+        : undefined
       const workflowOpts = {
         mode: k03WzModal.mode,
         przerobDate: k03WzModal.przerobDate,
@@ -1431,6 +1490,7 @@ function App() {
         fifoSourceKeys: k03WzFifoSourceKeys(k03WzModal),
         frozenKeys: frozenKeysFromSnapshots(k03Snapshots),
         existingPreview: k03WzModal.preview?.ok ? k03WzModal.preview : undefined,
+        manualRawRows,
         onProgress: reportSaveStep
       }
       const result = k03WzModal.editMode
@@ -1442,7 +1502,8 @@ function App() {
           saving: false,
           preview: result.preview,
           error: result.message,
-          confirmMismatch: true
+          confirmMismatch: true,
+          manualRows: k03ManualRowsFromPreview(result.preview)
         }))
         return
       }
@@ -1483,7 +1544,7 @@ function App() {
 
   function renderK03WzModal() {
     if (!k03WzModal) return null
-    const { line, mode, preview, loading, saving, savingStep, error, confirmMismatch, editMode, fifoSourcePicker, fifoSourceKeys } = k03WzModal
+    const { line, mode, preview, loading, saving, savingStep, error, confirmMismatch, editMode, fifoSourcePicker, fifoSourceKeys, manualRows } = k03WzModal
     const wzDate = String(line.wz_date || '').slice(0, 10)
     const title = editMode
       ? 'Zmień decyzję K03'
@@ -1558,7 +1619,7 @@ function App() {
         <div className="k03-wz-modal-actions actions">
           <button className="secondary" onClick={refreshK03WzPreview} disabled={loading || saving}>{loading ? 'FIFO…' : 'Podgląd FIFO / PZ'}</button>
           <button onClick={() => confirmK03WzModal(confirmMismatch)} disabled={saving || loading || (!preview && !confirmMismatch) || (fifoSourcePicker && !(fifoSourceKeys || []).length)}>
-            {saving ? (savingStep || 'Zapisywanie…') : confirmMismatch ? 'Zatwierdź mimo ostrzeżenia' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
+            {saving ? (savingStep || 'Zapisywanie…') : confirmMismatch ? 'Utwórz K03 (z uzupełnieniem ręcznym)' : (editMode ? 'Zapisz zmianę' : 'Utwórz K03')}
           </button>
           <button className="secondary" onClick={() => setK03WzModal(null)} disabled={saving}>Anuluj</button>
         </div>
@@ -1597,7 +1658,25 @@ function App() {
             <> {preview.diagnostics.priorUnallocatedWzCount} wcześniejszych WZ bez K03 ({Number(preview.diagnostics.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) – rozlicz je wcześniej.</>
           )}
         </p>}
-        {preview?.pzRows?.length > 0 && <div className="table-wrap small"><table>
+        {confirmMismatch && (manualRows?.length > 0) && (
+          <div className="k03-manual-pz-box">
+            <p className="hint"><b>Uzupełnij ręcznie brakujące PZ</b> — wiersze z FIFO możesz poprawić; w wierszu „brak towaru” wpisz nr PZ, datę, dostawcę i kg.</p>
+            <div className="table-wrap small"><table>
+              <thead><tr><th>Nr PZ</th><th>Data PZ</th><th>Dostawca / partia</th><th>Ilość kg</th><th></th></tr></thead>
+              <tbody>{manualRows.map(row => (
+                <tr key={row.id} className={row.isShortage ? 'k03-shortage-row' : ''}>
+                  <td><input className="cell-input" value={row.pz_no || ''} placeholder={row.isShortage ? 'Nr PZ (ręcznie)' : ''} onChange={e => updateK03ManualRow(row.id, { pz_no: e.target.value })} /></td>
+                  <td><input className="cell-input pz-date-input" type="date" value={String(row.pz_date || '').slice(0, 10)} onChange={e => updateK03ManualRow(row.id, { pz_date: e.target.value })} /></td>
+                  <td><input className="cell-input" value={row.supplier || row.source_lot_no || ''} placeholder="Dostawca" onChange={e => updateK03ManualRow(row.id, { supplier: e.target.value })} /></td>
+                  <td><input className="cell-input" type="number" step="0.001" min="0" value={row.qty ?? ''} onChange={e => updateK03ManualRow(row.id, { qty: Number(e.target.value) || 0 })} /></td>
+                  <td>{row.isShortage ? <span className="pill warn">Brak towaru</span> : null}</td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+            <button type="button" className="mini secondary" onClick={addK03ManualRow}>+ Dodaj wiersz PZ</button>
+          </div>
+        )}
+        {preview?.pzRows?.length > 0 && !confirmMismatch && <div className="table-wrap small"><table>
           <thead><tr><th>Nr PZ (z importu)</th><th>Partia mag.</th><th>Data PZ</th><th>Dostawca</th><th>Ilość kg</th></tr></thead>
           <tbody>{preview.pzRows.map((r, i) => <tr key={i}><td>{resolveK03PzNoFromRow(r) || '—'}</td><td>{r.source_lot_no || '—'}</td><td>{r.pz_date}</td><td>{r.supplier || resolveK03PzNoFromRow(r) || '—'}</td><td>{Number(r.qty || 0).toLocaleString('pl-PL')}</td></tr>)}</tbody>
         </table></div>}
@@ -7480,21 +7559,81 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
-  async function loadImportPreview(fileId) {
+  async function loadImportPreview(fileId, fileName = '') {
     if (!supabase || !fileId) return
+    setImportPreviewModal({ fileId, fileName, loading: true, operations: [], error: '' })
+    setImportOpEditDates({})
     try {
-      const { data, error } = await supabase
-        .from('operations')
-        .select('id, operation_type, operation_date, document_no, invoice_no, notes, operation_items(qty, direction, raw_product_name)')
-        .eq('imported_file_id', fileId)
-        .order('operation_date', { ascending: false })
-        .limit(80)
-      if (error) throw error
-      setImportPreview(data || [])
-      setMessage(`Wczytano podgląd importu: ${(data || []).length} dokumentów.`)
+      const operations = await fetchImportPreviewOperations(supabase, fileId)
+      setImportPreview(operations)
+      setImportPreviewModal({ fileId, fileName, loading: false, operations, error: '' })
+      if (!operations.length) {
+        setMessage('Ten import nie ma zapisanych dokumentów w bazie (możliwy przerwany zapis).')
+      }
     } catch (err) {
-      setMessage(`Błąd podglądu importu: ${err.message}`)
+      setImportPreviewModal({ fileId, fileName, loading: false, operations: [], error: err?.message || String(err) })
+      setMessage(`Błąd podglądu importu: ${err?.message || err}`)
     }
+  }
+
+  async function saveImportOperationDate(op) {
+    if (!supabase || !op?.id) return
+    const newDate = importOpEditDates[op.id] ?? String(op.operation_date || '').slice(0, 10)
+    const oldDate = String(op.operation_date || '').slice(0, 10)
+    if (!newDate || newDate === oldDate) {
+      setMessage('Data dokumentu bez zmian.')
+      return
+    }
+    const label = op.operation_type === 'przyjecie' ? 'PZ' : 'WZ'
+    if (!window.confirm(`Zmienić datę ${label} ${op.document_no} z ${oldDate || '—'} na ${newDate}?`)) return
+    setImportOpDateSaving(op.id)
+    try {
+      await saveWarehouseOperationDate(supabase, op.id, newDate, { operationType: op.operation_type })
+      setMessage(`Zaktualizowano datę ${label} ${op.document_no}.`)
+      await loadImportPreview(importPreviewModal?.fileId, importPreviewModal?.fileName)
+      invalidateFifoBaseCache()
+    } catch (err) {
+      setMessage(`Błąd zapisu daty: ${err?.message || err}`)
+    } finally {
+      setImportOpDateSaving(null)
+    }
+  }
+
+  function renderImportPreviewModal() {
+    if (!importPreviewModal) return null
+    const { fileName, loading, operations, error } = importPreviewModal
+    const filtered = operations || []
+    return (
+      <div className="modal-backdrop" onClick={() => setImportPreviewModal(null)}>
+        <div className="haccp-modal import-preview-modal" onClick={e => e.stopPropagation()}>
+          <h3>Podgląd importu: {fileName || 'plik Excel'}</h3>
+          <p className="hint">{loading ? 'Wczytywanie dokumentów…' : `${filtered.length} dokumentów w bazie. Możesz ręcznie poprawić datę PZ lub WZ.`}</p>
+          {error && <p className="status danger">{error}</p>}
+          {!loading && filtered.length > 0 && (
+            <div className="table-wrap small import-preview-table">
+              <table>
+                <thead><tr><th>Typ</th><th>Data</th><th>Dokument</th><th>FV</th><th>Pozycje</th><th>Akcja</th></tr></thead>
+                <tbody>{filtered.map(op => {
+                  const editDate = importOpEditDates[op.id] ?? String(op.operation_date || '').slice(0, 10)
+                  const typeLabel = op.operation_type === 'przyjecie' ? 'PZ' : (op.operation_type === 'sprzedaz' ? 'WZ' : op.operation_type)
+                  return (
+                    <tr key={op.id}>
+                      <td>{typeLabel}</td>
+                      <td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setImportOpEditDates(prev => ({ ...prev, [op.id]: e.target.value }))} /></td>
+                      <td><b>{op.document_no}</b></td>
+                      <td>{op.invoice_no || '—'}</td>
+                      <td className="hint">{(op.operation_items || []).map(i => `${i.raw_product_name || ''}: ${Number(i.qty || 0).toLocaleString('pl-PL')} kg`).join(' · ')}</td>
+                      <td><button type="button" className="mini secondary" disabled={importOpDateSaving === op.id} onClick={() => saveImportOperationDate(op)}>{importOpDateSaving === op.id ? '…' : 'Zapisz datę'}</button></td>
+                    </tr>
+                  )
+                })}</tbody>
+              </table>
+            </div>
+          )}
+          <div className="actions"><button type="button" className="secondary" onClick={() => setImportPreviewModal(null)}>Zamknij</button></div>
+        </div>
+      </div>
+    )
   }
 
   async function runImportDataCleanup() {
@@ -8579,15 +8718,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
           <td>{f.rows_count || f.row_count || '-'}</td>
           <td><span className="pill">{f.status || 'wczytany'}</span></td>
-          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
+          <td className="row-actions"><button className="secondary mini" onClick={() => loadImportPreview(f.id, f.filename || f.file_name)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
         </tr>)}</tbody>
       </table></div>}
-      {importPreview.length > 0 && <><h3>Podgląd pozycji z importu</h3><div className="table-wrap small"><table>
-        <thead><tr><th>Typ</th><th>Data</th><th>Dokument</th><th>FV</th><th>Pozycje</th></tr></thead>
-        <tbody>{importPreview.map(op => <tr key={op.id}>
-          <td>{op.operation_type}</td><td>{op.operation_date}</td><td>{op.document_no}</td><td>{op.invoice_no}</td><td>{(op.operation_items || []).map(i => `${i.raw_product_name || ''}: ${Number(i.qty || 0).toLocaleString('pl-PL')} kg`).join(' | ')}</td>
-        </tr>)}</tbody>
-      </table></div></>}
+      {importPreview.length > 0 && !importPreviewModal && <><h3>Ostatni podgląd ({importPreview.length} dokumentów)</h3><p className="hint">Kliknij „Podgląd” przy pliku, aby otworzyć okno z edycją dat PZ/WZ.</p></>}
     </section>
     </>}
 
@@ -9203,6 +9337,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </div>
     {selectedHaccpDoc && renderHaccpPreview(selectedHaccpDoc)}
     {renderK03WzModal()}
+    {renderImportPreviewModal()}
     {renderK03ActionDialog()}
     </>}
 
