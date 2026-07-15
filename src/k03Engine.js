@@ -347,11 +347,11 @@ function normalizeText(value) {
     .replace(/\s+/g, ' ')
 }
 
-/** Porzeczka kolorowa (Excel/import) = porzeczka czerwona. Nie mylić z czarną. */
+/** Porzeczka kolor / kolorowa (Excel/import) = porzeczka czerwona. Nie mylić z czarną. */
 export function isPorzeczkaCzerwonaAlias(productName = '') {
   const text = normalizeText(productName)
   if (/porzeczka\s+czarna/.test(text)) return false
-  return /porzeczka\s+(czerwona|kolorowa)/.test(text)
+  return /porzeczka\s+(czerwona|kolorowa|kolor)\b/.test(text)
 }
 
 /** Nazwa kanoniczna produktu – synonimy z importu mapowane na nazwy w systemie. */
@@ -368,8 +368,8 @@ export function canonicalProductName(productName = '') {
   if (/^mex$/i.test(raw.trim()) || /malina\s+extra/.test(text)) return 'Malina extra'
   if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'Porzeczka czarna pulpa'
   if (/porzeczka\s+czarna/.test(text)) return raw
-  if (/porzeczka\s+kolorowa\s+pulpa/.test(text)) return 'Porzeczka czerwona pulpa'
-  if (/porzeczka\s+kolorowa/.test(text)) return 'Porzeczka czerwona'
+  if (/porzeczka\s+kolor(\owa)?\s+pulpa/.test(text)) return 'Porzeczka czerwona pulpa'
+  if (/porzeczka\s+kolor(\owa)?/.test(text)) return 'Porzeczka czerwona'
   return raw
 }
 
@@ -410,6 +410,7 @@ export const FIFO_SALE_SOURCE_KEYS = {
   'porzeczka czarna': ['porzeczka czarna'],
   'porzeczka czerwona': ['porzeczka czerwona'],
   'porzeczka kolorowa': ['porzeczka czerwona'],
+  'porzeczka kolor': ['porzeczka czerwona'],
   wisnia: ['wisnia'],
   aronia: ['aronia'],
   sliwka: ['sliwka'],
@@ -424,7 +425,7 @@ function fifoSourceFamily(variantKey = '') {
   if (variantKey === 'truskawka' || variantKey === 'truskawka z szypulka') return 'truskawka'
   if (/^malina/.test(variantKey)) return 'malina'
   if (/porzeczka czarna/.test(variantKey)) return 'porzeczka_czarna'
-  if (variantKey === 'porzeczka kolorowa' || variantKey === 'porzeczka czerwona' || /porzeczka czerwona/.test(variantKey)) return 'porzeczka_czerwona'
+  if (variantKey === 'porzeczka kolorowa' || variantKey === 'porzeczka kolor' || variantKey === 'porzeczka czerwona' || /porzeczka czerwona/.test(variantKey)) return 'porzeczka_czerwona'
   if (/jablko/.test(variantKey)) return 'jablko'
   if (variantKey === 'wisnia' || variantKey === 'aronia' || variantKey === 'sliwka') return variantKey
   return null
@@ -476,6 +477,7 @@ const FIFO_SOURCE_PICKERS = {
     defaultKeysForVariant: {
       'porzeczka czerwona': ['porzeczka czerwona'],
       'porzeczka kolorowa': ['porzeczka czerwona'],
+      'porzeczka kolor': ['porzeczka czerwona'],
       'porzeczka czerwona pulpa': ['porzeczka czerwona']
     }
   },
@@ -547,8 +549,8 @@ export function normalizeFifoProductKey(productName = '', product = null, lotGro
 
   if (/porzeczka\s+czarna\s+pulpa/.test(text)) return 'porzeczka czarna pulpa'
   if (/porzeczka\s+czarna/.test(text)) return 'porzeczka czarna'
-  if (/porzeczka\s+(czerwona|kolorowa)\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
-  if (/porzeczka\s+(czerwona|kolorowa)/.test(text)) return 'porzeczka czerwona'
+  if (/porzeczka\s+(czerwona|kolorowa|kolor)\s+pulpa/.test(text)) return 'porzeczka czerwona pulpa'
+  if (/porzeczka\s+(czerwona|kolorowa|kolor)\b/.test(text)) return 'porzeczka czerwona'
 
   if (/wisnia\s+(swieza\s*)?pw\b/.test(text)) return 'wisnia pw'
   if (/wisnia\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'wisnia i') return 'wisnia klasa i'
@@ -739,6 +741,17 @@ export function fifoLotMatchesMatchSpec(lot, productMap, matchSpec) {
     if (matchSpec.sourceKeys.has('malina pw') && lotKey === 'malina pw') return true
     if (matchSpec.sourceKeys.has('malina klasa i') && lotKey === 'malina klasa i') return true
     if (matchSpec.sourceKeys.has('malina extra') && lotKey === 'malina extra') return true
+    if (matchSpec.sourceKeys.has('porzeczka czerwona') && (
+      lotKey === 'porzeczka czerwona' ||
+      lotKey === 'porzeczka kolorowa' ||
+      lotKey === 'porzeczka kolor' ||
+      group === 'porzeczka_czerwona'
+    )) return true
+    if (matchSpec.sourceKeys.has('porzeczka czarna') && (
+      lotKey === 'porzeczka czarna' ||
+      lotKey === 'porzeczka czarna pulpa' ||
+      group === 'porzeczka_czarna'
+    )) return true
     return false
   }
   return matchSpec?.sourceKeys?.has(group)

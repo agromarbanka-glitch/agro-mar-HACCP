@@ -1213,6 +1213,50 @@ export async function repairWzDatesFromImportGroups(client, groups, { onProgress
   return { wz_dates_fixed: fixed }
 }
 
+/** Poprawia daty PZ i partii wg daty z Excela (kolumna „Data wystawienia”). */
+export async function repairPzDatesFromImportGroups(client, groups, { onProgress } = {}) {
+  if (!client || !groups?.length) return { pz_dates_fixed: 0 }
+  onProgress?.('Korygowanie dat PZ z Excela…')
+  let fixed = 0
+  const seen = new Set()
+
+  for (const group of groups) {
+    if (group?.operation !== 'przyjecie') continue
+    const docNo = normalizeDocumentNo(group?.documentNo)
+    if (!docNo || seen.has(docNo)) continue
+    seen.add(docNo)
+
+    const correct = String(group?.issueDate || '').slice(0, 10)
+    if (!correct || correct === '0000-01-01') continue
+
+    const { data: ops, error } = await withImportRetry(() =>
+      client.from('operations').select('id, operation_date').eq('document_no', docNo)
+    )
+    if (error) throw error
+
+    for (const op of ops || []) {
+      const current = String(op.operation_date || '').slice(0, 10)
+      if (current !== correct) {
+        await withImportRetry(() =>
+          client.from('operations').update({ operation_date: correct }).eq('id', op.id)
+        )
+        await withImportRetry(() =>
+          client
+            .from('haccp_documents')
+            .update({ document_date: correct })
+            .eq('operation_id', op.id)
+            .eq('document_type', 'K01')
+        )
+        fixed += 1
+      }
+      await withImportRetry(() =>
+        client.from('lots').update({ production_date: correct }).eq('source_operation_id', op.id)
+      )
+    }
+  }
+  return { pz_dates_fixed: fixed }
+}
+
 export async function repairDatesForImportFile(client, importedFileId, { onProgress } = {}) {
   if (!client || !importedFileId) return { dates_fixed: 0 }
   onProgress?.('Korygowanie dat PZ z tego importu…')
@@ -1264,12 +1308,16 @@ export async function repairAfterImportSave(client, importedFileId, { onProgress
   const wzRepair = importGroups?.length
     ? await repairWzDatesFromImportGroups(client, importGroups, { onProgress })
     : { wz_dates_fixed: 0 }
+  const pzRepair = importGroups?.length
+    ? await repairPzDatesFromImportGroups(client, importGroups, { onProgress })
+    : { pz_dates_fixed: 0 }
   const dateRepair = await repairDatesForImportFile(client, importedFileId, { onProgress })
   onProgress?.('Sprawdzanie zduplikowanych kart K01…')
   const k01Removed = await removeDuplicateK01Documents(client, { onProgress })
   return {
-    dates_fixed: dateRepair.dates_fixed || 0,
+    dates_fixed: (dateRepair.dates_fixed || 0) + (pzRepair.pz_dates_fixed || 0),
     wz_dates_fixed: wzRepair.wz_dates_fixed || 0,
+    pz_dates_fixed: pzRepair.pz_dates_fixed || 0,
     k01_removed: k01Removed,
     items_removed: 0,
     lots_removed: 0
@@ -1397,6 +1445,9 @@ export async function repairWarehouseImportDuplicates(client, { onProgress, impo
   const wzRepair = importGroups?.length
     ? await repairWzDatesFromImportGroups(client, importGroups, { onProgress })
     : { wz_dates_fixed: 0 }
+  const pzRepair = importGroups?.length
+    ? await repairPzDatesFromImportGroups(client, importGroups, { onProgress })
+    : { pz_dates_fixed: 0 }
   const dateRepair = importedFileId
     ? await repairDatesForImportFile(client, importedFileId, { onProgress })
     : await repairDatesFromDocumentNumbers(client, { onProgress })
@@ -1406,8 +1457,9 @@ export async function repairWarehouseImportDuplicates(client, { onProgress, impo
     items_removed: 0,
     lots_removed: 0,
     k01_removed: 0,
-    dates_fixed: dateRepair.dates_fixed || 0,
+    dates_fixed: (dateRepair.dates_fixed || 0) + (pzRepair.pz_dates_fixed || 0),
     wz_dates_fixed: wzRepair.wz_dates_fixed || 0,
+    pz_dates_fixed: pzRepair.pz_dates_fixed || 0,
     mode: 'client'
   }
   try {
