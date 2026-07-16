@@ -11,7 +11,7 @@
  */
 export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 
-import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases } from './excelImport.js'
+import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases, monthYearFromDocumentNo } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName } from './k03Engine.js'
 import { invalidateFifoBaseCache } from './fifoEngine.js'
 import { k01LineDedupeKey } from './k01Engine.js'
@@ -1360,6 +1360,177 @@ export function summarizeOperationsByProduct(operations, deps = {}) {
     }
   }
   return summarizeImportRowsByProduct(rows, deps)
+}
+
+const PL_MONTH_HINTS = {
+  styczen: 1, sty: 1, stycznia: 1,
+  luty: 2, lut: 2, lutego: 2,
+  marzec: 3, mar: 3, marca: 3,
+  kwiecien: 4, kwi: 4, kwietnia: 4,
+  maj: 5, maja: 5,
+  czerwiec: 6, cze: 6, czerwca: 6,
+  lipiec: 7, lip: 7, lipca: 7,
+  sierpien: 8, sie: 8, sierpnia: 8,
+  wrzesien: 9, wrz: 9, wrzesnia: 9,
+  pazdziernik: 10, paz: 10, pazdziernika: 10,
+  listopad: 11, lis: 11, listopada: 11,
+  grudzien: 12, gru: 12, grudnia: 12
+}
+
+const PL_MONTH_LABELS = ['', 'styczeń', 'luty', 'marzec', 'kwiecień', 'maj', 'czerwiec', 'lipiec', 'sierpień', 'wrzesień', 'październik', 'listopad', 'grudzień']
+
+function monthYearKey(month, year) {
+  if (!month || !year) return ''
+  return `${year}-${String(month).padStart(2, '0')}`
+}
+
+function formatPlMonthYear(month, year) {
+  if (!month || !year) return '—'
+  const label = PL_MONTH_LABELS[month] || String(month)
+  return `${label} ${year}`
+}
+
+function inferYearFromImportGroups(groups = []) {
+  const counts = new Map()
+  for (const g of groups) {
+    const y = String(g.issueDate || '').slice(0, 4)
+    if (/^\d{4}$/.test(y)) counts.set(Number(y), (counts.get(Number(y)) || 0) + 1)
+  }
+  let best = null
+  let bestN = 0
+  for (const [year, n] of counts) {
+    if (n > bestN) { bestN = n; best = year }
+  }
+  return best || new Date().getFullYear()
+}
+
+function inferDominantMonthFromGroups(groups = []) {
+  const counts = new Map()
+  for (const g of groups) {
+    const key = String(g.issueDate || '').slice(0, 7)
+    if (key.length !== 7) continue
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  let bestKey = null
+  let bestN = 0
+  let total = 0
+  for (const [key, n] of counts) {
+    total += n
+    if (n > bestN) { bestN = n; bestKey = key }
+  }
+  if (!bestKey || bestN < 3) return null
+  if (total >= 5 && bestN / total < 0.55) return null
+  const [year, month] = bestKey.split('-').map(Number)
+  return { month, year, source: 'dominant_dates', share: bestN / total }
+}
+
+/** Miesiąc pliku importu — z nazwy pliku lub dominujących dat w Excelu. */
+export function inferImportFileMonthHint(fileName = '', groups = []) {
+  const name = String(fileName || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')
+  for (const [token, month] of Object.entries(PL_MONTH_HINTS)) {
+    if (!name.includes(token)) continue
+    const yearMatch = name.match(/20\d{2}/)
+    const year = yearMatch ? Number(yearMatch[0]) : inferYearFromImportGroups(groups)
+    return { month, year, source: 'filename' }
+  }
+  const mmyy = name.match(/(?:^|[^\d])(0?[1-9]|1[0-2])[\s._-]+(20\d{2})(?:[^\d]|$)/)
+  if (mmyy) {
+    return { month: Number(mmyy[1]), year: Number(mmyy[2]), source: 'filename' }
+  }
+  const yymm = name.match(/(?:^|[^\d])(20\d{2})[\s._-]+(0?[1-9]|1[0-2])(?:[^\d]|$)/)
+  if (yymm) {
+    return { month: Number(yymm[2]), year: Number(yymm[1]), source: 'filename' }
+  }
+  return inferDominantMonthFromGroups(groups)
+}
+
+/**
+ * Ostrzeżenia gdy miesiąc w numerze dokumentu (np. /07/ lub PZ/…/09/2026)
+ * nie zgadza się z datą w Excelu lub z miesiącem pliku importu.
+ */
+export function auditImportDocumentMonthConsistency(groups, options = {}) {
+  const result = {
+    fileMonthHint: options.fileMonthHint || null,
+    warnings: [],
+    summary: ''
+  }
+  if (!groups?.length) {
+    result.summary = 'Brak dokumentów do sprawdzenia.'
+    return result
+  }
+
+  const fileHint = result.fileMonthHint || inferImportFileMonthHint(options.fileName || '', groups)
+  result.fileMonthHint = fileHint || null
+  const fileMonthKey = fileHint ? monthYearKey(fileHint.month, fileHint.year) : ''
+  const seen = new Set()
+
+  for (const group of groups) {
+    const docNo = normalizeDocumentNo(group.documentNo)
+    const docMy = monthYearFromDocumentNo(docNo)
+    if (!docMy) continue
+
+    const issueDate = String(group.issueDate || '').slice(0, 10)
+    const docMonthKey = monthYearKey(docMy.month, docMy.year)
+    const excelMonthKey = issueDate.length >= 7 ? issueDate.slice(0, 7) : ''
+
+    if (excelMonthKey && excelMonthKey !== docMonthKey) {
+      const key = `${docNo}|excel`
+      if (!seen.has(key)) {
+        seen.add(key)
+        result.warnings.push({
+          type: 'doc_no_vs_excel_date',
+          documentNo: docNo,
+          operation: group.operation,
+          issueDate,
+          docMonth: docMonthKey,
+          excelMonth: excelMonthKey,
+          message: `Nr ${docNo}: w numerze ${formatPlMonthYear(docMy.month, docMy.year)}, w Excelu data ${issueDate} (${formatPlMonthYear(Number(excelMonthKey.slice(5)), Number(excelMonthKey.slice(0, 4)))}) — możliwa korekta faktury, zmiana daty lub błędny zapis.`
+        })
+      }
+    }
+
+    if (fileMonthKey && fileMonthKey !== docMonthKey) {
+      const key = `${docNo}|file`
+      if (!seen.has(key)) {
+        seen.add(key)
+        result.warnings.push({
+          type: 'doc_no_vs_import_file',
+          documentNo: docNo,
+          operation: group.operation,
+          issueDate,
+          docMonth: docMonthKey,
+          fileMonth: fileMonthKey,
+          message: `Nr ${docNo}: miesiąc w numerze (${formatPlMonthYear(docMy.month, docMy.year)}) ≠ miesiąc importu (${formatPlMonthYear(fileHint.month, fileHint.year)}) — dokument może nie należeć do tego pliku lub pierwotny zapis był błędny.`
+        })
+      }
+    }
+  }
+
+  if (!result.warnings.length) {
+    result.summary = fileHint
+      ? `Miesiące w numerach dokumentów zgadzają się z Excelem i importem (${formatPlMonthYear(fileHint.month, fileHint.year)}).`
+      : 'Miesiące w numerach dokumentów zgadzają się z datami w Excelu.'
+  } else {
+    const excelN = result.warnings.filter(w => w.type === 'doc_no_vs_excel_date').length
+    const fileN = result.warnings.filter(w => w.type === 'doc_no_vs_import_file').length
+    const parts = []
+    if (excelN) parts.push(`${excelN} nr vs data Excel`)
+    if (fileN) parts.push(`${fileN} nr vs miesiąc pliku`)
+    result.summary = `Wykryto ${result.warnings.length} możliwych nieprawidłowości (${parts.join(', ')}).`
+  }
+  return result
+}
+
+export function formatImportMonthWarnings(audit) {
+  if (!audit) return ''
+  const lines = [audit.summary]
+  for (const w of (audit.warnings || []).slice(0, 12)) {
+    lines.push(w.message)
+  }
+  if ((audit.warnings?.length || 0) > 12) {
+    lines.push(`… i ${audit.warnings.length - 12} kolejnych — patrz tabelę poniżej.`)
+  }
+  return lines.join(' ')
 }
 
 /**

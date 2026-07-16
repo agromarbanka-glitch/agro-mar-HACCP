@@ -355,6 +355,49 @@ export function inferDateFromDocumentNo(documentNo) {
   return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
 }
 
+/** Miesiąc i rok z numeru dokumentu (WZ/009/07/2026 → lipiec 2026, PZ/022/30/06/2026 → czerwiec 2026). */
+export function monthYearFromDocumentNo(documentNo) {
+  const norm = normalizeDocumentNo(documentNo)
+  if (!norm) return null
+
+  if (isWzMonthYearDocument(norm)) {
+    const m = norm.match(/^WZ\/\d+\/(\d{1,2})\/(\d{4})$/i)
+    if (m) {
+      const month = Number(m[1])
+      const year = Number(m[2])
+      if (month >= 1 && month <= 12 && year >= 2000 && year <= 2100) {
+        return { month, year, kind: 'month_year' }
+      }
+    }
+    return null
+  }
+
+  if (documentNoHasExplicitDate(norm)) {
+    const full = norm.match(/\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/)
+    if (full) {
+      const day = Number(full[1])
+      const month = Number(full[2])
+      const year = Number(full[3])
+      if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2000 && year <= 2100) {
+        return { month, year, day, kind: 'explicit_date' }
+      }
+    }
+    return null
+  }
+
+  if (documentNoHasMonthYear(norm)) {
+    const m = norm.match(/\/(\d{1,2})\/(\d{4})$/)
+    if (m) {
+      const month = Number(m[1])
+      const year = Number(m[2])
+      if (month >= 1 && month <= 12 && year >= 2000 && year <= 2100) {
+        return { month, year, kind: 'month_year' }
+      }
+    }
+  }
+  return null
+}
+
 /** Czy numer ma miesiąc/rok na końcu (np. WZ/009/07/2026), bez dnia. */
 export function documentNoHasMonthYear(documentNo) {
   const norm = normalizeDocumentNo(documentNo)

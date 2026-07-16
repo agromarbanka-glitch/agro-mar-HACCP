@@ -5,7 +5,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -325,6 +325,7 @@ function App() {
   const [importDateRepairing, setImportDateRepairing] = useState(false)
   const [importWzDateRepairing, setImportWzDateRepairing] = useState(false)
   const [importAudit, setImportAudit] = useState(null)
+  const [importMonthAudit, setImportMonthAudit] = useState(null)
   const [importDuplicates, setImportDuplicates] = useState([])
   const [importNewDocCount, setImportNewDocCount] = useState(0)
   const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
@@ -6844,6 +6845,7 @@ function App() {
     setImportDuplicateDetails(new Map())
     setImportOrphanCount(0)
     setImportAudit(null)
+    setImportMonthAudit(null)
     importCheckCacheRef.current = null
     try {
       const { rows: parsed, skippedMmCount, headerDocRows = 0, rowsWithoutDoc = 0 } = await readAgromarExcel(file, { includeUnitPrice: false })
@@ -6875,6 +6877,8 @@ function App() {
         const groups = groupImportRows(classified)
         const rowsInGroups = groups.reduce((s, g) => s + (g.items?.length || 0), 0)
         const fileDateRange = importGroupDateRange(groups)
+        const monthAudit = auditImportDocumentMonthConsistency(groups, { fileName: file.name })
+        setImportMonthAudit(monthAudit)
         const { keys, details, orphanCount } = await getExistingOperationsForImport(supabase, groups)
         const { duplicates, fresh } = splitImportGroupsByExisting(groups, keys)
         setImportDuplicates(duplicates)
@@ -6905,6 +6909,11 @@ function App() {
 
         loadMsg += ` W pliku: ${groups.length} dokumentów (${rowsInGroups} wierszy operacyjnych).`
         if (fileDateRange) loadMsg += ` Zakres dat w całym pliku: ${fileDateRange}.`
+        if (monthAudit?.warnings?.length) {
+          loadMsg += ` UWAGA — miesiąc w numerze vs data/plik: ${formatImportMonthWarnings(monthAudit)}`
+        } else if (monthAudit?.fileMonthHint) {
+          loadMsg += ` Spójność nr/data: OK (import ${monthAudit.fileMonthHint.month}/${monthAudit.fileMonthHint.year}).`
+        }
 
         if (orphanCount > 0) {
           loadMsg += ` Wykryto ${orphanCount} operacji z usuniętych importów – zostaną wyczyszczone przed zapisem.`
@@ -8178,6 +8187,48 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     )
   }
 
+  function renderImportMonthWarningsPanel() {
+    if (!importMonthAudit) return null
+    const warnings = importMonthAudit.warnings || []
+    const ok = warnings.length === 0
+    const hint = importMonthAudit.fileMonthHint
+    return (
+      <div className={`import-audit-box ${ok ? 'audit-ok' : 'audit-warn'}`}>
+        <h3>{ok ? '✓ Spójność miesiąca w numerze dokumentu — OK' : '⚠ Miesiąc w numerze vs data Excel / plik importu'}</h3>
+        <p className="hint" style={{ margin: '0 0 8px' }}>{importMonthAudit.summary}</p>
+        {hint && (
+          <p className="hint" style={{ margin: '0 0 8px' }}>
+            Rozpoznany miesiąc importu: <b>{hint.month}/{hint.year}</b>
+            {hint.source === 'filename' ? ' (z nazwy pliku)' : hint.source === 'dominant_dates' ? ' (z dominujących dat w Excelu)' : ''}.
+          </p>
+        )}
+        {!ok && (
+          <>
+            <p className="hint" style={{ margin: '0 0 8px' }}>
+              Np. WZ/009/07/2026 z datą 30.06 może oznaczać korektę faktury (data przesunięta na 01.07).
+              PZ/001/09/2026 w imporcie sierpnia sugeruje błędny pierwotny zapis — sprawdź przed zapisem.
+            </p>
+            <div className="table-wrap small" style={{ marginTop: 8 }}>
+              <table>
+                <thead><tr><th>Nr dokumentu</th><th>Operacja</th><th>Data Excel</th><th>Miesiąc w nr</th><th>Problem</th></tr></thead>
+                <tbody>{warnings.slice(0, 30).map((w, i) => (
+                  <tr key={`${w.documentNo}-${w.type}-${i}`}>
+                    <td><b>{w.documentNo}</b></td>
+                    <td>{w.operation === 'przyjecie' ? 'PZ' : w.operation === 'sprzedaz' ? 'WZ/FV' : w.operation}</td>
+                    <td>{w.issueDate || '—'}</td>
+                    <td>{w.docMonth?.slice(5)}/{w.docMonth?.slice(0, 4)}</td>
+                    <td className="hint">{w.type === 'doc_no_vs_excel_date' ? 'Nr ≠ data Excel' : 'Nr ≠ miesiąc pliku'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            {warnings.length > 30 && <p className="hint">Pokazano 30 z {warnings.length} ostrzeżeń.</p>}
+          </>
+        )}
+      </div>
+    )
+  }
+
   function renderImportAuditPanel() {
     if (!importAudit) return null
     const hasIssues = (importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length || importAudit.productGaps?.length || importAudit.hiddenMatches?.length)
@@ -9381,6 +9432,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           title: 'Ile kg na PZ i WZ — wczytany plik Excel',
           subtitle: fileName || undefined
         })}
+        {renderImportMonthWarningsPanel()}
         {renderImportAuditPanel()}
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
