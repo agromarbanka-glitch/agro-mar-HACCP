@@ -1784,22 +1784,20 @@ export async function repairDatesFromDocumentNumbers(client, { onProgress } = {}
  * Audyt: PZ, gdzie data w bazie (operation_date) ≠ data z numeru dokumentu.
  * Zwraca konkretną listę — bez domysłów.
  */
-export async function auditPzDateMismatches(client, { onProgress, maxRows = 500 } = {}) {
+export async function auditPzDateMismatches(client, { onProgress, maxRows = 200, maxScanned = 20000 } = {}) {
   if (!client) throw new Error('Brak Supabase.')
-  onProgress?.('Sprawdzanie zgodności dat PZ z numerami dokumentów…')
+  onProgress?.({ phase: 'start', scanned: 0, mismatches: 0 })
   const mismatches = []
   let scanned = 0
   let offset = 0
-  const pageSize = 400
-  while (mismatches.length < maxRows) {
-    const { data: ops, error } = await withImportRetry(() =>
-      client
-        .from('operations')
-        .select('id, document_no, operation_date')
-        .ilike('document_no', 'PZ/%')
-        .order('id', { ascending: true })
-        .range(offset, offset + pageSize - 1)
-    )
+  const pageSize = 500
+  while (mismatches.length < maxRows && scanned < maxScanned) {
+    const { data: ops, error } = await client
+      .from('operations')
+      .select('id, document_no, operation_date')
+      .ilike('document_no', 'PZ/%')
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1)
     if (error) throw error
     if (!ops?.length) break
 
@@ -1809,7 +1807,7 @@ export async function auditPzDateMismatches(client, { onProgress, maxRows = 500 
       if (!pzOperationDateNeedsDocRepair(op.document_no, op.operation_date, correct)) continue
       mismatches.push({
         operation_id: op.id,
-        document_no: op.document_no,
+        document_no: String(op.document_no || ''),
         db_date: String(op.operation_date || '').slice(0, 10),
         date_from_document_no: correct,
         fifo_uses_date: correct || String(op.operation_date || '').slice(0, 10)
@@ -1817,10 +1815,38 @@ export async function auditPzDateMismatches(client, { onProgress, maxRows = 500 
       if (mismatches.length >= maxRows) break
     }
 
+    onProgress?.({ phase: 'running', scanned, mismatches: mismatches.length })
     if (ops.length < pageSize) break
     offset += pageSize
   }
-  return { scanned, mismatch_count: mismatches.length, mismatches }
+  return {
+    scanned,
+    mismatch_count: mismatches.length,
+    mismatches,
+    truncated: scanned >= maxScanned && mismatches.length < maxRows
+  }
+}
+
+/** Stronicowane pobieranie widoku pz_fifo_overview (Supabase max 1000 wierszy / zapytanie). */
+export async function fetchAllPzFifoOverviewRows(client, { onProgress, pageSize = 1000 } = {}) {
+  if (!client) throw new Error('Brak Supabase.')
+  const all = []
+  let offset = 0
+  while (true) {
+    onProgress?.({ loaded: all.length, offset })
+    const { data, error } = await client
+      .from('pz_fifo_overview')
+      .select('*')
+      .order('production_date', { ascending: true })
+      .order('created_at', { ascending: true })
+      .range(offset, offset + pageSize - 1)
+    if (error) throw error
+    if (!data?.length) break
+    all.push(...data)
+    if (data.length < pageSize) break
+    offset += pageSize
+  }
+  return all
 }
 
 /** Ujednolica production_date partii PZ z datą operacji źródłowej (po ręcznej korekcie dat). */
