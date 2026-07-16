@@ -1064,7 +1064,7 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
   })
   let excludedFuturePzRows = []
   let rawRowsBase = incomingRows
-  if (cutoffDate && cutoffDate !== '0000-01-01') {
+  if (options.filterPzByCutoffDate === true && cutoffDate && cutoffDate !== '0000-01-01') {
     rawRowsBase = []
     for (const r of incomingRows) {
       const pzDate = String(r.pz_date || '').slice(0, 10)

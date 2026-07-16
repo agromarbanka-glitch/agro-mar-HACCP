@@ -381,47 +381,34 @@ function validatePrzerobDate(mode, przerobDate, wzDate) {
   return null
 }
 
-function formatPostCutoffStockHint(remainingKg, cutoffDate, wzDate) {
-  if (Number(remainingKg || 0) <= 0.5) return ''
-  const wzNote = wzDate && cutoffDate !== wzDate ? ` (data WZ: ${wzDate})` : ''
-  return ` W magazynie jest ${Number(remainingKg).toLocaleString('pl-PL')} kg PZ z datą po ${cutoffDate}${wzNote} – nie wchodzą do tego WZ. Jeśli towar był na magazynie wcześniej, popraw datę przyjęcia w zakładce PZ/FIFO (nie datę przerobu).`
-}
-
 function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
   if (!diag) return ''
   let note = ''
+  const physicalFree = Number(diag.physicalRemainingKg ?? diag.remainingWithinCutoffAfterReserveKg ?? 0)
   if (Number(diag.lotCountInGroup || 0) === 0) {
-    note += ' Brak partii PZ dla tej grupy asortymentowej w bazie – sprawdź import (czy PZ truskawki zostały zapisane).'
-  } else if (Number(diag.purchasedTotalKg || 0) > 0 && Number(diag.purchasedWithinCutoffKg || 0) <= 0) {
-    note += ` W bazie jest ${Number(diag.purchasedTotalKg).toLocaleString('pl-PL')} kg PZ (${diag.lotCountInGroup} partii), ale żadna partia nie ma daty ≤ ${cutoffDate}.`
+    note += ' Brak partii PZ dla tej grupy asortymentowej w bazie – sprawdź import.'
   }
   if (Number(diag.lotsMissingDateKg || 0) > 0.5) {
-    note += ` ${Number(diag.lotsMissingDateKg).toLocaleString('pl-PL')} kg PZ bez poprawnej daty przyjęcia – uzupełnij datę w PZ/FIFO.`
-  }
-  if (Number(diag.remainingAfterCutoffKg || 0) > 0.5) {
-    note += formatPostCutoffStockHint(diag.remainingAfterCutoffKg, cutoffDate, wzDate)
+    note += ` ${Number(diag.lotsMissingDateKg).toLocaleString('pl-PL')} kg partii bez daty PZ (opcjonalnie popraw w PZ/FIFO).`
   }
   if ((diag.priorUnallocatedWzCount || 0) > 0) {
-    note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je od najstarszej daty (kolejność FIFO).`
+    note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ/FV (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je od najstarszej daty.`
   }
   if (Number(diag.allocatedByOtherWzKg || 0) > 0.5) {
-    note += ` Inne WZ mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z tej puli (symulacja FIFO).`
+    note += ` Inne WZ/FV mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z magazynu (symulacja FIFO).`
   }
   const soldBefore = Number(diag.soldBeforeTargetKg || 0)
-  const pzCutoff = Number(diag.purchasedWithinCutoffKg || 0)
+  const pzTotal = Number(diag.purchasedTotalKg || 0)
   const targetQty = Number(diag.targetSaleQty || 0)
-  if (soldBefore > 0 && pzCutoff > 0 && soldBefore + targetQty > pzCutoff + 0.5) {
-    note += ` Do ${cutoffDate} wcześniejsza sprzedaż tej grupy: ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg, a PZ ≤ ${cutoffDate} to ${pzCutoff.toLocaleString('pl-PL')} kg.`
-  }
-  if (Number(diag.remainingWithinCutoffAfterReserveKg || 0) <= 0.5 &&
-      Number(diag.purchasedWithinCutoffKg || 0) > 0 &&
-      (diag.priorUnallocatedWzCount || 0) > 0) {
+  if (soldBefore > 0 && pzTotal > 0 && soldBefore + targetQty > pzTotal + 0.5) {
+    note += ` WZ/FV tej klasy: wcześniejsze ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg, a partie PZ łącznie ${pzTotal.toLocaleString('pl-PL')} kg.`
+  } else if (physicalFree <= 0.5 && pzTotal > 0 && (diag.priorUnallocatedWzCount || 0) > 0) {
     note += ' Rozlicz wcześniejsze WZ przed kolejnymi – wtedy kg będą pobierane po kolei z magazynu.'
   }
   if (Number(diag.purchasedTotalKg || 0) > 0 && Number(diag.soldTotalKg || 0) > 0) {
     const delta = Math.round((Number(diag.purchasedTotalKg) - Number(diag.soldTotalKg)) * 1000) / 1000
     if (Math.abs(delta) >= 1) {
-      note += ` Bilans grupy: zakup ${Number(diag.purchasedTotalKg).toLocaleString('pl-PL')} kg vs sprzedaż ${Number(diag.soldTotalKg).toLocaleString('pl-PL')} kg (różnica ${delta > 0 ? '+' : ''}${delta.toLocaleString('pl-PL')} kg).`
+      note += ` Bilans grupy: PZ ${Number(diag.purchasedTotalKg).toLocaleString('pl-PL')} kg vs WZ/FV ${Number(diag.soldTotalKg).toLocaleString('pl-PL')} kg (różnica ${delta > 0 ? '+' : ''}${delta.toLocaleString('pl-PL')} kg).`
     }
   }
   return note
@@ -470,16 +457,13 @@ export async function generateK03Workflow(client, line, options = {}) {
   const mismatch = Math.abs(rawTotal - saleQty) >= 0.001 || shortage > 0
 
   if (mismatch && !acceptQuantityMismatch) {
-    const futureNote = Number(preview.excludedFuturePzQty || 0) > 0
-      ? ` PZ z datą późniejszą niż ${cutoffDate} (${Number(preview.excludedFuturePzQty).toLocaleString('pl-PL')} kg) nie są przypisywane.`
-      : ''
     const diag = preview.diagnostics || {}
     const diagNote = formatFifoDiagnosticNote(diag, cutoffDate, wzDate)
     return {
       ok: false,
       needConfirm: true,
       preview,
-      message: `Brak wystarczającego surowca na dzień ${cutoffDate}: WZ ${saleQty.toLocaleString('pl-PL')} kg, przypisano PZ ${rawTotal.toLocaleString('pl-PL')} kg${shortage > 0 ? `, brakuje ${shortage.toLocaleString('pl-PL')} kg` : ''}.${futureNote}${diagNote}`
+      message: `Brak wystarczającego surowca w magazynie (WZ ${saleQty.toLocaleString('pl-PL')} kg, przypisano PZ ${rawTotal.toLocaleString('pl-PL')} kg${shortage > 0 ? `, brakuje ${shortage.toLocaleString('pl-PL')} kg` : ''}).${diagNote}`
     }
   }
 
