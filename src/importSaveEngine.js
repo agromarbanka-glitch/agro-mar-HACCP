@@ -11,7 +11,7 @@
  */
 export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 
-import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
+import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName } from './k03Engine.js'
 import { invalidateFifoBaseCache } from './fifoEngine.js'
 import { k01LineDedupeKey } from './k01Engine.js'
@@ -1215,6 +1215,31 @@ export async function repairWzDatesFromImportGroups(client, groups, { onProgress
   return { wz_dates_fixed: fixed }
 }
 
+/** Naprawia daty WZ w bazie wg dat z wczytanego Excela (WZ/NNN/MM/RRRR — dzień tylko z kolumny Data). */
+export async function repairWzDatesFromExcelRows(client, rows, { onProgress } = {}) {
+  if (!client || !rows?.length) return { wz_dates_fixed: 0 }
+  const byDoc = new Map()
+  for (const row of rows) {
+    const docNo = normalizeDocumentNo(row.documentNo)
+    if (!docNo || !isWzMonthYearDocument(docNo)) continue
+    const issueDate = String(resolveDocumentIssueDate(row.issueDate, docNo) || '').slice(0, 10)
+    if (!issueDate || issueDate === '0000-01-01') continue
+    if (!byDoc.has(docNo)) {
+      byDoc.set(docNo, {
+        operation: row.operation || 'sprzedaz',
+        documentNo: docNo,
+        issueDate,
+        items: [row]
+      })
+    } else if (issueDate !== byDoc.get(docNo).issueDate) {
+      byDoc.get(docNo).issueDate = issueDate
+    }
+  }
+  const result = await repairWzDatesFromImportGroups(client, [...byDoc.values()], { onProgress })
+  if (result.wz_dates_fixed) invalidateFifoBaseCache()
+  return result
+}
+
 /** Poprawia daty PZ i partii wg daty z Excela (kolumna „Data wystawienia”). */
 export async function repairPzDatesFromImportGroups(client, groups, { onProgress } = {}) {
   if (!client || !groups?.length) return { pz_dates_fixed: 0 }
@@ -1278,6 +1303,7 @@ export async function repairDatesForImportFile(client, importedFileId, { onProgr
     if (!ops?.length) break
 
     for (const op of ops) {
+      if (isWzMonthYearDocument(op.document_no)) continue
       if (!documentNoHasExplicitDate(op.document_no)) continue
       const correct = inferDateFromDocumentNo(op.document_no)
       const current = String(op.operation_date || '').slice(0, 10)

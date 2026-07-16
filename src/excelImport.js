@@ -233,8 +233,10 @@ export function forwardFillExcelRows(rows) {
 
     const prevDocumentNo = last.documentNo
     if (looksLikeWarehouseDocumentNo(documentNo) && prevDocumentNo && documentNo !== prevDocumentNo) {
-      // Nowy dokument — nie ustawiaj daty z numeru WZ (MM/RRRR daje błędny ostatni dzień miesiąca).
-      last.issueDate = documentNoHasExplicitDate(documentNo) ? (inferDateFromDocumentNo(documentNo) || '') : ''
+      // Nowy dokument — nie ustawiaj daty z numeru WZ (WZ/NNN/MM/RRRR nie ma dnia).
+      last.issueDate = (documentNoHasExplicitDate(documentNo) && !isWzMonthYearDocument(documentNo))
+        ? (inferDateFromDocumentNo(documentNo) || '')
+        : ''
     }
 
     let issueDate = String(row.issueDate || '').trim()
@@ -275,7 +277,13 @@ export function forwardFillExcelRows(rows) {
 
 function parseExcelDate(value) {
   if (!value) return ''
-  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  if (value instanceof Date) {
+    // Lokalna data kalendarzowa — toISOString() przesuwał np. 29.06 na 28.06 (UTC).
+    const y = value.getFullYear()
+    const m = value.getMonth() + 1
+    const d = value.getDate()
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  }
   if (typeof value === 'number') {
     const parsed = XLSX.SSF.parse_date_code(value)
     if (parsed) return `${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')}`
@@ -287,15 +295,17 @@ function parseExcelDate(value) {
   return ''
 }
 
-/** Czy numer PZ/WZ zawiera pełną datę DD/MM/RRRR (np. PZ/018/07/07/2026). */
-export function documentNoHasExplicitDate(documentNo) {
-  return /\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/.test(normalizeDocumentNo(documentNo))
-}
-
-/** WZ ma format WZ/NNN/MM/RRRR — w numerze nie ma dnia sprzedaży. */
+/** WZ/NNN/MM/RRRR — numer kolejny + miesiąc + rok; w numerze NIE MA dnia sprzedaży. */
 export function isWzMonthYearDocument(documentNo) {
   const norm = normalizeDocumentNo(documentNo)
-  return /^WZ\//i.test(norm) && documentNoHasMonthYear(norm)
+  return /^WZ\/\d+\/\d{1,2}\/\d{4}$/i.test(norm)
+}
+
+/** Czy numer PZ/WZ zawiera pełną datę DD/MM/RRRR (np. PZ/018/07/07/2026). Nie dotyczy WZ/009/06/2026. */
+export function documentNoHasExplicitDate(documentNo) {
+  const norm = normalizeDocumentNo(documentNo)
+  if (isWzMonthYearDocument(norm)) return false
+  return /\/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\/|$)/.test(norm)
 }
 
 /** Data z numeru PZ: pełna DD/MM/RRRR. WZ bez dnia w numerze zwraca ''. */
@@ -323,17 +333,17 @@ export function inferDateFromDocumentNo(documentNo) {
 /** Czy numer ma miesiąc/rok na końcu (np. WZ/009/07/2026), bez dnia. */
 export function documentNoHasMonthYear(documentNo) {
   const norm = normalizeDocumentNo(documentNo)
+  if (isWzMonthYearDocument(norm)) return true
   if (documentNoHasExplicitDate(norm)) return false
   return /\/(\d{1,2})\/(\d{4})$/.test(norm)
 }
 
-/** Data dokumentu: PZ z dniem w numerze → Excel (WZ i reszta) → numer (legacy MM/RRRR). */
+/** Data dokumentu: WZ/NNN/MM/RRRR → wyłącznie Excel; PZ z dniem w nr → z numeru. */
 export function resolveDocumentIssueDate(issueDate, documentNo) {
   const parsed = parseExcelDate(issueDate)
   const fromDocNo = inferDateFromDocumentNo(documentNo)
+  if (isWzMonthYearDocument(documentNo)) return parsed || ''
   if (fromDocNo && documentNoHasExplicitDate(documentNo)) return fromDocNo
-  // WZ/NNN/MM/RRRR — dzień tylko z „Data wystawienia” (FIFO!)
-  if (isWzMonthYearDocument(documentNo)) return parsed || fromDocNo
   if (parsed) return parsed
   if (fromDocNo && documentNoHasMonthYear(documentNo)) return fromDocNo
   return fromDocNo

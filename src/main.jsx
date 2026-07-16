@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
-import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate } from './excelImport'
+import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairWzDatesFromExcelRows } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -319,6 +319,7 @@ function App() {
   const [importOpEditDates, setImportOpEditDates] = useState({})
   const [importOpDateSaving, setImportOpDateSaving] = useState(null)
   const [importDateRepairing, setImportDateRepairing] = useState(false)
+  const [importWzDateRepairing, setImportWzDateRepairing] = useState(false)
   const [importDuplicates, setImportDuplicates] = useState([])
   const [importNewDocCount, setImportNewDocCount] = useState(0)
   const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
@@ -6840,7 +6841,9 @@ function App() {
     const key = `${row.operation}|${docNo}`
     const rowDate = resolveDocumentIssueDate(row.issueDate, docNo)
     const dateFromNo = inferDateFromDocumentNo(docNo)
-    const preferredDate = (documentNoHasExplicitDate(docNo) && dateFromNo) ? dateFromNo : rowDate
+    const preferredDate = (documentNoHasExplicitDate(docNo) && dateFromNo && !isWzMonthYearDocument(docNo))
+      ? dateFromNo
+      : rowDate
     if (!groups.has(key)) {
       groups.set(key, {
         operation: row.operation,
@@ -6853,8 +6856,8 @@ function App() {
       })
     } else {
       const g = groups.get(key)
-      if (documentNoHasExplicitDate(docNo) && dateFromNo) g.issueDate = dateFromNo
-      else if (preferredDate && !g.issueDate) g.issueDate = preferredDate
+      if (documentNoHasExplicitDate(docNo) && dateFromNo && !isWzMonthYearDocument(docNo)) g.issueDate = dateFromNo
+      else if (preferredDate) g.issueDate = preferredDate
     }
     groups.get(key).items.push(row)
   }
@@ -7654,14 +7657,46 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     try {
       await repairPorzeczkaProductGroups(supabase)
       const result = await repairFifoPzDatesQuick(supabase, { importedFileId: importPreviewModal.fileId })
+      const wzResult = filteredRows.length
+        ? await repairWzDatesFromExcelRows(supabase, filteredRows)
+        : { wz_dates_fixed: 0 }
       invalidateFifoBaseCache()
       await loadImportPreview(importPreviewModal.fileId, importPreviewModal.fileName)
       await loadK03TraceData({ repairPz: false })
-      setMessage(`Naprawiono ${result.dates_fixed} dat PZ, zsynchronizowano ${result.lots_synced} partii. Odśwież podgląd FIFO przy WZ.`)
+      const wzNote = wzResult.wz_dates_fixed
+        ? `, ${wzResult.wz_dates_fixed} dat WZ`
+        : (filteredRows.length ? '' : ' (wczytaj Excel, aby naprawić daty WZ)')
+      setMessage(`Naprawiono ${result.dates_fixed} dat PZ${wzNote}, zsynchronizowano ${result.lots_synced} partii. Odśwież podgląd FIFO przy WZ.`)
     } catch (err) {
       setMessage(`Błąd naprawy dat: ${err?.message || err}`)
     } finally {
       setImportDateRepairing(false)
+    }
+  }
+
+  async function repairLoadedExcelWzDates() {
+    if (!supabase) return
+    if (!filteredRows.length) {
+      setMessage('Wczytaj najpierw plik Excel (ten sam co w bazie), potem kliknij naprawę dat WZ.')
+      return
+    }
+    setImportWzDateRepairing(true)
+    try {
+      const result = await repairWzDatesFromExcelRows(supabase, filteredRows)
+      invalidateFifoBaseCache()
+      await loadK03TraceData({ repairPz: false })
+      if (importPreviewModal?.fileId) {
+        await loadImportPreview(importPreviewModal.fileId, importPreviewModal.fileName)
+      }
+      setMessage(
+        result.wz_dates_fixed
+          ? `Skorygowano ${result.wz_dates_fixed} dat WZ (np. WZ/009/06/2026) wg „Data wystawienia” z Excela. Odśwież kartotekę K03.`
+          : 'Nie znaleziono WZ do poprawy — daty w bazie zgadzają się z wczytanym plikiem.'
+      )
+    } catch (err) {
+      setMessage(`Błąd naprawy dat WZ: ${err?.message || err}`)
+    } finally {
+      setImportWzDateRepairing(false)
     }
   }
 
@@ -7699,8 +7734,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <p className="hint">{loading ? 'Wczytywanie dokumentów…' : `${filtered.length} dokumentów w bazie. Możesz ręcznie poprawić datę PZ lub WZ.`}</p>
           {!loading && filtered.length > 0 && (
             <div className="actions no-print" style={{ marginBottom: 8 }}>
-              <button type="button" className="secondary mini" disabled={importDateRepairing} onClick={repairImportFileDates}>
+              <button type="button" className="secondary mini" disabled={importDateRepairing || importWzDateRepairing} onClick={repairImportFileDates}>
                 {importDateRepairing ? 'Naprawa…' : 'Napraw daty PZ z numerów dokumentów'}
+              </button>
+              <button type="button" className="secondary mini" disabled={importDateRepairing || importWzDateRepairing || !filteredRows.length} onClick={repairLoadedExcelWzDates} title={filteredRows.length ? 'Daty WZ z kolumny Data wystawienia (wczytany Excel)' : 'Najpierw wczytaj plik Excel w zakładce Importy'}>
+                {importWzDateRepairing ? 'Naprawa WZ…' : 'Napraw daty WZ z wczytanego Excela'}
               </button>
             </div>
           )}
@@ -8762,7 +8800,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>Wgraj operacje magazynowe: <b>PZ/WZ, daty, ilości, produkty</b> — bez ceny netto. Numery już w bazie są pomijane. <b>Wartość magazynu (ceny)</b> → Raporty → Wartość magazynu.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{rows.length > 0 && <button type="button" className="secondary" disabled={importWzDateRepairing || importSaving || importResetting} onClick={repairLoadedExcelWzDates}>{importWzDateRepairing ? 'Naprawa dat WZ…' : 'Napraw daty WZ w bazie (z pliku)'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>
