@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairWzDatesFromExcelRows } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -298,6 +298,7 @@ function App() {
   const haccpLoadInFlightRef = useRef(null)
   const haccpLoadGenerationRef = useRef(0)
   const importCheckCacheRef = useRef(null)
+  const importRepairExcelInputRef = useRef(null)
   const userRole = authProfile?.role || 'magazynier'
   const [productionInputLotId, setProductionInputLotId] = useState('')
   const [productionInputQty, setProductionInputQty] = useState('')
@@ -7657,16 +7658,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     try {
       await repairPorzeczkaProductGroups(supabase)
       const result = await repairFifoPzDatesQuick(supabase, { importedFileId: importPreviewModal.fileId })
-      const wzResult = filteredRows.length
-        ? await repairWzDatesFromExcelRows(supabase, filteredRows)
-        : { wz_dates_fixed: 0 }
       invalidateFifoBaseCache()
       await loadImportPreview(importPreviewModal.fileId, importPreviewModal.fileName)
       await loadK03TraceData({ repairPz: false })
-      const wzNote = wzResult.wz_dates_fixed
-        ? `, ${wzResult.wz_dates_fixed} dat WZ`
-        : (filteredRows.length ? '' : ' (wczytaj Excel, aby naprawić daty WZ)')
-      setMessage(`Naprawiono ${result.dates_fixed} dat PZ${wzNote}, zsynchronizowano ${result.lots_synced} partii. Odśwież podgląd FIFO przy WZ.`)
+      setMessage(`Naprawiono ${result.dates_fixed} dat PZ z numerów dokumentów, zsynchronizowano ${result.lots_synced} partii. Daty z kolumny Excel (PZ+WZ) → drugi przycisk.`)
     } catch (err) {
       setMessage(`Błąd naprawy dat: ${err?.message || err}`)
     } finally {
@@ -7674,27 +7669,76 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
-  async function repairLoadedExcelWzDates() {
+  function classifyImportExcelRows(parsed) {
+    return parsed
+      .map(r => {
+        const documentNo = normalizeDocumentNo(r.documentNo)
+        const operation = classifyOperation(r.documentType, documentNo)
+        return {
+          ...r,
+          documentNo,
+          operation,
+          issueDate: resolveDocumentIssueDate(r.issueDate, documentNo)
+        }
+      })
+      .filter(r => r.operation !== 'pominiete_mm')
+  }
+
+  async function runExcelDateRepair(classifiedRows) {
+    const result = await repairDatesFromExcelRows(supabase, classifiedRows)
+    invalidateFifoBaseCache()
+    await loadK03TraceData({ repairPz: false })
+    if (importPreviewModal?.fileId) {
+      await loadImportPreview(importPreviewModal.fileId, importPreviewModal.fileName)
+    }
+    const parts = []
+    if (result.pz_dates_fixed) parts.push(`${result.pz_dates_fixed} PZ`)
+    if (result.wz_dates_fixed) parts.push(`${result.wz_dates_fixed} WZ`)
+    setMessage(
+      parts.length
+        ? `Skorygowano daty: ${parts.join(', ')} — wg kolumny „Data wystawienia” z Excela. Odśwież kartotekę K03 / FIFO.`
+        : 'Daty PZ i WZ w bazie zgadzają się z wczytanym plikiem Excel.'
+    )
+    return result
+  }
+
+  async function repairLoadedExcelDates({ pickFileIfNeeded = false } = {}) {
     if (!supabase) return
     if (!filteredRows.length) {
-      setMessage('Wczytaj najpierw plik Excel (ten sam co w bazie), potem kliknij naprawę dat WZ.')
+      if (pickFileIfNeeded && importRepairExcelInputRef.current) {
+        importRepairExcelInputRef.current.click()
+        return
+      }
+      setMessage('Wczytaj ten sam plik Excel (wybierz plik w oknie podglądu lub w zakładce Importy).')
       return
     }
     setImportWzDateRepairing(true)
     try {
-      const result = await repairWzDatesFromExcelRows(supabase, filteredRows)
-      invalidateFifoBaseCache()
-      await loadK03TraceData({ repairPz: false })
-      if (importPreviewModal?.fileId) {
-        await loadImportPreview(importPreviewModal.fileId, importPreviewModal.fileName)
-      }
-      setMessage(
-        result.wz_dates_fixed
-          ? `Skorygowano ${result.wz_dates_fixed} dat WZ (np. WZ/009/06/2026) wg „Data wystawienia” z Excela. Odśwież kartotekę K03.`
-          : 'Nie znaleziono WZ do poprawy — daty w bazie zgadzają się z wczytanym plikiem.'
-      )
+      await runExcelDateRepair(filteredRows)
     } catch (err) {
-      setMessage(`Błąd naprawy dat WZ: ${err?.message || err}`)
+      setMessage(`Błąd naprawy dat z Excela: ${err?.message || err}`)
+    } finally {
+      setImportWzDateRepairing(false)
+    }
+  }
+
+  async function handleImportRepairExcelFile(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || !supabase) return
+    setImportWzDateRepairing(true)
+    setFileName(file.name)
+    try {
+      const { rows: parsed } = await readAgromarExcel(file, { includeUnitPrice: false })
+      setRows(parsed)
+      const classified = classifyImportExcelRows(parsed)
+      if (!classified.length) {
+        setMessage('Plik Excel nie zawiera wierszy PZ/WZ do naprawy dat.')
+        return
+      }
+      await runExcelDateRepair(classified)
+    } catch (err) {
+      setMessage(`Błąd wczytywania Excela: ${err?.message || err}`)
     } finally {
       setImportWzDateRepairing(false)
     }
@@ -7737,8 +7781,14 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               <button type="button" className="secondary mini" disabled={importDateRepairing || importWzDateRepairing} onClick={repairImportFileDates}>
                 {importDateRepairing ? 'Naprawa…' : 'Napraw daty PZ z numerów dokumentów'}
               </button>
-              <button type="button" className="secondary mini" disabled={importDateRepairing || importWzDateRepairing || !filteredRows.length} onClick={repairLoadedExcelWzDates} title={filteredRows.length ? 'Daty WZ z kolumny Data wystawienia (wczytany Excel)' : 'Najpierw wczytaj plik Excel w zakładce Importy'}>
-                {importWzDateRepairing ? 'Naprawa WZ…' : 'Napraw daty WZ z wczytanego Excela'}
+              <button
+                type="button"
+                className="secondary mini"
+                disabled={importDateRepairing || importWzDateRepairing}
+                onClick={() => repairLoadedExcelDates({ pickFileIfNeeded: true })}
+                title="Poprawia daty PZ i WZ wg kolumny Data wystawienia — wybierze plik Excel, jeśli nie jest wczytany"
+              >
+                {importWzDateRepairing ? 'Naprawa z Excela…' : 'Napraw daty PZ i WZ z Excela'}
               </button>
             </div>
           )}
@@ -8800,7 +8850,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>Wgraj operacje magazynowe: <b>PZ/WZ, daty, ilości, produkty</b> — bez ceny netto. Numery już w bazie są pomijane. <b>Wartość magazynu (ceny)</b> → Raporty → Wartość magazynu.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button>{rows.length > 0 && <button type="button" className="secondary" disabled={importWzDateRepairing || importSaving || importResetting} onClick={repairLoadedExcelWzDates}>{importWzDateRepairing ? 'Naprawa dat WZ…' : 'Napraw daty WZ w bazie (z pliku)'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
+      <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button><button type="button" className="secondary" disabled={importWzDateRepairing || importSaving || importResetting} onClick={() => repairLoadedExcelDates({ pickFileIfNeeded: true })}>{importWzDateRepairing ? 'Naprawa dat…' : 'Napraw daty PZ i WZ w bazie (z pliku)'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
           <span>Wiersze: <b>{rows.length}</b></span>
@@ -9486,6 +9536,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     {renderK03WzModal()}
     {renderImportPreviewModal()}
     {renderK03ActionDialog()}
+    <input ref={importRepairExcelInputRef} type="file" accept=".xls,.xlsx,.csv" style={{ display: 'none' }} onChange={handleImportRepairExcelFile} />
 
     {activeTab === 'archiwum-pdf' && canSeeTab(authProfile, 'archiwum-pdf') && (
       <PdfDocumentsSection

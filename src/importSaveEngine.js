@@ -1240,6 +1240,79 @@ export async function repairWzDatesFromExcelRows(client, rows, { onProgress } = 
   return result
 }
 
+/** Naprawia daty PZ i partii wg kolumny „Data wystawienia” z wczytanego Excela (np. błąd UTC −1 dzień). */
+export async function repairPzDatesFromExcelRows(client, rows, { onProgress } = {}) {
+  if (!client || !rows?.length) return { pz_dates_fixed: 0 }
+  const byDoc = new Map()
+  for (const row of rows) {
+    const docNo = normalizeDocumentNo(row.documentNo)
+    if (!docNo) continue
+    const operation = row.operation || (String(docNo).toUpperCase().startsWith('PZ/') ? 'przyjecie' : '')
+    if (operation !== 'przyjecie') continue
+    const issueDate = String(resolveDocumentIssueDate(row.issueDate, docNo) || '').slice(0, 10)
+    if (!issueDate || issueDate === '0000-01-01') continue
+    if (!byDoc.has(docNo)) {
+      byDoc.set(docNo, {
+        operation: 'przyjecie',
+        documentNo: docNo,
+        issueDate,
+        items: [row]
+      })
+    } else if (issueDate !== byDoc.get(docNo).issueDate) {
+      byDoc.get(docNo).issueDate = issueDate
+    }
+  }
+  const result = await repairPzDatesFromImportGroups(client, [...byDoc.values()], { onProgress })
+  if (result.pz_dates_fixed) invalidateFifoBaseCache()
+  return result
+}
+
+/** PZ + WZ — daty z kolumny Excel „Data wystawienia” (naprawa UTC i forward-fill). */
+export async function repairDatesFromExcelRows(client, rows, { onProgress } = {}) {
+  const pzResult = await repairPzDatesFromExcelRows(client, rows, { onProgress })
+  const wzResult = await repairWzDatesFromExcelRows(client, rows, { onProgress })
+  return {
+    pz_dates_fixed: pzResult.pz_dates_fixed || 0,
+    wz_dates_fixed: wzResult.wz_dates_fixed || 0
+  }
+}
+
+/** Naprawia daty PZ i partii wg dat z wczytanego Excela (kolumna „Data wystawienia”, bez błędu UTC). */
+export async function repairPzDatesFromExcelRows(client, rows, { onProgress } = {}) {
+  if (!client || !rows?.length) return { pz_dates_fixed: 0 }
+  const byDoc = new Map()
+  for (const row of rows) {
+    if (row.operation && row.operation !== 'przyjecie') continue
+    const docNo = normalizeDocumentNo(row.documentNo)
+    if (!docNo || !/^PZ\//i.test(docNo)) continue
+    const issueDate = String(resolveDocumentIssueDate(row.issueDate, docNo) || '').slice(0, 10)
+    if (!issueDate || issueDate === '0000-01-01') continue
+    if (!byDoc.has(docNo)) {
+      byDoc.set(docNo, {
+        operation: 'przyjecie',
+        documentNo: docNo,
+        issueDate,
+        items: [row]
+      })
+    } else if (issueDate !== byDoc.get(docNo).issueDate) {
+      byDoc.get(docNo).issueDate = issueDate
+    }
+  }
+  const result = await repairPzDatesFromImportGroups(client, [...byDoc.values()], { onProgress })
+  if (result.pz_dates_fixed) invalidateFifoBaseCache()
+  return result
+}
+
+/** Naprawia daty PZ i WZ w bazie wg wczytanego pliku Excel (przesunięcie UTC, kolumna Data wystawienia). */
+export async function repairDatesFromExcelRows(client, rows, { onProgress } = {}) {
+  const pzResult = await repairPzDatesFromExcelRows(client, rows, { onProgress })
+  const wzResult = await repairWzDatesFromExcelRows(client, rows, { onProgress })
+  return {
+    pz_dates_fixed: pzResult.pz_dates_fixed || 0,
+    wz_dates_fixed: wzResult.wz_dates_fixed || 0
+  }
+}
+
 /** Poprawia daty PZ i partii wg daty z Excela (kolumna „Data wystawienia”). */
 export async function repairPzDatesFromImportGroups(client, groups, { onProgress } = {}) {
   if (!client || !groups?.length) return { pz_dates_fixed: 0 }
