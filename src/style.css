@@ -756,10 +756,29 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
 }
 .k03-wz-modal-footer .fifo-diag-box {
   margin-top: 10px;
-  padding: 10px 12px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  padding: 12px 14px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
   border-radius: 10px;
+  color: #0f172a;
+  line-height: 1.45;
+}
+.fifo-shortage-box {
+  margin-top: 10px;
+  padding: 14px 16px;
+  background: #ffffff;
+  border: 2px solid #fca5a5;
+  border-radius: 12px;
+}
+.fifo-bilans-hint {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 8px;
+  color: #9a3412;
+  font-size: 13px;
+  line-height: 1.45;
 }
 .fifo-source-picker {
   border: 2px solid #dbeafe;
