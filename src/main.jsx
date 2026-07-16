@@ -1619,6 +1619,43 @@ function App() {
     return parts.join(' ')
   }
 
+  function renderStanyDetailModal() {
+    if (!stanyDetailRow) return null
+    const modal = (
+      <div className="modal-backdrop stany-detail-backdrop" onClick={() => setStanyDetailRow(null)}>
+        <div className="haccp-modal stany-detail-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true">
+          <div className="stany-detail-modal-header">
+            <h3>{stanyDetailRow.product_name}</h3>
+            <p className="hint">
+              Nieprzypisane na <b>{stanyAsOfDate}</b>: <b>{Number(stanyDetailRow.unassigned_kg || 0).toLocaleString('pl-PL')} kg</b>
+              {' · '}grupa {stanyDetailRow.product_group}
+              {' · '}{(stanyDetailRow.pz_lines || []).length} partii PZ
+            </p>
+          </div>
+          <div className="stany-detail-modal-body">
+            <div className="table-wrap small stany-table-wrap">
+              <table>
+                <thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Dostawca</th><th>Nieprzypisane kg</th><th>PZ łącznie kg</th></tr></thead>
+                <tbody>{(stanyDetailRow.pz_lines || []).map(line => <tr key={line.lot_id}>
+                  <td>{line.pz_date ? String(line.pz_date).slice(0, 10).split('-').reverse().join('.') : '—'}</td>
+                  <td><b>{line.pz_no || '—'}</b></td>
+                  <td>{line.lot_no}</td>
+                  <td>{line.supplier || '—'}</td>
+                  <td><b>{Number(line.qty || 0).toLocaleString('pl-PL')}</b></td>
+                  <td>{Number(line.initial_qty || 0).toLocaleString('pl-PL')}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          </div>
+          <div className="stany-detail-modal-footer actions">
+            <button type="button" className="secondary" onClick={() => setStanyDetailRow(null)}>Zamknij</button>
+          </div>
+        </div>
+      </div>
+    )
+    return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal
+  }
+
   function renderK03WzModal() {
     if (!k03WzModal) return null
     const { line, mode, preview, loading, saving, savingStep, error, confirmMismatch, editMode, fifoSourcePicker, fifoSourceKeys, manualRows } = k03WzModal
@@ -9116,7 +9153,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
 
     {activeTab === 'stany' && canSeeTab(authProfile, 'stany') && <>
-    <section className="card">
+    <section className="card stany-section-card">
       <div className="section-title"><BarChart3/><div><h2>Stany – PZ nieprzypisane do WZ</h2><p>Stan na koniec wybranego dnia: ile surowca z PZ (data przyjęcia ≤ dzień) nie zostało jeszcze rozliczone na WZ z tego samego okresu (symulacja FIFO). Wersja silnika: {STOCK_STATES_VERSION}.</p></div></div>
       <div className="form-grid compact">
         <label>Stan na dzień
@@ -9142,7 +9179,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </div>
       {stanyLoading && <p className="hint">Przeliczanie stanów na dzień {stanyAsOfDate}…</p>}
       {!stanyLoading && visibleStanyRows.length === 0 && <p className="hint">Brak nieprzypisanego surowca na {stanyAsOfDate} (albo brak PZ do tej daty).</p>}
-      {visibleStanyRows.length > 0 && <div className="table-wrap small"><table>
+      {visibleStanyRows.length > 0 && <div className="table-wrap small stany-table-wrap"><table>
         <thead><tr><th>Asortyment</th><th>Grupa</th><th>Nieprzypisane kg</th><th>Partie PZ</th><th>Podejrzyj</th></tr></thead>
         <tbody>{visibleStanyRows.map(row => <tr key={row.product_id || row.product_name}>
           <td><b>{row.product_name}</b></td>
@@ -9157,24 +9194,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </tr>)}</tbody>
       </table></div>}
     </section>
-    {stanyDetailRow && <div className="modal-backdrop" onClick={() => setStanyDetailRow(null)}>
-      <div className="haccp-modal stany-detail-modal" onClick={e => e.stopPropagation()}>
-        <h3>{stanyDetailRow.product_name}</h3>
-        <p className="hint">Nieprzypisane na <b>{stanyAsOfDate}</b>: <b>{Number(stanyDetailRow.unassigned_kg || 0).toLocaleString('pl-PL')} kg</b> · grupa {stanyDetailRow.product_group}</p>
-        <div className="table-wrap small"><table>
-          <thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Dostawca</th><th>Nieprzypisane kg</th><th>PZ łącznie kg</th></tr></thead>
-          <tbody>{(stanyDetailRow.pz_lines || []).map(line => <tr key={line.lot_id}>
-            <td>{line.pz_date ? String(line.pz_date).slice(0, 10).split('-').reverse().join('.') : '—'}</td>
-            <td><b>{line.pz_no || '—'}</b></td>
-            <td>{line.lot_no}</td>
-            <td>{line.supplier || '—'}</td>
-            <td><b>{Number(line.qty || 0).toLocaleString('pl-PL')}</b></td>
-            <td>{Number(line.initial_qty || 0).toLocaleString('pl-PL')}</td>
-          </tr>)}</tbody>
-        </table></div>
-        <div className="actions"><button className="secondary" onClick={() => setStanyDetailRow(null)}>Zamknij</button></div>
-      </div>
-    </div>}
     </>}
 
 
@@ -9724,6 +9743,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {renderK03WzModal()}
     {renderImportPreviewModal()}
+    {renderStanyDetailModal()}
     {renderK03ActionDialog()}
     <input ref={importRepairExcelInputRef} type="file" accept=".xls,.xlsx,.csv" style={{ display: 'none' }} onChange={handleImportRepairExcelFile} />
 
