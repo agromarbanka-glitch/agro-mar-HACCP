@@ -344,6 +344,37 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
 }
 .import-qty-month-block h5 { margin: 0 0 6px; font-size: 13px; color: #0f172a; }
 .import-qty-month-list { margin: 0; padding-left: 18px; font-size: 13px; color: #334155; line-height: 1.45; }
+.import-registry-qty-row td {
+  padding: 0 12px 12px !important;
+  background: #f8fafc !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+.import-registry-qty-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #475569;
+}
+.import-file-qty-details {
+  margin: 8px 0 4px;
+  padding: 12px 14px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+}
+.import-file-qty-details > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #0f172a;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  list-style: none;
+}
+.import-file-qty-details > summary::-webkit-details-marker { display: none; }
+.import-qty-summary-embedded { padding: 0; }
+.import-qty-empty { margin: 8px 0 0; padding: 10px 12px; background: #fff7ed; border: 1px solid #fdba74; border-radius: 8px; color: #9a3412; }
 .pz-date-input { min-width: 130px; }
 .pz-status-wolna { background: #eef2ff; color: #3730a3; }
 .pz-status-czesciowo { background: #fef3c7; color: #92400e; }

@@ -316,6 +316,8 @@ function App() {
   const [activeTab, setActiveTab] = useState(skipAuth ? 'dashboard' : 'kartoteki')
   const [dashboardMonth, setDashboardMonth] = useState(() => new Date().toISOString().slice(0, 7))
   const [importRows, setImportRows] = useState([])
+  const [importFileQtyById, setImportFileQtyById] = useState({})
+  const [importAllQtyLoading, setImportAllQtyLoading] = useState(false)
   const [importPreview, setImportPreview] = useState([])
   const [importPreviewModal, setImportPreviewModal] = useState(null)
   const [importOpEditDates, setImportOpEditDates] = useState({})
@@ -7797,6 +7799,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         importMeta,
         previewNote
       })
+      const summary = summarizeOperationsByProduct(operations, { canonicalProductName })
+      setImportFileQtyById(prev => ({
+        ...prev,
+        [fileId]: {
+          loading: false,
+          summary: (summary.pz?.length || summary.wz?.length) ? summary : null,
+          fileName: importFilename,
+          error: '',
+          operationCount: operations.length,
+          source,
+          loaded: true
+        }
+      }))
       if (!operations.length) {
         setMessage(previewNote || 'Ten import nie ma zapisanych dokumentów w bazie (możliwy przerwany zapis).')
       }
@@ -7812,6 +7827,118 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       })
       setMessage(`Błąd podglądu importu: ${err?.message || err}`)
     }
+  }
+
+  async function loadImportFileQtySummary(fileId, importFilename = '', { force = false } = {}) {
+    if (!supabase || !fileId) return
+    const cached = importFileQtyById[fileId]
+    if (!force && cached?.summary) return
+    if (cached?.loading) return
+    setImportFileQtyById(prev => ({
+      ...prev,
+      [fileId]: { ...prev[fileId], loading: true, fileName: importFilename, error: '' }
+    }))
+    try {
+      const documentNos = (importFilename && fileName && importFilename === fileName && filteredRows.length)
+        ? [...new Set(groupImportRows(filteredRows).map(g => g.documentNo).filter(Boolean))]
+        : []
+      const { operations, source } = await fetchImportPreviewOperations(supabase, fileId, { documentNos })
+      const summary = summarizeOperationsByProduct(operations, { canonicalProductName })
+      setImportFileQtyById(prev => ({
+        ...prev,
+        [fileId]: {
+          loading: false,
+          summary: (summary.pz?.length || summary.wz?.length) ? summary : null,
+          fileName: importFilename,
+          error: '',
+          operationCount: operations.length,
+          source,
+          loaded: true
+        }
+      }))
+    } catch (err) {
+      setImportFileQtyById(prev => ({
+        ...prev,
+        [fileId]: {
+          loading: false,
+          summary: null,
+          fileName: importFilename,
+          error: err?.message || String(err),
+          operationCount: 0,
+          loaded: true
+        }
+      }))
+    }
+  }
+
+  async function loadAllImportFileQtySummaries() {
+    if (!supabase || !importRows.length) return
+    setImportAllQtyLoading(true)
+    try {
+      const batch = importRows.slice(0, 40)
+      for (const f of batch) {
+        await loadImportFileQtySummary(f.id, f.filename || f.file_name || '', { force: false })
+      }
+      if (importRows.length > 40) {
+        setMessage(`Rozpiska kg: wczytano ${batch.length} z ${importRows.length} importów (limit 40 najnowszych).`)
+      }
+    } finally {
+      setImportAllQtyLoading(false)
+    }
+  }
+
+  function renderImportFileQtySummaryBody(summary, { note } = {}) {
+    if (!summary) return null
+    return (
+      <div className="import-qty-summary-body import-qty-summary-embedded">
+        {note && <p className="hint">{note}</p>}
+        <div className="import-qty-columns">
+          <div className="import-qty-col">
+            <h4>Przyjęcia PZ</h4>
+            <p className="hint">Łącznie <b>{Number(summary.totalPzKg || 0).toLocaleString('pl-PL')} kg</b> · {summary.pz.length} asortymentów</p>
+            {renderImportProductQtyTable(summary.pz, 'Brak pozycji PZ w tym imporcie.')}
+          </div>
+          <div className="import-qty-col">
+            <h4>Wydania WZ / FV</h4>
+            <p className="hint">Łącznie <b>{Number(summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</b> · {summary.wz.length} asortymentów</p>
+            {renderImportProductQtyTable(summary.wz, 'Brak pozycji WZ/FV w tym imporcie.')}
+          </div>
+        </div>
+        {(summary.pzByMonth?.length > 0 || summary.wzByMonth?.length > 0) && (
+          <details className="import-qty-monthly">
+            <summary>Rozbicie miesięczne (wg daty dokumentu w bazie)</summary>
+            {summary.pzByMonth?.length > 0 && <>
+              <h4 className="import-qty-month-head">PZ wg miesiąca</h4>
+              {renderImportMonthlyQtyBlock(summary.pzByMonth, 'PZ')}
+            </>}
+            {summary.wzByMonth?.length > 0 && <>
+              <h4 className="import-qty-month-head">WZ wg miesiąca</h4>
+              {renderImportMonthlyQtyBlock(summary.wzByMonth, 'WZ')}
+            </>}
+          </details>
+        )}
+      </div>
+    )
+  }
+
+  function renderImportFileQtyPanel(fileId, importFilename) {
+    const state = importFileQtyById[fileId]
+    if (!state) return null
+    if (state.loading) return <p className="hint">Ładowanie rozpiski z bazy…</p>
+    if (state.error) return <p className="status danger">{state.error}</p>
+    if (!state.summary) {
+      return (
+        <p className="hint import-qty-empty">
+          Brak pozycji w operacjach tego importu ({state.operationCount || 0} dokumentów w bazie).
+          Często oznacza to, że przy zapisie doklejono pozycje do starszych PZ/WZ — wczytaj ten sam Excel u góry, aby zobaczyć pełną rozpiskę z pliku.
+        </p>
+      )
+    }
+    return renderImportFileQtySummaryBody(state.summary, {
+      note: state.source === 'document_fallback'
+        ? 'Część danych znaleziono po numerach z wczytanego Excela (import w bazie bez własnych operacji).'
+        : 'Dane z operacji zapisanych przy tym imporcie w Supabase.'
+    })
   }
 
   async function repairImportFileDates() {
@@ -7973,8 +8100,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     )
   }
 
-  function renderImportProductSummaryPanel(summary, { title, subtitle } = {}) {
+  function renderImportProductSummaryPanel(summary, { title, subtitle, embedded = false } = {}) {
     if (!summary || (!summary.pz?.length && !summary.wz?.length)) return null
+    const body = renderImportFileQtySummaryBody(summary, {
+      note: 'Podsumowanie z importu — osobno od kartoteki K01 (tam tylko przyjęcia PZ). WZ służy m.in. do weryfikacji K03/FIFO.'
+    })
+    if (embedded) return body
     return (
       <details className="import-qty-summary">
         <summary>
@@ -7985,34 +8116,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <span className="pill">WZ: {Number(summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</span>
           </span>
         </summary>
-        <div className="import-qty-summary-body">
-          <p className="hint">Podsumowanie z importu — osobno od kartoteki K01 (tam tylko przyjęcia PZ). WZ służy m.in. do weryfikacji K03/FIFO.</p>
-          <div className="import-qty-columns">
-            <div className="import-qty-col">
-              <h4>Przyjęcia PZ</h4>
-              <p className="hint">Łącznie <b>{Number(summary.totalPzKg || 0).toLocaleString('pl-PL')} kg</b> · {summary.pz.length} asortymentów</p>
-              {renderImportProductQtyTable(summary.pz, 'Brak pozycji PZ w danych.')}
-            </div>
-            <div className="import-qty-col">
-              <h4>Wydania WZ / FV</h4>
-              <p className="hint">Łącznie <b>{Number(summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</b> · {summary.wz.length} asortymentów</p>
-              {renderImportProductQtyTable(summary.wz, 'Brak pozycji WZ/FV w danych.')}
-            </div>
-          </div>
-          {(summary.pzByMonth?.length > 0 || summary.wzByMonth?.length > 0) && (
-            <details className="import-qty-monthly">
-              <summary>Rozbicie miesięczne (wg daty dokumentu w pliku / bazie)</summary>
-              {summary.pzByMonth?.length > 0 && <>
-                <h4 className="import-qty-month-head">PZ wg miesiąca</h4>
-                {renderImportMonthlyQtyBlock(summary.pzByMonth, 'PZ')}
-              </>}
-              {summary.wzByMonth?.length > 0 && <>
-                <h4 className="import-qty-month-head">WZ wg miesiąca</h4>
-                {renderImportMonthlyQtyBlock(summary.wzByMonth, 'WZ')}
-              </>}
-            </details>
-          )}
-        </div>
+        {body}
       </details>
     )
   }
@@ -9217,18 +9321,63 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     </section>
 
     <section className="card" id="importy-excel">
-      <div className="section-title"><Upload/><div><h2>Rejestr importów Excel</h2><p>Podgląd wgranych plików i bezpieczne usuwanie importu przez administratora z podwójnym potwierdzeniem.</p></div></div>
-      <div className="actions"><button className="secondary" onClick={loadImports}><RefreshCcw size={16}/> Odśwież importy</button></div>
+      <div className="section-title"><Upload/><div><h2>Rejestr importów Excel</h2><p>Podgląd wgranych plików, <b>rozpiska kg PZ/WZ</b> z bazy oraz bezpieczne usuwanie importu przez administratora.</p></div></div>
+      <div className="actions">
+        <button className="secondary" onClick={loadImports}><RefreshCcw size={16}/> Odśwież importy</button>
+        {importRows.length > 0 && (
+          <button type="button" className="secondary" disabled={importAllQtyLoading} onClick={loadAllImportFileQtySummaries}>
+            {importAllQtyLoading ? 'Rozpiska…' : 'Rozpiska kg — wszystkie importy'}
+          </button>
+        )}
+      </div>
       {importRows.length === 0 && <p className="hint">Brak importów do wyświetlenia albo uruchom SQL v21.</p>}
       {importRows.length > 0 && <div className="table-wrap small import-registry-table"><table>
         <thead><tr><th>Plik</th><th>Data</th><th>Wiersze</th><th>Status</th><th>Akcje</th></tr></thead>
-        <tbody>{importRows.map(f => <tr key={f.id}>
-          <td><b>{f.filename || f.file_name || 'import.xlsx'}</b></td>
-          <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
-          <td>{f.rows_count || f.row_count || '-'}</td>
-          <td><span className="pill">{f.status || 'wczytany'}</span></td>
-          <td className="row-actions"><button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, f.filename || f.file_name)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
-        </tr>)}</tbody>
+        <tbody>{importRows.map(f => {
+          const fname = f.filename || f.file_name || 'import.xlsx'
+          const qtyState = importFileQtyById[f.id]
+          const qtyPills = qtyState?.summary ? (
+            <span className="hint import-registry-qty-hint">
+              PZ {Number(qtyState.summary.totalPzKg || 0).toLocaleString('pl-PL')} kg · WZ {Number(qtyState.summary.totalWzKg || 0).toLocaleString('pl-PL')} kg
+            </span>
+          ) : null
+          return (
+            <React.Fragment key={f.id}>
+              <tr>
+                <td><b>{fname}</b>{qtyPills}</td>
+                <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
+                <td>{f.rows_count || f.row_count || '-'}</td>
+                <td><span className="pill">{f.status || 'wczytany'}</span></td>
+                <td className="row-actions">
+                  <button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, fname)}><Eye size={14}/> Podgląd</button>
+                  <button type="button" className="secondary mini" disabled={qtyState?.loading} onClick={() => loadImportFileQtySummary(f.id, fname, { force: true })} title="Rozpiska kg PZ i WZ z bazy">
+                    {qtyState?.loading ? '…' : 'Rozpiska kg'}
+                  </button>
+                  {isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, fname)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}
+                </td>
+              </tr>
+              {(qtyState?.loading || qtyState?.loaded) && (
+                <tr className="import-registry-qty-row">
+                  <td colSpan={5}>
+                    <details className="import-file-qty-details" open>
+                      <summary>
+                        Rozpiska kg: {fname}
+                        {qtyState.summary && (
+                          <span className="import-qty-summary-pills">
+                            <span className="pill">PZ: {Number(qtyState.summary.totalPzKg || 0).toLocaleString('pl-PL')} kg</span>
+                            <span className="pill">WZ: {Number(qtyState.summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</span>
+                          </span>
+                        )}
+                        {qtyState.loading && <span className="hint"> — wczytywanie…</span>}
+                      </summary>
+                      {renderImportFileQtyPanel(f.id, fname)}
+                    </details>
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          )
+        })}</tbody>
       </table></div>}
       {importPreviewQtySummary && renderImportProductSummaryPanel(importPreviewQtySummary, {
         title: 'Ile kg na PZ i WZ — zapisany import w bazie',
