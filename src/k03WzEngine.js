@@ -384,26 +384,31 @@ function validatePrzerobDate(mode, przerobDate, wzDate) {
 function formatFifoDiagnosticNote(diag, cutoffDate, wzDate) {
   if (!diag) return ''
   let note = ''
-  const physicalFree = Number(diag.physicalRemainingKg ?? diag.remainingWithinCutoffAfterReserveKg ?? 0)
+  const cutoff = String(cutoffDate || wzDate || '').slice(0, 10)
+  const freeInPool = Number(diag.remainingWithinCutoffAfterReserveKg ?? 0)
+  const pzWithinCutoff = Number(diag.purchasedWithinCutoffKg || 0)
+  const afterCutoff = Number(diag.remainingAfterCutoffKg || 0)
   if (Number(diag.lotCountInGroup || 0) === 0) {
     note += ' Brak partii PZ dla tej grupy asortymentowej w bazie – sprawdź import.'
   }
   if (Number(diag.lotsMissingDateKg || 0) > 0.5) {
-    note += ` ${Number(diag.lotsMissingDateKg).toLocaleString('pl-PL')} kg partii bez daty PZ (opcjonalnie popraw w PZ/FIFO).`
+    note += ` ${Number(diag.lotsMissingDateKg).toLocaleString('pl-PL')} kg partii bez daty PZ.`
   }
   if ((diag.priorUnallocatedWzCount || 0) > 0) {
     note += ` ${diag.priorUnallocatedWzCount} wcześniejszych WZ/FV (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) nie ma jeszcze K03 – rozlicz je od najstarszej daty.`
   }
   if (Number(diag.allocatedByOtherWzKg || 0) > 0.5) {
-    note += ` Inne WZ/FV mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z magazynu (symulacja FIFO).`
+    note += ` Inne WZ/FV mają już przypisane ${Number(diag.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg z puli PZ ≤ ${cutoff}.`
   }
   const soldBefore = Number(diag.soldBeforeTargetKg || 0)
-  const pzTotal = Number(diag.purchasedTotalKg || 0)
   const targetQty = Number(diag.targetSaleQty || 0)
-  if (soldBefore > 0 && pzTotal > 0 && soldBefore + targetQty > pzTotal + 0.5) {
-    note += ` WZ/FV tej klasy: wcześniejsze ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg, a partie PZ łącznie ${pzTotal.toLocaleString('pl-PL')} kg.`
-  } else if (physicalFree <= 0.5 && pzTotal > 0 && (diag.priorUnallocatedWzCount || 0) > 0) {
-    note += ' Rozlicz wcześniejsze WZ przed kolejnymi – wtedy kg będą pobierane po kolei z magazynu.'
+  if (soldBefore > 0 && pzWithinCutoff > 0 && soldBefore + targetQty > pzWithinCutoff + 0.5) {
+    note += ` Bilans na ${cutoff}: wcześniejsze WZ ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg, a PZ z datą ≤ ${cutoff} to ${pzWithinCutoff.toLocaleString('pl-PL')} kg.`
+  } else if (freeInPool <= 0.5 && pzWithinCutoff > 0 && (diag.priorUnallocatedWzCount || 0) > 0) {
+    note += ' Rozlicz wcześniejsze WZ przed kolejnymi – wtedy kg będą pobierane po kolei z puli czerwcowej.'
+  }
+  if (afterCutoff >= Number(diag.targetSaleQty || 0) - 0.5 && afterCutoff > 0.5) {
+    note += ` W magazynie jest ${afterCutoff.toLocaleString('pl-PL')} kg PZ z datą po ${cutoff} (np. lipiec) — nie wchodzą na tę WZ.`
   }
   if (Number(diag.purchasedTotalKg || 0) > 0 && Number(diag.soldTotalKg || 0) > 0) {
     const delta = Math.round((Number(diag.purchasedTotalKg) - Number(diag.soldTotalKg)) * 1000) / 1000

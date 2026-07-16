@@ -9,7 +9,7 @@ import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroups
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
-import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder } from './fifoEngine'
+import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
 import {
@@ -1604,22 +1604,29 @@ function App() {
   /** Wyjaśnienie bilansu PZ vs WZ gdy brakuje kg mimo rozliczonych wcześniejszych WZ. */
   function formatK03FifoBilansHint(diag, preview) {
     if (!diag || !preview || Number(preview.shortage || 0) <= 0.5) return ''
+    const cutoff = preview.cutoffDate
+    const pzCutoff = Number(diag.purchasedWithinCutoffKg || 0)
     const soldBefore = Number(diag.soldBeforeTargetKg || 0)
     const targetQty = Number(diag.targetSaleQty || preview.saleQty || 0)
     const shortage = Number(preview.shortage || 0)
-    const physicalFree = Number(diag.physicalRemainingKg ?? diag.remainingWithinCutoffAfterReserveKg ?? 0)
+    const afterCutoff = Number(diag.remainingAfterCutoffKg || 0)
+    const available = Number(diag.remainingWithinCutoffAfterReserveKg || 0)
     const priorOpen = Number(diag.priorUnallocatedWzCount || 0)
     const parts = []
     if (priorOpen > 0) {
       parts.push(`${priorOpen} wcześniejszych WZ bez K03 (${Number(diag.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) – rozlicz je od najstarszej daty.`)
-    } else if (physicalFree >= 0 && targetQty > physicalFree + 0.5) {
+    } else if (soldBefore > 0 && pzCutoff > 0 && soldBefore + targetQty > pzCutoff + 0.5) {
       parts.push(
-        `Po wcześniejszych WZ w magazynie zostało ${physicalFree.toLocaleString('pl-PL')} kg wolnych partii PZ — ta WZ wymaga ${targetQty.toLocaleString('pl-PL')} kg (brakuje ${shortage.toLocaleString('pl-PL')} kg).`
+        `Bilans na ${cutoff}: wcześniejsze WZ ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg, a PZ z datą ≤ ${cutoff} to ${pzCutoff.toLocaleString('pl-PL')} kg.`
+      )
+    } else if (priorOpen === 0 && available >= 0) {
+      parts.push(
+        `Po wcześniejszych WZ w puli ≤ ${cutoff} zostało ${available.toLocaleString('pl-PL')} kg — ta WZ wymaga ${targetQty.toLocaleString('pl-PL')} kg (brakuje ${shortage.toLocaleString('pl-PL')} kg).`
       )
     }
-    if (soldBefore > 0 && Number(diag.purchasedTotalKg || 0) > 0) {
+    if (afterCutoff >= shortage - 0.5) {
       parts.push(
-        `Bilans WZ/FV tej klasy: wcześniejsze ${soldBefore.toLocaleString('pl-PL')} kg + ta WZ ${targetQty.toLocaleString('pl-PL')} kg = ${(soldBefore + targetQty).toLocaleString('pl-PL')} kg vs partie PZ łącznie ${Number(diag.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg.`
+        `W magazynie jest ${afterCutoff.toLocaleString('pl-PL')} kg PZ z datą po ${cutoff} (np. lipiec) — nie wchodzą do tej WZ. Czerwcowe PZ z błędną datą w bazie liczy system z numeru dokumentu (PZ/…/30/06/2026).`
       )
     }
     return parts.join(' ')
@@ -1748,19 +1755,20 @@ function App() {
         {error && <p className="status danger">{error}</p>}
         {preview?.diagnostics && (
           <div className="hint fifo-diag-box">
-            <b>Diagnostyka FIFO (magazyn fizyczny) · klasa {preview.diagnostics.fifoClassLabel || preview.diagnostics.fifoVariant || preview.diagnostics.productGroup} · data WZ {preview.cutoffDate}:</b>{' '}
+            <b>Diagnostyka FIFO · klasa {preview.diagnostics.fifoClassLabel || preview.diagnostics.fifoVariant || preview.diagnostics.productGroup} · data WZ {preview.cutoffDate}:</b>{' '}
             {(preview.diagnostics.fifoSourceVariants || []).length > 1 && (
               <>Źródła PZ (ręczny wybór): {[...(preview.diagnostics.fifoSourceVariants || [])].join(', ')} · </>
             )}
-            Partie PZ łącznie {Number(preview.diagnostics.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg
-            ({preview.diagnostics.lotCountInGroup || 0} partii
-            {Number(preview.diagnostics.lotsTotalLoaded || 0) > 0 ? ` / ${preview.diagnostics.lotsTotalLoaded} partii w bazie` : ''}),
-            wolne w magazynie: {Number(preview.diagnostics.physicalRemainingKg ?? preview.diagnostics.remainingWithinCutoffKg ?? 0).toLocaleString('pl-PL')} kg,
+            PZ łącznie {Number(preview.diagnostics.purchasedTotalKg || 0).toLocaleString('pl-PL')} kg
+            ({preview.diagnostics.lotCountInGroup || 0} partii),
+            z datą ≤ {preview.cutoffDate}: {Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg
+            ({preview.diagnostics.lotCountWithinCutoff || 0} partii),
+            wolne w puli: {Number(preview.diagnostics.remainingWithinCutoffKg || 0).toLocaleString('pl-PL')} kg,
             dostępne dla tego WZ: {Number(preview.diagnostics.remainingWithinCutoffAfterReserveKg || 0).toLocaleString('pl-PL')} kg
             {Number(preview.diagnostics.allocatedByOtherWzKg || 0) > 0 ? ` (inne WZ/FV: ${Number(preview.diagnostics.allocatedByOtherWzKg).toLocaleString('pl-PL')} kg)` : ''}.
             {(preview.diagnostics.siblingClasses || []).length > 0 && (
               <> {(preview.diagnostics.siblingClasses || []).map((s, i) => (
-                <span key={i}> Inna klasa ({s.classLabel}): {Number(s.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg PZ.</span>
+                <span key={i}> Inna klasa ({s.classLabel}): {Number(s.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg PZ ≤ {preview.cutoffDate}.</span>
               ))}</>
             )}
           </div>
@@ -1769,6 +1777,7 @@ function App() {
           <p className="status danger" style={{ margin: 0 }}>
             Brak wystarczającego surowca: WZ {Number(preview.saleQty || 0).toLocaleString('pl-PL')} kg, przypisano PZ {rawTotal.toLocaleString('pl-PL')} kg
             {Number(preview.shortage || 0) > 0 ? ` – brakuje ${Number(preview.shortage).toLocaleString('pl-PL')} kg` : ''}.
+            {Number(preview.excludedFuturePzQty || 0) > 0 ? ` PZ z datą po ${preview.cutoffDate} (${Number(preview.excludedFuturePzQty).toLocaleString('pl-PL')} kg) pominięto.` : ''}
             {(preview.diagnostics?.priorUnallocatedWzCount || 0) > 0 && (
               <> {preview.diagnostics.priorUnallocatedWzCount} wcześniejszych WZ bez K03 ({Number(preview.diagnostics.priorUnallocatedWzKg || 0).toLocaleString('pl-PL')} kg) – rozlicz je wcześniej.</>
             )}
@@ -1777,16 +1786,21 @@ function App() {
             <p className="fifo-bilans-hint">{formatK03FifoBilansHint(preview.diagnostics, preview)}</p>
           )}
         </div>}
-        {mismatch && preview?.diagnostics && Number(preview.diagnostics.lotsMissingDateKg || 0) > 0.5 && (
+        {preview?.diagnostics && Number(preview.diagnostics.purchasedTotalKg || 0) > 0 && (
+          (Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0 ||
+            Number(preview.diagnostics.remainingAfterCutoffKg || 0) >= Number(preview.shortage || 0) - 0.5) && (
             <div className="actions no-print" style={{ marginBottom: 8 }}>
               <button type="button" className="secondary mini" disabled={loading || saving} onClick={repairFifoDatesForK03Preview}>
                 {loading ? 'Naprawa dat…' : 'Napraw daty PZ z numerów dokumentów'}
               </button>
               <span className="hint">
-                {Number(preview.diagnostics.lotsMissingDateKg || 0).toLocaleString('pl-PL')} kg partii PZ bez poprawnej daty — opcjonalnie popraw dla raportów (FIFO liczy z fizycznego stanu magazynu).
+                {Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0
+                  ? `W bazie jest ${Number(preview.diagnostics.purchasedTotalKg).toLocaleString('pl-PL')} kg PZ, ale żadna nie ma daty ≤ ${preview.cutoffDate} (sprawdź nr PZ, np. …/30/06/2026).`
+                  : `Jest ${Number(preview.diagnostics.remainingAfterCutoffKg).toLocaleString('pl-PL')} kg PZ z datą po ${preview.cutoffDate} — nie idą na tę WZ. Czerwcowe PZ liczy system z numeru dokumentu.`}
               </span>
             </div>
-          )}
+          )
+        )}
         {confirmMismatch && (manualRows?.length > 0) && (
           <div className="k03-manual-pz-box">
             <p className="hint"><b>Uzupełnij ręcznie brakujące PZ</b> — wiersze z FIFO możesz poprawić; w wierszu „brak towaru” wpisz nr PZ, datę, dostawcę i kg.</p>
@@ -7131,18 +7145,19 @@ async function recalculateFifoClientSide() {
     const saleDate = String(sale.sale_date || '9999-12-31').slice(0, 10)
 
     const candidateLots = Array.from(lotState.values())
-      .filter(lot => fifoLotMatchesMatchSpec(lot, productMap, sale.matchSpec) &&
-        Number(lot.remaining_qty || 0) > 0.0005)
-      .sort((a, b) => {
-        const dateA = String(opMap.get(a.source_operation_id)?.operation_date || a.production_date || '9999-12-31').slice(0, 10)
-        const dateB = String(opMap.get(b.source_operation_id)?.operation_date || b.production_date || '9999-12-31').slice(0, 10)
-        const aMissing = !dateA || dateA === '0000-01-01'
-        const bMissing = !dateB || dateB === '0000-01-01'
-        if (aMissing !== bMissing) return aMissing ? 1 : -1
-        return dateA.localeCompare(dateB) ||
+      .filter(lot => {
+        const receiptDate = lotReceiptDate(lot, opMap)
+        return fifoLotMatchesMatchSpec(lot, productMap, sale.matchSpec) &&
+          Number(lot.remaining_qty || 0) > 0.0005 &&
+          receiptDate &&
+          receiptDate !== '0000-01-01' &&
+          receiptDate <= saleDate
+      })
+      .sort((a, b) =>
+        lotReceiptDate(a, opMap).localeCompare(lotReceiptDate(b, opMap)) ||
           String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
           String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
-      })
+      )
 
     for (const lot of candidateLots) {
       if (remaining <= 0) break
