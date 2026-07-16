@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -321,6 +321,7 @@ function App() {
   const [importOpDateSaving, setImportOpDateSaving] = useState(null)
   const [importDateRepairing, setImportDateRepairing] = useState(false)
   const [importWzDateRepairing, setImportWzDateRepairing] = useState(false)
+  const [importAudit, setImportAudit] = useState(null)
   const [importDuplicates, setImportDuplicates] = useState([])
   const [importNewDocCount, setImportNewDocCount] = useState(0)
   const [importDuplicateDetails, setImportDuplicateDetails] = useState(new Map())
@@ -6725,6 +6726,7 @@ function App() {
     setImportDuplicates([])
     setImportDuplicateDetails(new Map())
     setImportOrphanCount(0)
+    setImportAudit(null)
     importCheckCacheRef.current = null
     try {
       const { rows: parsed, skippedMmCount, headerDocRows = 0, rowsWithoutDoc = 0 } = await readAgromarExcel(file, { includeUnitPrice: false })
@@ -6764,6 +6766,26 @@ function App() {
         setImportOrphanCount(orphanCount)
         importCheckCacheRef.current = { fileName: file.name, groupsCount: groups.length, keys, details, orphanCount }
 
+        let gapSummary = null
+        let auditResult = null
+        if (duplicates.length && !fresh.length) {
+          try {
+            gapSummary = await summarizeImportDuplicateGap(supabase, duplicates, details, {
+              normalizeText,
+              canonicalProductName,
+              normalizeFifoProductKey
+            })
+          } catch { /* optional */ }
+        }
+        try {
+          auditResult = await auditExcelImportCoverage(supabase, groups.filter(g => g.operation === 'przyjecie'), details, {
+            normalizeText,
+            canonicalProductName,
+            normalizeFifoProductKey
+          })
+          setImportAudit(auditResult)
+        } catch { /* optional */ }
+
         loadMsg += ` W pliku: ${groups.length} dokumentów (${rowsInGroups} wierszy operacyjnych).`
         if (fileDateRange) loadMsg += ` Zakres dat w całym pliku: ${fileDateRange}.`
 
@@ -6785,29 +6807,21 @@ function App() {
             if (freshRange) loadMsg += ` Daty nowych: ${freshRange}.`
           } else {
             loadMsg += ` Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ/WZ.`
-            try {
-              const gap = await summarizeImportDuplicateGap(supabase, duplicates, details, {
-                normalizeText,
-                canonicalProductName,
-                normalizeFifoProductKey
-              })
-              if (gap.itemsToMerge > 0) {
-                loadMsg = loadMsg.replace(
-                  / Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ\/WZ\./,
-                  ` Do doklejenia z Excela: ok. ${gap.itemsToMerge} pozycji w istniejących PZ/WZ.`
-                )
-              }
-              if (gap.emptyShells > 0) {
-                loadMsg += ` UWAGA: ${gap.emptyShells} PZ/WZ w bazie jest pustych (bez pozycji) — kliknij Zapisz, aby uzupełnić z Excela.`
-                if (gap.emptyExamples.length) {
-                  loadMsg += ` Np.: ${gap.emptyExamples.join(', ')}${gap.emptyShells > gap.emptyExamples.length ? '…' : ''}.`
-                }
-              } else if (gap.itemsToMerge === 0) {
-                loadMsg += ` System nie widzi brakujących pozycji w Excelu vs baza — jeśli brakuje PZ (np. PZ/002/29/06/2026/Kolonia), zrób Ctrl+F5 i wczytaj plik ponownie po aktualizacji.`
-              }
-            } catch {
-              /* szacunek opcjonalny */
+            if (gapSummary?.itemsToMerge > 0) {
+              loadMsg = loadMsg.replace(
+                / Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ\/WZ\./,
+                ` Do doklejenia z Excela: ok. ${gapSummary.itemsToMerge} pozycji w istniejących PZ/WZ.`
+              )
             }
+            if (gapSummary?.emptyShells > 0) {
+              loadMsg += ` UWAGA: ${gapSummary.emptyShells} PZ/WZ w bazie jest pustych (bez pozycji) — kliknij Zapisz, aby uzupełnić z Excela.`
+              if (gapSummary.emptyExamples.length) {
+                loadMsg += ` Np.: ${gapSummary.emptyExamples.join(', ')}${gapSummary.emptyShells > gapSummary.emptyExamples.length ? '…' : ''}.`
+              }
+            }
+          }
+          if (auditResult) {
+            loadMsg += ` Audyt PZ: ${formatImportAuditReport(auditResult)}`
           }
           const junePz002 = groups.find(g => /PZ\/002\/29\/06\/2026/i.test(String(g.documentNo || '')))
           if (!junePz002) {
@@ -8880,6 +8894,21 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           {importNewDocCount > 0 && <span>Do zapisu: <b>{importNewDocCount}</b> dokumentów</span>}
           {importDuplicates.length > 0 && <span>Pominięte duplikaty: <b>{importDuplicates.length}</b></span>}
         </div>
+        {importAudit && (
+          <div className={`import-audit-box ${(importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length) ? 'warning inline-warning' : 'hint'}`} style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 8 }}>
+            <strong>Audyt PZ (Excel vs baza):</strong> {formatImportAuditReport(importAudit)}
+            {importAudit.productGaps?.length > 0 && (
+              <div className="table-wrap small" style={{ marginTop: 8 }}>
+                <table>
+                  <thead><tr><th>Produkt (klasa FIFO)</th><th>Excel kg</th><th>Baza kg</th><th>Różnica</th></tr></thead>
+                  <tbody>{importAudit.productGaps.slice(0, 15).map((p, i) => (
+                    <tr key={i}><td>{p.productKey}</td><td>{p.excelKg.toLocaleString('pl-PL')}</td><td>{p.dbKg.toLocaleString('pl-PL')}</td><td>{p.gap > 0 ? '+' : ''}{p.gap.toLocaleString('pl-PL')}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
           <tbody>{filteredRows.slice(0, 100).map((row, i) => <tr key={i}>

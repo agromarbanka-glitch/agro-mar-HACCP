@@ -34,7 +34,7 @@ export function documentNoImportAliases(documentNo) {
   const prefixSpace = norm.match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
   if (prefixSpace) out.add(`${prefixSpace[1]} ${prefixSpace[2]}`)
   // PZ/002/29/06/2026/Kolonia → też PZ/002/29/06/2026 (stare wpisy bez sufiksu)
-  const withoutLocation = norm.replace(/^((?:PZ|WZ)\/\d+\/\d{1,2}\/\d{1,2}\/\d{4})\/[^/\d][^/]*$/i, '$1')
+  const withoutLocation = norm.replace(/^((?:PZ|WZ)\/\d+\/\d{1,2}\/\d{1,2}\/\d{4})\/[^/\d][^/]*$/iu, '$1')
   if (withoutLocation !== norm) {
     out.add(withoutLocation)
     const m = withoutLocation.match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
@@ -43,11 +43,19 @@ export function documentNoImportAliases(documentNo) {
   return [...out]
 }
 
-const DOC_NO_PATTERN = /((?:PZ|WZ|MM|RR|FV|FS)[\/\s_-][\w/.-]+)/i
+const DOC_NO_PATTERN = /((?:PZ|WZ|MM|RR|FV|FS)(?:\/[^/\s,;]+)+)/i
+
+/** Wyciąga pełny nr PZ/WZ z komórki (obsługa sufiksów z polskimi znakami: Chruślanki, Łaziska). */
+export function extractWarehouseDocumentNo(value) {
+  const s = String(value || '').trim()
+  if (!s) return ''
+  const m = s.match(DOC_NO_PATTERN)
+  return m ? normalizeDocumentNo(m[1]) : ''
+}
 
 /** Prawdziwy numer magazynowy PZ/WZ/MM – nie lp. wiersza (488) ani sama data. */
 export function looksLikeWarehouseDocumentNo(value) {
-  return DOC_NO_PATTERN.test(String(value || '').trim())
+  return Boolean(extractWarehouseDocumentNo(value))
 }
 
 /** Szuka PZ/WZ/MM w komórkach wiersza; PZ/WZ ważniejsze od RR (RR bywa tylko odniesieniem faktury). */
@@ -68,7 +76,7 @@ export function findDocumentNoInRow(row) {
 
 /** Kolumna „Nr” często zwraca lp. (488) – wtedy szukamy PZ/WZ w całym wierszu. */
 export function resolveDocumentNo(row, pickedFromColumn = '') {
-  const picked = normalizeDocumentNo(pickedFromColumn)
+  const picked = extractWarehouseDocumentNo(pickedFromColumn) || normalizeDocumentNo(pickedFromColumn)
   if (looksLikeWarehouseDocumentNo(picked)) return picked
   const scanned = findDocumentNoInRow(row)
   if (scanned) return scanned

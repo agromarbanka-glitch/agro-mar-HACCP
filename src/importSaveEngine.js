@@ -1249,6 +1249,130 @@ export async function summarizeImportDuplicateGap(client, duplicateGroups, detai
   return { itemsToMerge, emptyShells, emptyExamples }
 }
 
+function groupExcelQtyByProduct(groups, deps) {
+  const totals = new Map()
+  for (const group of groups || []) {
+    if (group.operation !== 'przyjecie') continue
+    for (const row of group.items || []) {
+      const key = productFifoMatchKey(row.productName, null, deps)
+      totals.set(key, (totals.get(key) || 0) + Math.abs(Number(row.qty) || 0))
+    }
+  }
+  return totals
+}
+
+/**
+ * Pełny audyt: Excel vs baza — wykrywa brakujące PZ, puste dokumenty, rozjazdy kg.
+ * @returns {{ missingDocuments, emptyDocuments, qtyMismatch, excelOnlyKg, dbOnlyKg, productGaps, summary }}
+ */
+export async function auditExcelImportCoverage(client, groups, details, deps) {
+  const result = {
+    missingDocuments: [],
+    emptyDocuments: [],
+    qtyMismatch: [],
+    productGaps: [],
+    excelOnlyKg: 0,
+    dbOnlyKg: 0,
+    summary: ''
+  }
+  if (!client || !groups?.length) return result
+
+  const opIds = [...new Set(groups.map(g => resolveOperationImportMeta(g, details)?.operationId).filter(Boolean))]
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+
+  for (const group of groups) {
+    if (group.operation !== 'przyjecie') continue
+    const meta = resolveOperationImportMeta(group, details)
+    const excelQty = (group.items || []).reduce((s, r) => s + Math.abs(Number(r.qty) || 0), 0)
+    const excelItems = group.items?.length || 0
+
+    if (!meta?.operationId) {
+      result.missingDocuments.push({
+        documentNo: group.documentNo,
+        issueDate: group.issueDate,
+        excelItems,
+        excelQty
+      })
+      result.excelOnlyKg += excelQty
+      continue
+    }
+
+    const storedItems = itemsByOp.get(meta.operationId) || []
+    const dbQty = storedItems.reduce((s, i) => s + Math.abs(Number(i.qty) || 0), 0)
+
+    if (storedItems.length === 0 && excelItems > 0) {
+      result.emptyDocuments.push({
+        documentNo: group.documentNo,
+        dbDocumentNo: meta.documentNo,
+        issueDate: group.issueDate,
+        excelItems,
+        excelQty
+      })
+      result.excelOnlyKg += excelQty
+      continue
+    }
+
+    const diff = Math.abs(excelQty - dbQty)
+    if (diff >= 0.5) {
+      result.qtyMismatch.push({
+        documentNo: group.documentNo,
+        dbDocumentNo: meta.documentNo,
+        excelQty,
+        dbQty,
+        diff
+      })
+      if (excelQty > dbQty) result.excelOnlyKg += excelQty - dbQty
+      else result.dbOnlyKg += dbQty - excelQty
+    }
+  }
+
+  const excelByProduct = groupExcelQtyByProduct(groups, deps)
+  const dbByProduct = new Map()
+  for (const [, items] of itemsByOp) {
+    for (const item of items || []) {
+      const key = productFifoMatchKey(item.raw_product_name || item.products?.name, item.products, deps)
+      dbByProduct.set(key, (dbByProduct.get(key) || 0) + Math.abs(Number(item.qty) || 0))
+    }
+  }
+  const allProducts = new Set([...excelByProduct.keys(), ...dbByProduct.keys()])
+  for (const key of allProducts) {
+    const excelKg = excelByProduct.get(key) || 0
+    const dbKg = dbByProduct.get(key) || 0
+    const gap = Math.round((excelKg - dbKg) * 10) / 10
+    if (Math.abs(gap) >= 0.5) {
+      result.productGaps.push({ productKey: key, excelKg, dbKg, gap })
+    }
+  }
+  result.productGaps.sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))
+
+  const parts = []
+  if (result.missingDocuments.length) parts.push(`${result.missingDocuments.length} PZ brak w bazie`)
+  if (result.emptyDocuments.length) parts.push(`${result.emptyDocuments.length} PZ pustych w bazie`)
+  if (result.qtyMismatch.length) parts.push(`${result.qtyMismatch.length} PZ z rozjazdem kg`)
+  if (result.productGaps.length) parts.push(`${result.productGaps.length} produktów z różnicą kg`)
+  result.summary = parts.length ? parts.join(', ') : 'Excel i baza zgadzają się (PZ/kg).'
+
+  return result
+}
+
+export function formatImportAuditReport(audit) {
+  if (!audit) return ''
+  const lines = [audit.summary]
+  if (audit.missingDocuments?.length) {
+    lines.push(`Brak w bazie: ${audit.missingDocuments.slice(0, 8).map(d => d.documentNo).join(', ')}${audit.missingDocuments.length > 8 ? '…' : ''}`)
+  }
+  if (audit.emptyDocuments?.length) {
+    lines.push(`Puste PZ: ${audit.emptyDocuments.slice(0, 8).map(d => d.documentNo).join(', ')}${audit.emptyDocuments.length > 8 ? '…' : ''}`)
+  }
+  if (audit.productGaps?.length) {
+    lines.push(`Różnice kg: ${audit.productGaps.slice(0, 5).map(p => `${p.productKey} (${p.gap > 0 ? '+' : ''}${p.gap.toLocaleString('pl-PL')} kg)`).join('; ')}`)
+  }
+  if (audit.summary.includes('zgadzają') && audit.productGaps?.length === 0) {
+    lines.push('Jeśli K03 nadal pokazuje brak towaru — sprawdź daty PZ (UTC) lub klasyfikację produktu (FIFO).')
+  }
+  return lines.join(' ')
+}
+
 async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
   const unique = [...new Set((lotIds || []).filter(Boolean))]
   for (let i = 0; i < unique.length; i += chunkSize) {
