@@ -7801,6 +7801,41 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  function renderImportAuditPanel() {
+    if (!importAudit) return null
+    const hasIssues = (importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length || importAudit.productGaps?.length)
+    const ok = !hasIssues
+    return (
+      <div className={`import-audit-box ${ok ? 'audit-ok' : 'audit-warn'}`}>
+        <h3>{ok ? '✓ Audyt PZ (Excel vs baza) — OK' : '⚠ Audyt PZ (Excel vs baza) — wykryto rozbieżności'}</h3>
+        <p className="hint" style={{ margin: '0 0 8px' }}>{formatImportAuditReport(importAudit)}</p>
+        <div className="import-audit-stats">
+          <span>Sprawdzonych PZ: <b>{importAudit.pzChecked ?? '—'}</b></span>
+          <span>Suma kg Excel: <b>{Math.round(importAudit.totalExcelPzKg || 0).toLocaleString('pl-PL')}</b></span>
+          <span>Suma kg baza: <b>{Math.round(importAudit.totalDbPzKg || 0).toLocaleString('pl-PL')}</b></span>
+          {importAudit.missingDocuments?.length > 0 && <span>Brak w bazie: <b>{importAudit.missingDocuments.length}</b></span>}
+          {importAudit.emptyDocuments?.length > 0 && <span>Puste PZ: <b>{importAudit.emptyDocuments.length}</b></span>}
+          {importAudit.qtyMismatch?.length > 0 && <span>Rozjazd kg: <b>{importAudit.qtyMismatch.length}</b></span>}
+        </div>
+        {importAudit.productGaps?.length > 0 && (
+          <div className="table-wrap small" style={{ marginTop: 8 }}>
+            <table>
+              <thead><tr><th>Produkt (klasa FIFO)</th><th>Excel kg</th><th>Baza kg</th><th>Różnica</th></tr></thead>
+              <tbody>{importAudit.productGaps.slice(0, 15).map((p, i) => (
+                <tr key={i}><td>{p.productKey}</td><td>{p.excelKg.toLocaleString('pl-PL')}</td><td>{p.dbKg.toLocaleString('pl-PL')}</td><td>{p.gap > 0 ? '+' : ''}{p.gap.toLocaleString('pl-PL')}</td></tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+        {ok && (
+          <p className="hint" style={{ margin: '8px 0 0' }}>
+            Numery PZ i sumy kg zgadzają się z Excelem. Jeśli K03 nadal pokazuje brak towaru → użyj „Napraw daty PZ i WZ”, potem PZ/FIFO → Uzupełnij braki FIFO.
+          </p>
+        )}
+      </div>
+    )
+  }
+
   function renderImportPreviewModal() {
     if (!importPreviewModal) return null
     const { fileName, loading, operations, error } = importPreviewModal
@@ -8894,21 +8929,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           {importNewDocCount > 0 && <span>Do zapisu: <b>{importNewDocCount}</b> dokumentów</span>}
           {importDuplicates.length > 0 && <span>Pominięte duplikaty: <b>{importDuplicates.length}</b></span>}
         </div>
-        {importAudit && (
-          <div className={`import-audit-box ${(importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length) ? 'warning inline-warning' : 'hint'}`} style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 8 }}>
-            <strong>Audyt PZ (Excel vs baza):</strong> {formatImportAuditReport(importAudit)}
-            {importAudit.productGaps?.length > 0 && (
-              <div className="table-wrap small" style={{ marginTop: 8 }}>
-                <table>
-                  <thead><tr><th>Produkt (klasa FIFO)</th><th>Excel kg</th><th>Baza kg</th><th>Różnica</th></tr></thead>
-                  <tbody>{importAudit.productGaps.slice(0, 15).map((p, i) => (
-                    <tr key={i}><td>{p.productKey}</td><td>{p.excelKg.toLocaleString('pl-PL')}</td><td>{p.dbKg.toLocaleString('pl-PL')}</td><td>{p.gap > 0 ? '+' : ''}{p.gap.toLocaleString('pl-PL')}</td></tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
+        {renderImportAuditPanel()}
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
           <tbody>{filteredRows.slice(0, 100).map((row, i) => <tr key={i}>
@@ -8918,7 +8939,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       </>}
       {importDuplicates.length > 0 && <>
         <h3>Duplikaty — nie zostaną zapisane ({importDuplicates.length})</h3>
-        <p className="hint">Te numery PZ/WZ są już w bazie. Program <b>odrzuca</b> je przy zapisie (bez doklejania). Nowe numery z pliku — np. uzupełniające PZ z wcześniejszą datą — zapisują się normalnie. Aby nadpisać dokument, usuń go z rejestru importów poniżej.</p>
+        <p className="hint">Te numery PZ/WZ są już w bazie. Przy <b>Zapisz</b> program dokleja brakujące pozycje z Excela do istniejących dokumentów.</p>
         {importOrphanCount > 0 && <p className="hint">Wykryto {importOrphanCount} operacji z usuniętych importów – przy zapisie zostaną automatycznie wyczyszczone (migracja v40).</p>}
         <div className="table-wrap small"><table>
           <thead><tr><th>Typ</th><th>Nr dokumentu</th><th>Data w pliku</th><th>Pozycji</th><th>Źródło w bazie</th></tr></thead>

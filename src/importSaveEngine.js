@@ -1273,6 +1273,9 @@ export async function auditExcelImportCoverage(client, groups, details, deps) {
     productGaps: [],
     excelOnlyKg: 0,
     dbOnlyKg: 0,
+    pzChecked: 0,
+    totalExcelPzKg: 0,
+    totalDbPzKg: 0,
     summary: ''
   }
   if (!client || !groups?.length) return result
@@ -1282,8 +1285,10 @@ export async function auditExcelImportCoverage(client, groups, details, deps) {
 
   for (const group of groups) {
     if (group.operation !== 'przyjecie') continue
+    result.pzChecked += 1
     const meta = resolveOperationImportMeta(group, details)
     const excelQty = (group.items || []).reduce((s, r) => s + Math.abs(Number(r.qty) || 0), 0)
+    result.totalExcelPzKg += excelQty
     const excelItems = group.items?.length || 0
 
     if (!meta?.operationId) {
@@ -1299,6 +1304,7 @@ export async function auditExcelImportCoverage(client, groups, details, deps) {
 
     const storedItems = itemsByOp.get(meta.operationId) || []
     const dbQty = storedItems.reduce((s, i) => s + Math.abs(Number(i.qty) || 0), 0)
+    if (meta?.operationId) result.totalDbPzKg += dbQty
 
     if (storedItems.length === 0 && excelItems > 0) {
       result.emptyDocuments.push({
