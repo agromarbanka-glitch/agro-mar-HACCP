@@ -19,7 +19,7 @@ import {
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
 import { operationImportKey, diffImportGroupAgainstStored, loadStoredImportOperations } from './importSaveEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.5'
+export const K03_WZ_ENGINE_VERSION = '1.6'
 
 function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
   const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys
@@ -737,18 +737,47 @@ export function k03LineAfterUnfreeze(line) {
 export async function revertK03Workflow(client, line, options = {}) {
   const k03Key = line.formId || `K03-${line.key}`
   const changedBy = options.changedBy || 'operator'
+  const onProgress = options.onProgress
 
-  const { data: snaps, error: findErr } = await client
-    .from('haccp_documents')
-    .select('id, data')
-    .eq('document_type', 'K03')
-  if (findErr) throw findErr
+  onProgress?.('Szukanie kartoteki K03…')
+  let snap = null
+  const docId = line.haccp_doc_id || line.k03Form?.haccp_doc_id
+  if (docId) {
+    const { data, error } = await client
+      .from('haccp_documents')
+      .select('id, data')
+      .eq('id', docId)
+      .maybeSingle()
+    if (error) throw error
+    snap = data
+  }
+  if (!snap) {
+    const { data, error: findErr } = await client
+      .from('haccp_documents')
+      .select('id, data')
+      .eq('document_type', 'K03')
+      .filter('data->>k03_key', 'eq', k03Key)
+      .limit(1)
+      .maybeSingle()
+    if (findErr) throw findErr
+    snap = data
+  }
+  if (!snap && line.operation_id) {
+    const { data: byOp, error: opErr } = await client
+      .from('haccp_documents')
+      .select('id, data')
+      .eq('document_type', 'K03')
+      .eq('operation_id', line.operation_id)
+      .limit(3)
+    if (opErr) throw opErr
+    snap = (byOp || []).find(s => s.data?.k03_key === k03Key || s.data?.form_id === k03Key) || null
+  }
 
-  const snap = (snaps || []).find(s => s.data?.k03_key === k03Key)
   if (snap?.data?.frozen && !options.alreadyUnfrozen) {
     throw new Error('K03 jest zamrożony – najpierw odmroź kartotekę.')
   }
 
+  onProgress?.('Cofanie rozliczenia FIFO…')
   await revertFifoForSale(client, line.operation_id, line.product_id, {
     k03_key: k03Key,
     change_type: 'k03_reverted',
@@ -757,6 +786,7 @@ export async function revertK03Workflow(client, line, options = {}) {
   })
 
   if (snap?.id) {
+    onProgress?.('Usuwanie kartoteki K03…')
     const { error: delErr } = await client.from('haccp_documents').delete().eq('id', snap.id)
     if (delErr) throw delErr
   }
@@ -772,7 +802,7 @@ export async function revertK03Workflow(client, line, options = {}) {
     changed_by: changedBy
   })
 
-  return { ok: true }
+  return { ok: true, k03Key, lineKey: line.key }
 }
 
 /** Odmrożenie K03 z powodem. */

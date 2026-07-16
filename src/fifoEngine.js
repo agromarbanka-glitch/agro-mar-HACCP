@@ -1336,28 +1336,65 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
   }
 }
 
-/** Cofnięcie rozliczenia FIFO dla pozycji WZ (tylko gdy K03 nie zamrożony). */
+/** Cofnięcie rozliczenia FIFO dla pozycji WZ (tylko gdy K03 nie zamrożony). Lekka ścieżka – bez loadFifoBaseData. */
 export async function revertFifoForSale(client, operationId, productId, logEntry = {}) {
-  const base = await loadFifoBaseData(client)
   const saleKey = saleLineKey(operationId, productId)
-  const existing = base.allocationsBySaleKey.get(saleKey) || []
-  if (!existing.length) return { ok: true, removed: 0 }
+
+  const { data: existing, error: allocErr } = await client
+    .from('fifo_allocations')
+    .select('id, source_lot_id, qty, product_id')
+    .eq('operation_id', operationId)
+    .eq('product_id', productId)
+  if (allocErr) throw allocErr
+  if (!existing?.length) {
+    invalidateFifoBaseCache()
+    return { ok: true, removed: 0 }
+  }
 
   const beforeData = {
     allocation_count: existing.length,
     allocated_qty: existing.reduce((s, a) => s + Number(a.qty || 0), 0)
   }
 
-  restoreAllocationsToLots(existing, base.lotState)
-  await deleteAllocations(client, existing.map(a => a.id))
-  const restoredLotIds = [...new Set(existing.map(a => a.source_lot_id).filter(Boolean))]
-  await persistLotsBatch(client, base.lotState, restoredLotIds)
+  const lotIds = [...new Set(existing.map(a => a.source_lot_id).filter(Boolean))]
+  const lots = lotIds.length
+    ? await fetchInChunks(client, 'lots', 'id, remaining_qty, status', 'id', lotIds)
+    : []
+  const lotMap = new Map((lots || []).map(l => [l.id, { ...l }]))
 
-  const sale = base.sortedSales.find(s => s.key === saleKey)
+  for (const alloc of existing) {
+    const lot = lotMap.get(alloc.source_lot_id)
+    if (!lot) continue
+    const remaining = Number(lot.remaining_qty || 0) + Number(alloc.qty || 0)
+    lot.remaining_qty = Math.round(remaining * 1000) / 1000
+    lot.status = lot.remaining_qty > 0.0005 ? 'aktywna' : lot.status
+    lotMap.set(lot.id, lot)
+  }
+
+  await Promise.all([...lotMap.values()].map(lot =>
+    client.from('lots').update({
+      remaining_qty: Number(lot.remaining_qty || 0),
+      status: Number(lot.remaining_qty || 0) <= 0.0005 ? 'zuzyta' : 'aktywna'
+    }).eq('id', lot.id)
+  ))
+
+  await deleteAllocations(client, existing.map(a => a.id))
+
+  let wzNo = ''
+  let wzDate = ''
+  let productName = ''
+  const [{ data: op }, { data: item }] = await Promise.all([
+    client.from('operations').select('document_no, operation_date').eq('id', operationId).maybeSingle(),
+    client.from('operation_items').select('raw_product_name, product_id').eq('operation_id', operationId).eq('product_id', productId).limit(1).maybeSingle()
+  ])
+  wzNo = op?.document_no || ''
+  wzDate = String(op?.operation_date || '').slice(0, 10)
+  productName = item?.raw_product_name || ''
+
   await logFifoChange(client, {
-    wz_no: sale?.sale_doc_no || '',
-    wz_date: String(sale?.sale_date || '').slice(0, 10),
-    product_name: sale?.product_name || '',
+    wz_no: wzNo,
+    wz_date: wzDate,
+    product_name: productName,
     k03_key: logEntry.k03_key || saleKey,
     change_type: logEntry.change_type || 'k03_fifo_reverted',
     before_data: beforeData,

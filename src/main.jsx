@@ -1203,9 +1203,20 @@ function App() {
     })
   }
 
+  async function refreshWzQueueLight() {
+    if (!supabase) return
+    invalidateFifoBaseCache()
+    const queue = await loadWzQueue(supabase, { repairPz: false })
+    setWzQueueLines(queue.lines || [])
+    setK03Snapshots(queue.snapshots || [])
+    setK03FormsRaw(queue.forms || [])
+    if (queue.diag) setK03Diag(queue.diag)
+  }
+
   async function submitK03ActionDialog() {
     if (!k03ActionDialog || !supabase) return
     const dialog = k03ActionDialog
+    const setStep = (step) => setK03ActionDialog(d => ({ ...d, busy: true, step, error: '' }))
 
     if (dialog.kind === 'unfreeze') {
       const reason = String(dialog.reason || '').trim()
@@ -1213,16 +1224,16 @@ function App() {
         setK03ActionDialog(d => ({ ...d, error: 'Podaj powód odmrożenia.' }))
         return
       }
-      setK03ActionDialog(d => ({ ...d, busy: true, error: '' }))
+      setStep('Odmrażanie kartoteki…')
       try {
         await unfreezeK03Workflow(supabase, dialog.doc, reason, userRole)
-        await loadK03TraceData()
+        await refreshWzQueueLight()
         await loadFifoChangeLog()
         setK03UnfreezeSuggestions(prev => prev.filter(s => s.k03_key !== dialog.doc.id))
         setK03ActionDialog(null)
         setMessage(`K03 odmrożony: ${reason}`)
       } catch (err) {
-        setK03ActionDialog(d => ({ ...d, busy: false, error: err?.message || String(err) }))
+        setK03ActionDialog(d => ({ ...d, busy: false, step: '', error: err?.message || String(err) }))
       }
       return
     }
@@ -1243,30 +1254,32 @@ function App() {
           setK03ActionDialog(d => ({ ...d, error: 'Brak dokumentu K03 do odmrożenia.' }))
           return
         }
-        setK03ActionDialog(d => ({ ...d, busy: true, error: '' }))
+        setStep('Odmrażanie kartoteki…')
         try {
           await unfreezeK03Workflow(supabase, doc, unfreezeReason, userRole)
           workLine = k03LineAfterUnfreeze(line)
         } catch (err) {
-          setK03ActionDialog(d => ({ ...d, busy: false, error: `Błąd odmrożenia: ${err?.message || String(err)}` }))
+          setK03ActionDialog(d => ({ ...d, busy: false, step: '', error: `Błąd odmrożenia: ${err?.message || String(err)}` }))
           return
         }
       } else {
-        setK03ActionDialog(d => ({ ...d, busy: true, error: '' }))
+        setK03ActionDialog(d => ({ ...d, busy: true, step: '', error: '' }))
       }
 
       try {
         await revertK03Workflow(supabase, workLine, {
           reason: revertReason,
           changedBy: userRole,
-          alreadyUnfrozen: frozen
+          alreadyUnfrozen: frozen,
+          onProgress: (msg) => setStep(msg)
         })
-        await loadK03TraceData()
+        setStep('Odświeżanie listy WZ…')
+        await refreshWzQueueLight()
         await loadFifoChangeLog()
         setK03ActionDialog(null)
         setMessage('Decyzja K03 cofnięta – pozycja wróciła do kolejki WZ.')
       } catch (err) {
-        setK03ActionDialog(d => ({ ...d, busy: false, error: `Błąd cofania: ${err?.message || String(err)}` }))
+        setK03ActionDialog(d => ({ ...d, busy: false, step: '', error: `Błąd cofania: ${err?.message || String(err)}` }))
       }
     }
   }
@@ -1845,7 +1858,7 @@ function App() {
 
   function renderK03ActionDialog() {
     if (!k03ActionDialog) return null
-    const { kind, busy, error } = k03ActionDialog
+    const { kind, busy, error, step } = k03ActionDialog
     const isUnfreeze = kind === 'unfreeze'
     const doc = k03ActionDialog.doc
     const line = k03ActionDialog.line
@@ -1885,10 +1898,11 @@ function App() {
             />
           </label>}
           {error && <p className="status danger">{error}</p>}
+          {busy && step && <p className="hint">{step}</p>}
         </div>
         <div className="k03-wz-modal-actions actions">
           <button type="button" onClick={submitK03ActionDialog} disabled={busy}>
-            {busy ? 'Zapisywanie…' : (isUnfreeze ? 'Odmroź' : 'Cofnij decyzję')}
+            {busy ? (step || 'Zapisywanie…') : (isUnfreeze ? 'Odmroź' : 'Cofnij decyzję')}
           </button>
           <button type="button" className="secondary" onClick={() => setK03ActionDialog(null)} disabled={busy}>Anuluj</button>
         </div>
