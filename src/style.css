@@ -355,6 +355,46 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
   font-size: 12px;
   color: #475569;
 }
+.import-registry-file-cell { vertical-align: middle; }
+.import-registry-file-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.import-qty-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 1px;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  cursor: pointer;
+}
+.import-qty-toggle:hover:not(:disabled) { background: #e2e8f0; }
+.import-qty-toggle:disabled { opacity: 0.55; cursor: wait; }
+.import-registry-row-expanded td { border-bottom-color: transparent !important; }
+.import-file-qty-panel {
+  margin: 8px 0 4px;
+  padding: 12px 14px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+}
+.import-file-qty-panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
 .import-file-qty-details {
   margin: 8px 0 4px;
   padding: 12px 14px;

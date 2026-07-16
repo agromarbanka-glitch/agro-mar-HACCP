@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronRight, ChevronUp, X } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
@@ -7829,14 +7829,28 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
-  async function loadImportFileQtySummary(fileId, importFilename = '', { force = false } = {}) {
+  async function loadImportFileQtySummary(fileId, importFilename = '', { force = false, expand = false } = {}) {
     if (!supabase || !fileId) return
     const cached = importFileQtyById[fileId]
-    if (!force && cached?.summary) return
+    if (!force && cached?.summary) {
+      if (expand) {
+        setImportFileQtyById(prev => ({
+          ...prev,
+          [fileId]: { ...prev[fileId], expanded: true }
+        }))
+      }
+      return
+    }
     if (cached?.loading) return
     setImportFileQtyById(prev => ({
       ...prev,
-      [fileId]: { ...prev[fileId], loading: true, fileName: importFilename, error: '' }
+      [fileId]: {
+        ...prev[fileId],
+        loading: true,
+        fileName: importFilename,
+        error: '',
+        expanded: expand ? true : prev[fileId]?.expanded
+      }
     }))
     try {
       const documentNos = (importFilename && fileName && importFilename === fileName && filteredRows.length)
@@ -7853,7 +7867,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           error: '',
           operationCount: operations.length,
           source,
-          loaded: true
+          loaded: true,
+          expanded: expand || prev[fileId]?.expanded || false
         }
       }))
     } catch (err) {
@@ -7865,10 +7880,30 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           fileName: importFilename,
           error: err?.message || String(err),
           operationCount: 0,
-          loaded: true
+          loaded: true,
+          expanded: expand || prev[fileId]?.expanded || false
         }
       }))
     }
+  }
+
+  function toggleImportFileQtyExpand(fileId, importFilename) {
+    const state = importFileQtyById[fileId]
+    if (state?.expanded) {
+      setImportFileQtyById(prev => ({
+        ...prev,
+        [fileId]: { ...prev[fileId], expanded: false }
+      }))
+      return
+    }
+    if (state?.loaded) {
+      setImportFileQtyById(prev => ({
+        ...prev,
+        [fileId]: { ...prev[fileId], expanded: true }
+      }))
+      return
+    }
+    void loadImportFileQtySummary(fileId, importFilename, { expand: true })
   }
 
   async function loadAllImportFileQtySummaries() {
@@ -7879,9 +7914,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       for (const f of batch) {
         await loadImportFileQtySummary(f.id, f.filename || f.file_name || '', { force: false })
       }
-      if (importRows.length > 40) {
-        setMessage(`Rozpiska kg: wczytano ${batch.length} z ${importRows.length} importów (limit 40 najnowszych).`)
-      }
+      const msg = importRows.length > 40
+        ? `Wczytano sumy kg dla ${batch.length} z ${importRows.length} importów (limit 40). Kliknij strzałkę przy pliku, aby rozwinąć szczegóły.`
+        : `Wczytano sumy kg dla ${batch.length} importów. Kliknij strzałkę przy pliku, aby rozwinąć szczegóły.`
+      setMessage(msg)
     } finally {
       setImportAllQtyLoading(false)
     }
@@ -9325,8 +9361,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="actions">
         <button className="secondary" onClick={loadImports}><RefreshCcw size={16}/> Odśwież importy</button>
         {importRows.length > 0 && (
-          <button type="button" className="secondary" disabled={importAllQtyLoading} onClick={loadAllImportFileQtySummaries}>
-            {importAllQtyLoading ? 'Rozpiska…' : 'Rozpiska kg — wszystkie importy'}
+          <button type="button" className="secondary" disabled={importAllQtyLoading} onClick={loadAllImportFileQtySummaries} title="Wczytuje sumy PZ/WZ pod nazwami plików, bez rozwijania szczegółów">
+            {importAllQtyLoading ? 'Wczytywanie…' : 'Wczytaj sumy kg (wszystkie)'}
           </button>
         )}
       </div>
@@ -9343,35 +9379,55 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           ) : null
           return (
             <React.Fragment key={f.id}>
-              <tr>
-                <td><b>{fname}</b>{qtyPills}</td>
+              <tr className={qtyState?.expanded ? 'import-registry-row-expanded' : ''}>
+                <td className="import-registry-file-cell">
+                  <div className="import-registry-file-row">
+                    <button
+                      type="button"
+                      className="import-qty-toggle"
+                      onClick={() => toggleImportFileQtyExpand(f.id, fname)}
+                      aria-expanded={!!qtyState?.expanded}
+                      aria-label={qtyState?.expanded ? 'Zwiń rozpiskę kg' : 'Rozwiń rozpiskę kg'}
+                      title={qtyState?.expanded ? 'Zwiń rozpiskę kg' : 'Rozwiń rozpiskę kg'}
+                      disabled={qtyState?.loading && !qtyState?.expanded}
+                    >
+                      {qtyState?.loading && qtyState?.expanded ? '…' : qtyState?.expanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
+                    </button>
+                    <div>
+                      <b>{fname}</b>
+                      {qtyPills}
+                    </div>
+                  </div>
+                </td>
                 <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
                 <td>{f.rows_count || f.row_count || '-'}</td>
                 <td><span className="pill">{f.status || 'wczytany'}</span></td>
                 <td className="row-actions">
                   <button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, fname)}><Eye size={14}/> Podgląd</button>
-                  <button type="button" className="secondary mini" disabled={qtyState?.loading} onClick={() => loadImportFileQtySummary(f.id, fname, { force: true })} title="Rozpiska kg PZ i WZ z bazy">
-                    {qtyState?.loading ? '…' : 'Rozpiska kg'}
-                  </button>
                   {isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, fname)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}
                 </td>
               </tr>
-              {(qtyState?.loading || qtyState?.loaded) && (
+              {qtyState?.expanded && (
                 <tr className="import-registry-qty-row">
                   <td colSpan={5}>
-                    <details className="import-file-qty-details" open>
-                      <summary>
-                        Rozpiska kg: {fname}
+                    <div className="import-file-qty-panel">
+                      <div className="import-file-qty-panel-head">
+                        <span>Rozpiska kg: {fname}</span>
                         {qtyState.summary && (
                           <span className="import-qty-summary-pills">
                             <span className="pill">PZ: {Number(qtyState.summary.totalPzKg || 0).toLocaleString('pl-PL')} kg</span>
                             <span className="pill">WZ: {Number(qtyState.summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</span>
                           </span>
                         )}
-                        {qtyState.loading && <span className="hint"> — wczytywanie…</span>}
-                      </summary>
+                        {qtyState.loaded && !qtyState.loading && (
+                          <button type="button" className="secondary mini" onClick={() => loadImportFileQtySummary(f.id, fname, { force: true, expand: true })} title="Odśwież rozpiskę z bazy">
+                            <RefreshCcw size={14}/> Odśwież
+                          </button>
+                        )}
+                        {qtyState.loading && <span className="hint">Wczytywanie…</span>}
+                      </div>
                       {renderImportFileQtyPanel(f.id, fname)}
-                    </details>
+                    </div>
                   </td>
                 </tr>
               )}
