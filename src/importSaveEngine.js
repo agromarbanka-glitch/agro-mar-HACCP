@@ -88,13 +88,18 @@ export async function getExistingOperationsForImport(client, groups) {
       createdAt: op.created_at,
       importedFileId: op.imported_file_id
     }
+    const exactNorm = normalizeDocumentNo(op.document_no)
+    const exactKey = `${op.operation_type}|${exactNorm}`
+    keys.add(exactKey)
+    const existingExact = details.get(exactKey)
+    if (!existingExact || String(candidate.createdAt || '') > String(existingExact.createdAt || '')) {
+      details.set(exactKey, candidate)
+    }
+    // Aliasy tylko do wyszukiwania meta — NIE do klucza duplikatu (Kolonia ≠ inny PZ).
     for (const alias of documentNoImportAliases(op.document_no)) {
-      const key = `${op.operation_type}|${alias}`
-      keys.add(key)
-      const existing = details.get(key)
-      if (!existing || String(candidate.createdAt || '') > String(existing.createdAt || '')) {
-        details.set(key, candidate)
-      }
+      if (alias === exactNorm) continue
+      const aliasKey = `${op.operation_type}|${alias}`
+      if (!details.has(aliasKey)) details.set(aliasKey, candidate)
     }
   }
 
@@ -162,10 +167,14 @@ export function resolveOperationImportMeta(group, details) {
 
 function groupExistsInImportKeys(group, existingKeys) {
   const op = group.operation
-  for (const alias of documentNoImportAliases(group.documentNo)) {
-    if (existingKeys.has(`${op}|${alias}`)) return true
-  }
-  return existingKeys.has(operationImportKey(group))
+  const doc = normalizeDocumentNo(group.documentNo)
+  if (existingKeys.has(`${op}|${doc}`)) return true
+  const m = doc.match(/^(PZ|WZ)(\/.*)$/i)
+  if (m && existingKeys.has(`${op}|${m[1]} ${m[2]}`)) return true
+  // Excel z /Kolonia — dopasuj bazę bez sufiksu (legacy), ale nie odwrotnie.
+  const base = doc.replace(/^((?:PZ|WZ)\/\d+\/\d{1,2}\/\d{1,2}\/\d{4})\/[^/\d][^/]*$/iu, '$1')
+  if (base !== doc && existingKeys.has(`${op}|${base}`)) return true
+  return false
 }
 
 /** Dzieli grupy dokumentów na już w bazie (duplikaty) i nowe. */
@@ -1276,6 +1285,7 @@ export async function auditExcelImportCoverage(client, groups, details, deps) {
     pzChecked: 0,
     totalExcelPzKg: 0,
     totalDbPzKg: 0,
+    hiddenMatches: [],
     summary: ''
   }
   if (!client || !groups?.length) return result
@@ -1319,6 +1329,15 @@ export async function auditExcelImportCoverage(client, groups, details, deps) {
     }
 
     const diff = Math.abs(excelQty - dbQty)
+    if (meta.documentNo && normalizeDocumentNo(meta.documentNo) !== normalizeDocumentNo(group.documentNo)) {
+      result.hiddenMatches.push({
+        excelDocumentNo: group.documentNo,
+        dbDocumentNo: meta.documentNo,
+        excelQty,
+        dbQty,
+        importFilename: meta.importFilename || null
+      })
+    }
     if (diff >= 0.5) {
       result.qtyMismatch.push({
         documentNo: group.documentNo,
@@ -1356,6 +1375,7 @@ export async function auditExcelImportCoverage(client, groups, details, deps) {
   if (result.emptyDocuments.length) parts.push(`${result.emptyDocuments.length} PZ pustych w bazie`)
   if (result.qtyMismatch.length) parts.push(`${result.qtyMismatch.length} PZ z rozjazdem kg`)
   if (result.productGaps.length) parts.push(`${result.productGaps.length} produktów z różnicą kg`)
+  if (result.hiddenMatches.length) parts.push(`${result.hiddenMatches.length} PZ pod innym nr w bazie`)
   result.summary = parts.length ? parts.join(', ') : 'Excel i baza zgadzają się (PZ/kg).'
 
   return result
@@ -1372,6 +1392,9 @@ export function formatImportAuditReport(audit) {
   }
   if (audit.productGaps?.length) {
     lines.push(`Różnice kg: ${audit.productGaps.slice(0, 5).map(p => `${p.productKey} (${p.gap > 0 ? '+' : ''}${p.gap.toLocaleString('pl-PL')} kg)`).join('; ')}`)
+  }
+  if (audit.hiddenMatches?.length) {
+    lines.push(`W bazie pod innym nr: ${audit.hiddenMatches.slice(0, 5).map(h => `${h.excelDocumentNo} → ${h.dbDocumentNo} (${h.dbQty.toLocaleString('pl-PL')} kg)`).join('; ')}`)
   }
   if (audit.summary.includes('zgadzają') && audit.productGaps?.length === 0) {
     lines.push('Jeśli K03 nadal pokazuje brak towaru — sprawdź daty PZ (UTC) lub klasyfikację produktu (FIFO).')
@@ -2080,6 +2103,89 @@ export function formatCleanupResult(cleanup) {
     return 'Sprzątanie: nie znaleziono pozostałości po usuniętych importach (partie mogą pochodzić z aktywnego importu — sprawdź Rejestr importów).'
   }
   return `Wyczyszczono: ${imports} import(ów), ${ops} operacji, ${lots} partii.`
+}
+
+/** Szuka PZ/WZ w całej bazie (nie tylko w podglądzie jednego importu). */
+export async function lookupWarehouseDocument(client, documentNoPattern, { operationType = 'przyjecie' } = {}) {
+  if (!client || !documentNoPattern) return []
+  const needle = normalizeDocumentNo(documentNoPattern)
+  const variants = [...new Set(documentNoImportAliases(needle))]
+
+  const select = 'id, operation_type, operation_date, document_no, imported_file_id, created_at, imported_files(filename, deleted_at)'
+  const { data: exact, error } = await withImportRetry(() =>
+    client.from('operations').select(select).eq('operation_type', operationType).in('document_no', variants).limit(20)
+  )
+  if (error) {
+    const { data: fallback, error: err2 } = await withImportRetry(() =>
+      client.from('operations').select('id, operation_type, operation_date, document_no, imported_file_id, created_at').eq('operation_type', operationType).in('document_no', variants).limit(20)
+    )
+    if (err2) throw err2
+    if (fallback?.length) return enrichLookupOperations(client, fallback)
+  } else if (exact?.length) {
+    return enrichLookupOperations(client, exact)
+  }
+
+  const partial = needle.match(/(?:PZ|WZ)\/(\d+\/\d{1,2}\/\d{1,2}\/\d{4})/i)
+  const likePattern = partial ? `%/${partial[1]}%` : `%${needle.slice(-18)}%`
+  const { data: fuzzy, error: fuzzyErr } = await withImportRetry(() =>
+    client.from('operations').select('id, operation_type, operation_date, document_no, imported_file_id, created_at').eq('operation_type', operationType).ilike('document_no', likePattern).limit(20)
+  )
+  if (fuzzyErr) throw fuzzyErr
+  return enrichLookupOperations(client, fuzzy || [])
+}
+
+async function enrichLookupOperations(client, ops) {
+  if (!ops?.length) return []
+  const opIds = ops.map(o => o.id)
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+  const lotCounts = new Map()
+  for (let i = 0; i < opIds.length; i += 50) {
+    const chunk = opIds.slice(i, i + 50)
+    const { data: lots, error } = await withImportRetry(() =>
+      client.from('lots').select('id, source_operation_id, lot_no, remaining_qty, initial_qty, product_group').in('source_operation_id', chunk)
+    )
+    if (error) throw error
+    for (const lot of lots || []) {
+      const list = lotCounts.get(lot.source_operation_id) || []
+      list.push(lot)
+      lotCounts.set(lot.source_operation_id, list)
+    }
+  }
+  const k01Counts = new Map()
+  for (let i = 0; i < opIds.length; i += 50) {
+    const chunk = opIds.slice(i, i + 50)
+    const { data: k01, error } = await withImportRetry(() =>
+      client.from('haccp_documents').select('id, operation_id, document_no, qty').eq('document_type', 'K01').in('operation_id', chunk)
+    )
+    if (error) throw error
+    for (const doc of k01 || []) {
+      k01Counts.set(doc.operation_id, (k01Counts.get(doc.operation_id) || 0) + 1)
+    }
+  }
+  return ops.map(op => ({
+    ...op,
+    items: itemsByOp.get(op.id) || [],
+    lots: lotCounts.get(op.id) || [],
+    k01Count: k01Counts.get(op.id) || 0,
+    importFilename: op.imported_files?.filename || null
+  }))
+}
+
+/** Gdzie w wczytanym Excelu jest dany numer PZ/WZ (wiersze + grupa). */
+export function traceExcelDocumentInImport(rows, groups, documentNoPattern) {
+  const re = new RegExp(String(documentNoPattern || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+  const matchedRows = (rows || []).filter(r => re.test(String(r.documentNo || '')))
+  const matchedGroups = (groups || []).filter(g => re.test(String(g.documentNo || '')))
+  return {
+    rowCount: matchedRows.length,
+    groupCount: matchedGroups.length,
+    rows: matchedRows.slice(0, 5),
+    groups: matchedGroups.map(g => ({
+      documentNo: g.documentNo,
+      issueDate: g.issueDate,
+      items: (g.items || []).map(i => ({ productName: i.productName, qty: i.qty }))
+    }))
+  }
 }
 
 /** Podgląd operacji z zapisanego importu (bez zagnieżdżonego select — omija limity PostgREST). */

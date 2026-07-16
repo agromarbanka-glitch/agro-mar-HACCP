@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -6823,9 +6823,26 @@ function App() {
           if (auditResult) {
             loadMsg += ` Audyt PZ: ${formatImportAuditReport(auditResult)}`
           }
+          const trace002 = traceExcelDocumentInImport(parsed, groups, '002/29/06/2026')
+          if (trace002.groupCount > 0) {
+            const g = trace002.groups[0]
+            loadMsg += ` Excel: ${g.documentNo} (${(g.items || []).map(i => `${i.productName} ${i.qty} kg`).join(', ')}).`
+            try {
+              const dbHits = await lookupWarehouseDocument(supabase, g.documentNo)
+              if (!dbHits.length) {
+                loadMsg += ` BAZA: brak tego PZ — po Ctrl+F5 kliknij Zapisz (powinien trafić jako nowy).`
+              } else {
+                const hit = dbHits[0]
+                const items = (hit.items || []).map(i => `${i.raw_product_name || ''} ${i.qty} kg`).join(', ')
+                loadMsg += ` BAZA: ${hit.document_no}${hit.document_no !== g.documentNo ? ' (inny nr niż Excel!)' : ''}, pozycje: ${items || 'BRAK'}, partii: ${hit.lots?.length || 0}, K01: ${hit.k01Count || 0}${hit.importFilename ? `, import: ${hit.importFilename}` : ''}.`
+              }
+            } catch { /* optional */ }
+          } else {
+            loadMsg += ` Excel: nie znaleziono grupy PZ/002/29/06/2026 — kg mogły trafić pod inny numer (błąd forward-fill).`
+          }
           const junePz002 = groups.find(g => /PZ\/002\/29\/06\/2026/i.test(String(g.documentNo || '')))
-          if (!junePz002) {
-            loadMsg += ` Nie wykryto w pliku PZ/002/29/06/2026 — pozycje mogły trafić pod inny numer (błąd starego importu).`
+          if (!junePz002 && trace002.groupCount === 0) {
+            loadMsg += ` Sprawdź w tabeli poniżej wiersze z „002/29/06”.`
           } else if (fresh.some(g => /PZ\/002\/29\/06\/2026/i.test(String(g.documentNo || '')))) {
             loadMsg += ` PZ/002/29/06/2026 jest do zapisu jako nowy dokument.`
           }
@@ -7803,7 +7820,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   function renderImportAuditPanel() {
     if (!importAudit) return null
-    const hasIssues = (importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length || importAudit.productGaps?.length)
+    const hasIssues = (importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length || importAudit.productGaps?.length || importAudit.hiddenMatches?.length)
     const ok = !hasIssues
     return (
       <div className={`import-audit-box ${ok ? 'audit-ok' : 'audit-warn'}`}>
@@ -7817,6 +7834,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           {importAudit.emptyDocuments?.length > 0 && <span>Puste PZ: <b>{importAudit.emptyDocuments.length}</b></span>}
           {importAudit.qtyMismatch?.length > 0 && <span>Rozjazd kg: <b>{importAudit.qtyMismatch.length}</b></span>}
         </div>
+        {importAudit.hiddenMatches?.length > 0 && (
+          <div className="table-wrap small" style={{ marginTop: 8 }}>
+            <p className="hint"><b>Excel ma inny nr niż baza</b> — kg mogą być pod innym PZ (stary import). Podgląd importu pokazuje tylko ten plik.</p>
+            <table>
+              <thead><tr><th>Nr w Excelu</th><th>Nr w bazie</th><th>kg Excel</th><th>kg baza</th><th>Import</th></tr></thead>
+              <tbody>{importAudit.hiddenMatches.slice(0, 20).map((h, i) => (
+                <tr key={i}><td>{h.excelDocumentNo}</td><td><b>{h.dbDocumentNo}</b></td><td>{h.excelQty.toLocaleString('pl-PL')}</td><td>{h.dbQty.toLocaleString('pl-PL')}</td><td className="hint">{h.importFilename || '—'}</td></tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
         {importAudit.productGaps?.length > 0 && (
           <div className="table-wrap small" style={{ marginTop: 8 }}>
             <table>
