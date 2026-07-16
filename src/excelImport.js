@@ -26,6 +26,23 @@ export function normalizeDocumentNo(value) {
     .replace(/\\/g, '/')
 }
 
+/** Warianty nr do wyszukiwania w bazie (spacja po prefiksie, bez sufiksu lokalizacji). */
+export function documentNoImportAliases(documentNo) {
+  const norm = normalizeDocumentNo(documentNo)
+  if (!norm) return []
+  const out = new Set([norm])
+  const prefixSpace = norm.match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
+  if (prefixSpace) out.add(`${prefixSpace[1]} ${prefixSpace[2]}`)
+  // PZ/002/29/06/2026/Kolonia → też PZ/002/29/06/2026 (stare wpisy bez sufiksu)
+  const withoutLocation = norm.replace(/^((?:PZ|WZ)\/\d+\/\d{1,2}\/\d{1,2}\/\d{4})\/[^/\d][^/]*$/i, '$1')
+  if (withoutLocation !== norm) {
+    out.add(withoutLocation)
+    const m = withoutLocation.match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
+    if (m) out.add(`${m[1]} ${m[2]}`)
+  }
+  return [...out]
+}
+
 const DOC_NO_PATTERN = /((?:PZ|WZ|MM|RR|FV|FS)[\/\s_-][\w/.-]+)/i
 
 /** Prawdziwy numer magazynowy PZ/WZ/MM – nie lp. wiersza (488) ani sama data. */
@@ -407,12 +424,16 @@ export async function readAgromarExcel(file, { skipMm = true, includeUnitPrice =
       }
     })
     .filter(row => row.documentNo || row.productName || row.qty || row.contractorName)
-    .filter(row => row.productName)
 
+  // Forward-fill PRZED odfiltrowaniem wierszy produktowych — nr PZ/WZ często jest w wierszu
+  // nagłówkowym bez nazwy produktu (np. PZ/002/29/06/2026/Kolonia + porzeczka w wierszu niżej).
   const filled = forwardFillExcelRows(mapped)
   const skippedMmCount = skipMm ? filled.filter(row => isMmDocument(row.documentType, row.documentNo)).length : 0
-  const resultRows = skipMm ? filled.filter(row => !isMmDocument(row.documentType, row.documentNo)) : filled
-  return { rows: resultRows, skippedMmCount }
+  const afterMm = skipMm ? filled.filter(row => !isMmDocument(row.documentType, row.documentNo)) : filled
+  const headerDocRows = mapped.filter(r => r.documentNo && !r.productName).length
+  const resultRows = afterMm.filter(row => row.productName && Number(row.qty))
+  const rowsWithoutDoc = resultRows.filter(r => !r.documentNo).length
+  return { rows: resultRows, skippedMmCount, headerDocRows, rowsWithoutDoc }
 }
 
 export function classifyOperation(documentType, documentNo) {

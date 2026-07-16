@@ -6727,12 +6727,18 @@ function App() {
     setImportOrphanCount(0)
     importCheckCacheRef.current = null
     try {
-      const { rows: parsed, skippedMmCount } = await readAgromarExcel(file, { includeUnitPrice: false })
+      const { rows: parsed, skippedMmCount, headerDocRows = 0, rowsWithoutDoc = 0 } = await readAgromarExcel(file, { includeUnitPrice: false })
       setRows(parsed)
       let loadMsg = `Wczytano ${parsed.length} wierszy. Import HACCP/magazyn: nr PZ/WZ/FV, data, produkt, ilość — bez ceny netto.`
       loadMsg += ` Wartość magazynu (ceny) wgrywasz osobno: Raporty → Wartość magazynu.`
       if (skippedMmCount > 0) {
         loadMsg += ` Pominięto ${skippedMmCount} wierszy MM (przesunięcia magazynowe).`
+      }
+      if (headerDocRows > 0) {
+        loadMsg += ` Rozpoznano ${headerDocRows} wierszy nagłówkowych (nr PZ/WZ bez produktu — przypisane do pozycji poniżej).`
+      }
+      if (rowsWithoutDoc > 0) {
+        loadMsg += ` UWAGA: ${rowsWithoutDoc} pozycji ma produkt i ilość, ale brak numeru PZ/WZ — nie trafią do importu.`
       }
       if (supabase) {
         const classified = parsed

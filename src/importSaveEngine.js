@@ -11,7 +11,7 @@
  */
 export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
 
-import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate } from './excelImport.js'
+import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName } from './k03Engine.js'
 import { invalidateFifoBaseCache } from './fifoEngine.js'
 import { k01LineDedupeKey } from './k01Engine.js'
@@ -67,12 +67,9 @@ export async function getExistingOperationsForImport(client, groups) {
   let orphanCount = 0
   const documentNos = [...new Set(groups.map(g => normalizeDocumentNo(g.documentNo)).filter(Boolean))]
 
-  /** Warianty nr dokumentu (ze spacją po prefiksie) – stare wpisy w bazie mogły mieć „PZ / …”. */
+  /** Warianty nr dokumentu (ze spacją po prefiksie, bez sufiksu lokalizacji). */
   function documentNoQueryVariants(normalized) {
-    const out = new Set([normalized])
-    const m = String(normalized || '').match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
-    if (m) out.add(`${m[1]} ${m[2]}`)
-    return [...out]
+    return documentNoImportAliases(normalized)
   }
 
   function registerExistingOperation(op, importMeta) {
@@ -81,8 +78,6 @@ export async function getExistingOperationsForImport(client, groups) {
       orphanCount += 1
       return
     }
-    const key = operationImportKey({ operation: op.operation_type, documentNo: op.document_no })
-    keys.add(key)
     const candidate = {
       documentNo: op.document_no,
       operationType: op.operation_type,
@@ -93,9 +88,13 @@ export async function getExistingOperationsForImport(client, groups) {
       createdAt: op.created_at,
       importedFileId: op.imported_file_id
     }
-    const existing = details.get(key)
-    if (!existing || String(candidate.createdAt || '') > String(existing.createdAt || '')) {
-      details.set(key, candidate)
+    for (const alias of documentNoImportAliases(op.document_no)) {
+      const key = `${op.operation_type}|${alias}`
+      keys.add(key)
+      const existing = details.get(key)
+      if (!existing || String(candidate.createdAt || '') > String(existing.createdAt || '')) {
+        details.set(key, candidate)
+      }
     }
   }
 
@@ -150,12 +149,31 @@ export function operationImportKey(group) {
   return `${group.operation}|${normalizeDocumentNo(group.documentNo)}`
 }
 
+/** Szuka metadanych operacji w bazie (dopasowanie także bez sufiksu /Kolonia itd.). */
+export function resolveOperationImportMeta(group, details) {
+  if (!group || !details) return null
+  const op = group.operation
+  for (const alias of documentNoImportAliases(group.documentNo)) {
+    const meta = details.get(`${op}|${alias}`)
+    if (meta?.operationId) return meta
+  }
+  return details.get(operationImportKey(group)) || null
+}
+
+function groupExistsInImportKeys(group, existingKeys) {
+  const op = group.operation
+  for (const alias of documentNoImportAliases(group.documentNo)) {
+    if (existingKeys.has(`${op}|${alias}`)) return true
+  }
+  return existingKeys.has(operationImportKey(group))
+}
+
 /** Dzieli grupy dokumentów na już w bazie (duplikaty) i nowe. */
 export function splitImportGroupsByExisting(groups, existingKeys) {
   const duplicates = []
   const fresh = []
   for (const g of groups || []) {
-    if (existingKeys.has(operationImportKey(g))) duplicates.push(g)
+    if (groupExistsInImportKeys(g, existingKeys)) duplicates.push(g)
     else fresh.push(g)
   }
   return { duplicates, fresh }
@@ -279,9 +297,9 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
     return { importedItems: 0, createdLots: 0, mergedDocuments: 0, unchangedDocuments: 0, changedDocuments: [] }
   }
 
-  const opIds = existingGroups
-    .map(g => details.get(operationImportKey(g))?.operationId)
-    .filter(Boolean)
+  const opIds = [...new Set(existingGroups
+    .map(g => resolveOperationImportMeta(g, details)?.operationId)
+    .filter(Boolean))]
   const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
 
   const productNames = []
@@ -300,7 +318,7 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
   const mergedOpIds = new Set()
 
   for (const group of existingGroups) {
-    const meta = details.get(operationImportKey(group))
+    const meta = resolveOperationImportMeta(group, details)
     const opId = meta?.operationId
     if (!opId) continue
 
@@ -316,14 +334,18 @@ export async function appendNewItemsFromExistingDocuments(client, existingGroups
       })
     }
 
-    if (!diff.newItems.length) {
+    const itemsToAdd = storedItems.length === 0 && (group.items?.length || 0) > 0
+      ? (group.items || [])
+      : diff.newItems
+
+    if (!itemsToAdd.length) {
       if (!diff.hasContentChanges) unchangedDocuments += 1
       continue
     }
 
     mergedDocuments += 1
     mergedOpIds.add(opId)
-    for (const row of diff.newItems) {
+    for (const row of itemsToAdd) {
       const canonicalName = deps.canonicalProductName?.(row.productName) || row.productName || 'Produkt do dopasowania'
       const productId = productMap.get(deps.normalizeText(canonicalName))
       const itemQty = Math.abs(Number(row.qty) || 0)
@@ -477,14 +499,14 @@ export function formatMergeResult(merge) {
 
 /** Pobiera zapis operacji + pozycje — do wykrywania zmian na rozpisanych PZ/WZ. */
 export async function loadStoredImportOperations(client, groups, details) {
-  const opIds = (groups || [])
-    .map(g => details.get(operationImportKey(g))?.operationId)
-    .filter(Boolean)
+  const opIds = [...new Set((groups || [])
+    .map(g => resolveOperationImportMeta(g, details)?.operationId)
+    .filter(Boolean))]
   const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
   const out = new Map()
   for (const group of groups || []) {
     const key = operationImportKey(group)
-    const meta = details.get(key)
+    const meta = resolveOperationImportMeta(group, details)
     if (!meta?.operationId) continue
     out.set(key, {
       meta,
@@ -949,6 +971,23 @@ async function attachLotsToIncomingItems(client, incomingItems, deps, notify) {
   return lotIds.length
 }
 
+async function fetchExistingOperationRow(client, row) {
+  const variants = documentNoImportAliases(row.document_no)
+  for (const docNo of variants) {
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, operation_type, document_no')
+        .eq('operation_type', row.operation_type)
+        .eq('document_no', docNo)
+        .maybeSingle()
+    )
+    if (error) throw error
+    if (data?.id) return data
+  }
+  return null
+}
+
 async function insertOperationsForGroups(client, groups, importedFileId, contractorMap, notify) {
   const allOpRows = groups.map(group => ({
     operation_type: group.operation,
@@ -979,12 +1018,20 @@ async function insertOperationsForGroups(client, groups, importedFileId, contrac
           client.from('operations').insert(row).select('id, operation_type, document_no').single()
         )
         if (oneErr) {
-          if (String(oneErr.message || '').includes('duplicate')) continue
+          if (String(oneErr.message || '').includes('duplicate')) {
+            const existing = await fetchExistingOperationRow(client, row)
+            if (existing) insertedOps.push(existing)
+            continue
+          }
           throw oneErr
         }
         insertedOps.push(one)
       } catch (inner) {
-        if (String(inner?.message || '').includes('duplicate')) continue
+        if (String(inner?.message || '').includes('duplicate')) {
+          const existing = await fetchExistingOperationRow(client, row)
+          if (existing) insertedOps.push(existing)
+          continue
+        }
         throw inner
       }
     }
@@ -992,7 +1039,9 @@ async function insertOperationsForGroups(client, groups, importedFileId, contrac
 
   const opKeyToId = new Map()
   for (const op of insertedOps) {
-    opKeyToId.set(operationImportKey({ operation: op.operation_type, documentNo: op.document_no }), op.id)
+    for (const alias of documentNoImportAliases(op.document_no)) {
+      opKeyToId.set(`${op.operation_type}|${alias}`, op.id)
+    }
   }
   return { opKeyToId, importedOperations: insertedOps.length }
 }
@@ -1006,7 +1055,13 @@ async function insertItemsAndLotsForGroups(client, groups, opKeyToId, productMap
 
   notify?.(`Przygotowanie ${groups.length} dokumentów, ${groups.reduce((s, g) => s + (g.items?.length || 0), 0)} pozycji…`)
   for (const group of groups) {
-    const opId = opKeyToId.get(operationImportKey(group))
+    let opId = opKeyToId.get(operationImportKey(group))
+    if (!opId) {
+      for (const alias of documentNoImportAliases(group.documentNo)) {
+        opId = opKeyToId.get(`${group.operation}|${alias}`)
+        if (opId) break
+      }
+    }
     if (!opId) continue
 
     for (const row of group.items) {
@@ -1148,16 +1203,20 @@ export async function hasAnyFifoAllocations(client) {
 /** Szacuje ile linii doklejenie doda (bez zapisu do bazy). */
 export async function estimateMergeNewItems(client, existingGroups, details, deps) {
   if (!client || !existingGroups?.length) return 0
-  const opIds = existingGroups.map(g => details.get(operationImportKey(g))?.operationId).filter(Boolean)
+  const opIds = [...new Set(existingGroups.map(g => resolveOperationImportMeta(g, details)?.operationId).filter(Boolean))]
   const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
   let total = 0
   for (const group of existingGroups) {
-    const key = operationImportKey(group)
-    const meta = details.get(key)
+    const meta = resolveOperationImportMeta(group, details)
     const opId = meta?.operationId
     if (!opId) continue
-    const diff = diffImportGroupAgainstStored(group, meta, itemsByOp.get(opId) || [], deps)
-    total += diff.newItems.length
+    const storedItems = itemsByOp.get(opId) || []
+    const diff = diffImportGroupAgainstStored(group, meta, storedItems, deps)
+    if (storedItems.length === 0 && (group.items?.length || 0) > 0) {
+      total += group.items.length
+    } else {
+      total += diff.newItems.length
+    }
   }
   return total
 }
