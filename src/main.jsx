@@ -5,7 +5,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -462,6 +462,8 @@ function App() {
   })
   const [pzRows, setPzRows] = useState([])
   const [pzHistoryRows, setPzHistoryRows] = useState([])
+  const [pzDateAudit, setPzDateAudit] = useState(null)
+  const [pzDateAuditLoading, setPzDateAuditLoading] = useState(false)
   const [pzEditDates, setPzEditDates] = useState({})
   const [pzSearch, setPzSearch] = useState('')
   const [pzStatusFilter, setPzStatusFilter] = useState('all')
@@ -1624,9 +1626,9 @@ function App() {
         `Po wcześniejszych WZ w puli ≤ ${cutoff} zostało ${available.toLocaleString('pl-PL')} kg — ta WZ wymaga ${targetQty.toLocaleString('pl-PL')} kg (brakuje ${shortage.toLocaleString('pl-PL')} kg).`
       )
     }
-    if (afterCutoff >= shortage - 0.5) {
+    if (afterCutoff >= shortage - 0.5 && afterCutoff > 0.5) {
       parts.push(
-        `W magazynie jest ${afterCutoff.toLocaleString('pl-PL')} kg PZ z datą po ${cutoff} (np. lipiec) — nie wchodzą do tej WZ. Czerwcowe PZ z błędną datą w bazie liczy system z numeru dokumentu (PZ/…/30/06/2026).`
+        `W magazynie jest ${afterCutoff.toLocaleString('pl-PL')} kg PZ z datą po ${cutoff} — to osobna pula (np. kolejny miesiąc), nie wchodzi na tę WZ.`
       )
     }
     return parts.join(' ')
@@ -1786,21 +1788,13 @@ function App() {
             <p className="fifo-bilans-hint">{formatK03FifoBilansHint(preview.diagnostics, preview)}</p>
           )}
         </div>}
-        {preview?.diagnostics && Number(preview.diagnostics.purchasedTotalKg || 0) > 0 && (
-          (Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0 ||
-            Number(preview.diagnostics.remainingAfterCutoffKg || 0) >= Number(preview.shortage || 0) - 0.5) && (
+        {preview?.diagnostics && Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0 && Number(preview.diagnostics.purchasedTotalKg || 0) > 0 && (
             <div className="actions no-print" style={{ marginBottom: 8 }}>
-              <button type="button" className="secondary mini" disabled={loading || saving} onClick={repairFifoDatesForK03Preview}>
-                {loading ? 'Naprawa dat…' : 'Napraw daty PZ z numerów dokumentów'}
-              </button>
               <span className="hint">
-                {Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0
-                  ? `W bazie jest ${Number(preview.diagnostics.purchasedTotalKg).toLocaleString('pl-PL')} kg PZ, ale żadna nie ma daty ≤ ${preview.cutoffDate} (sprawdź nr PZ, np. …/30/06/2026).`
-                  : `Jest ${Number(preview.diagnostics.remainingAfterCutoffKg).toLocaleString('pl-PL')} kg PZ z datą po ${preview.cutoffDate} — nie idą na tę WZ. Czerwcowe PZ liczy system z numeru dokumentu.`}
+                Żadna partia PZ nie ma daty przyjęcia ≤ {preview.cutoffDate} (wg numeru PZ lub daty w bazie). PZ/FIFO → „Audyt: nr PZ vs data w bazie” pokaże ewentualne rozjazdy.
               </span>
             </div>
-          )
-        )}
+          )}
         {confirmMismatch && (manualRows?.length > 0) && (
           <div className="k03-manual-pz-box">
             <p className="hint"><b>Uzupełnij ręcznie brakujące PZ</b> — wiersze z FIFO możesz poprawić; w wierszu „brak towaru” wpisz nr PZ, datę, dostawcę i kg.</p>
@@ -8647,6 +8641,25 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  async function runPzDateMismatchAudit() {
+    if (!supabase) return
+    setPzDateAuditLoading(true)
+    try {
+      const result = await auditPzDateMismatches(supabase, { maxRows: 200 })
+      setPzDateAudit(result)
+      if (result.mismatch_count === 0) {
+        setMessage(`Audyt dat PZ: sprawdzono ${result.scanned} dokumentów — brak rozjazdu między numerem PZ a datą w bazie.`)
+      } else {
+        setMessage(`Audyt dat PZ: ${result.mismatch_count} dokumentów z rozjazdem (lista poniżej).`)
+      }
+    } catch (err) {
+      setPzDateAudit(null)
+      setMessage(`Błąd audytu dat PZ: ${err?.message || String(err)}`)
+    } finally {
+      setPzDateAuditLoading(false)
+    }
+  }
+
   async function savePzDate(row) {
     if (!supabase || !row?.id) return
     const newDate = pzEditDates[row.id] || String(row.production_date || row.operation_date || '').slice(0, 10)
@@ -9448,7 +9461,30 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       {fifoKartotekiDirty && <div className="warning inline-warning"><AlertTriangle size={18}/><div><b>Zmieniono dane FIFO.</b> Kartoteki mogą pokazywać stary układ. Kliknij „Odśwież kartoteki”.</div></div>}
       {renderFifoProgressBanner()}
       {message && <p className="message">{message}</p>}
-      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button onClick={recalculateFifoFromPzTab} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={recalculateFifoFullFromPzTab} disabled={fifoRecalculating}>Pełne FIFO (admin)</button><button className="secondary" disabled={haccpBusy} onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież kartoteki'}</button></div>
+      <div className="actions"><button className="secondary" onClick={loadPzManagementData}><RefreshCcw size={16}/> Odśwież PZ</button><button className="secondary" onClick={runPzDateMismatchAudit} disabled={pzDateAuditLoading}><Eye size={16}/> {pzDateAuditLoading ? 'Audyt…' : 'Audyt: nr PZ vs data w bazie'}</button><button onClick={recalculateFifoFromPzTab} disabled={fifoRecalculating}><RefreshCcw size={16}/> {fifoRecalculating ? 'FIFO…' : 'Uzupełnij braki FIFO'}</button><button className="secondary" onClick={recalculateFifoFullFromPzTab} disabled={fifoRecalculating}>Pełne FIFO (admin)</button><button className="secondary" disabled={haccpBusy} onClick={refreshHaccpAfterFifo}><ClipboardList size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież kartoteki'}</button></div>
+      {pzDateAudit && (
+        <div className="hint fifo-diag-box" style={{ marginBottom: 12 }}>
+          <b>Audyt dat PZ</b> — sprawdzono {pzDateAudit.scanned} dokumentów.
+          {pzDateAudit.mismatch_count === 0
+            ? ' Brak rozjazdu: data w bazie = data z numeru PZ.'
+            : ` ${pzDateAudit.mismatch_count} PZ ma inną datę w bazie niż w numerze (FIFO liczy datę z numeru, gdy jest dzień w nr):`}
+          {pzDateAudit.mismatch_count > 0 && (
+            <div className="table-wrap small" style={{ marginTop: 8 }}>
+              <table>
+                <thead><tr><th>Nr PZ</th><th>Data w bazie</th><th>Data z numeru PZ</th><th>FIFO używa</th></tr></thead>
+                <tbody>{(pzDateAudit.mismatches || []).map(row => (
+                  <tr key={row.operation_id}>
+                    <td><b>{row.document_no}</b></td>
+                    <td>{row.db_date || '—'}</td>
+                    <td>{row.date_from_document_no || '—'}</td>
+                    <td>{row.fifo_uses_date || '—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
       <div className="summary"><span>PZ razem: <b>{pzRows.length}</b></span><span>Nieprzypisane: <b>{pzRows.filter(r => r.status_key === 'wolna').length}</b></span><span>Częściowo: <b>{pzRows.filter(r => r.status_key === 'czesciowo').length}</b></span><span>Wykorzystane: <b>{pzRows.filter(r => r.status_key === 'wykorzystana').length}</b></span></div>
       <div className="form-grid compact"><label>Szukaj PZ / partii / produktu<input value={pzSearch} onChange={e => setPzSearch(e.target.value)} placeholder="np. PZ/001 albo Jab/001 albo truskawka" /></label><label>Status<select value={pzStatusFilter} onChange={e => setPzStatusFilter(e.target.value)}><option value="all">Wszystkie</option><option value="wolna">Nieprzypisane</option><option value="czesciowo">Częściowo</option><option value="wykorzystana">Wykorzystane</option></select></label></div>
       <div className="table-wrap small"><table><thead><tr><th>Data PZ</th><th>Nr PZ</th><th>Partia</th><th>Asortyment</th><th>Grupa</th><th>Ilość PZ</th><th>Przypisano</th><th>Pozostało</th><th>Status</th><th>Akcje</th></tr></thead><tbody>{visiblePzRows.map(row => { const editDate = pzEditDates[row.id] ?? String(row.production_date || row.operation_date || '').slice(0, 10); return <tr key={row.id}><td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setPzEditDates(prev => ({ ...prev, [row.id]: e.target.value }))} /></td><td><b>{row.document_no || '-'}</b></td><td>{row.lot_no}</td><td>{row.product_name}</td><td>{row.product_group}</td><td>{Number(row.initial_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.allocated_qty || 0).toLocaleString('pl-PL')}</td><td>{Number(row.calculated_remaining_qty || 0).toLocaleString('pl-PL')}</td><td><span className={`pill pz-status-${row.status_key}`}>{row.status_label}</span></td><td className="row-actions"><button className="mini secondary" onClick={() => savePzDate(row)}>Zapisz datę</button></td></tr> })}</tbody></table></div>
