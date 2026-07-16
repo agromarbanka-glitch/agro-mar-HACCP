@@ -278,6 +278,72 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
   line-height: 1.5;
 }
 .import-status-panel b { color: #0f172a; }
+.import-qty-summary {
+  margin: 14px 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06);
+}
+.import-qty-summary > summary {
+  cursor: pointer;
+  padding: 14px 16px;
+  font-size: 15px;
+  color: #0f172a;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  background: #f8fafc;
+  border-radius: 12px;
+}
+.import-qty-summary[open] > summary {
+  border-bottom: 1px solid #e2e8f0;
+  border-radius: 12px 12px 0 0;
+}
+.import-qty-summary > summary::-webkit-details-marker { display: none; }
+.import-qty-summary-pills { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.import-qty-summary-body { padding: 14px 16px 16px; background: #ffffff; }
+.import-qty-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px 20px;
+}
+.import-qty-col h4 { margin: 0 0 6px; font-size: 15px; color: #0f172a; }
+.import-qty-table {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  max-height: 320px;
+}
+.import-qty-table th { background: #f1f5f9; color: #0f172a; position: sticky; top: 0; }
+.import-qty-table td { background: #ffffff; color: #0f172a; }
+.import-qty-monthly {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed #cbd5e1;
+}
+.import-qty-monthly > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #1e40af;
+  margin-bottom: 8px;
+}
+.import-qty-month-head { margin: 12px 0 8px; font-size: 14px; color: #334155; }
+.import-qty-month-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 14px;
+}
+.import-qty-month-block {
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+.import-qty-month-block h5 { margin: 0 0 6px; font-size: 13px; color: #0f172a; }
+.import-qty-month-list { margin: 0; padding-left: 18px; font-size: 13px; color: #334155; line-height: 1.45; }
 .pz-date-input { min-width: 130px; }
 .pz-status-wolna { background: #eef2ff; color: #3730a3; }
 .pz-status-czesciowo { background: #fef3c7; color: #92400e; }

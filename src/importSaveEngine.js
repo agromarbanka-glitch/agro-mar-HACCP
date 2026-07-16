@@ -1270,6 +1270,98 @@ function groupExcelQtyByProduct(groups, deps) {
   return totals
 }
 
+function bumpImportProductBucket(bucket, productName, kg, docNo) {
+  const name = String(productName || '—').trim() || '—'
+  if (!bucket.has(name)) {
+    bucket.set(name, { productName: name, kg: 0, lines: 0, docs: new Set() })
+  }
+  const entry = bucket.get(name)
+  entry.kg += kg
+  entry.lines += 1
+  if (docNo) entry.docs.add(docNo)
+}
+
+function finalizeImportProductBuckets(productMap) {
+  return [...productMap.values()]
+    .map(v => ({
+      productName: v.productName,
+      kg: Math.round(v.kg * 1000) / 1000,
+      lines: v.lines,
+      documents: v.docs.size
+    }))
+    .sort((a, b) => b.kg - a.kg || String(a.productName).localeCompare(String(b.productName), 'pl'))
+}
+
+function finalizeImportMonthBuckets(monthMap) {
+  return [...monthMap.entries()]
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .map(([month, productMap]) => {
+      const products = finalizeImportProductBuckets(productMap)
+      const totalKg = Math.round(products.reduce((s, p) => s + p.kg, 0) * 1000) / 1000
+      return { month, products, totalKg }
+    })
+}
+
+/**
+ * Sumuje kg z wczytanego Excela (wiersze PZ/WZ) wg asortymentu — do podglądu w Importach (nie K01).
+ */
+export function summarizeImportRowsByProduct(rows, deps = {}) {
+  const canon = deps.canonicalProductName || canonicalProductName
+  const pzMap = new Map()
+  const wzMap = new Map()
+  const pzMonthMap = new Map()
+  const wzMonthMap = new Map()
+
+  for (const row of rows || []) {
+    const kg = Math.abs(Number(row.qty) || 0)
+    if (!row.productName || kg <= 0) continue
+    const name = canon(row.productName) || row.productName
+    const month = String(row.issueDate || '').slice(0, 7) || '—'
+    const docNo = normalizeDocumentNo(row.documentNo)
+
+    if (row.operation === 'przyjecie') {
+      bumpImportProductBucket(pzMap, name, kg, docNo)
+      if (!pzMonthMap.has(month)) pzMonthMap.set(month, new Map())
+      bumpImportProductBucket(pzMonthMap.get(month), name, kg, docNo)
+    } else if (row.operation === 'sprzedaz') {
+      bumpImportProductBucket(wzMap, name, kg, docNo)
+      if (!wzMonthMap.has(month)) wzMonthMap.set(month, new Map())
+      bumpImportProductBucket(wzMonthMap.get(month), name, kg, docNo)
+    }
+  }
+
+  const pz = finalizeImportProductBuckets(pzMap)
+  const wz = finalizeImportProductBuckets(wzMap)
+  return {
+    pz,
+    wz,
+    pzByMonth: finalizeImportMonthBuckets(pzMonthMap),
+    wzByMonth: finalizeImportMonthBuckets(wzMonthMap),
+    totalPzKg: Math.round(pz.reduce((s, p) => s + p.kg, 0) * 1000) / 1000,
+    totalWzKg: Math.round(wz.reduce((s, p) => s + p.kg, 0) * 1000) / 1000
+  }
+}
+
+/** Sumuje kg z zapisanych operacji importu (podgląd rejestru). */
+export function summarizeOperationsByProduct(operations, deps = {}) {
+  const rows = []
+  for (const op of operations || []) {
+    const operation = op.operation_type === 'przyjecie' ? 'przyjecie' : 'sprzedaz'
+    for (const item of op.operation_items || []) {
+      const kg = Math.abs(Number(item.qty) || 0)
+      if (!item.raw_product_name || kg <= 0) continue
+      rows.push({
+        productName: item.raw_product_name,
+        qty: kg,
+        operation,
+        issueDate: op.operation_date,
+        documentNo: op.document_no
+      })
+    }
+  }
+  return summarizeImportRowsByProduct(rows, deps)
+}
+
 /**
  * Pełny audyt: Excel vs baza — wykrywa brakujące PZ, puste dokumenty, rozjazdy kg.
  * @returns {{ missingDocuments, emptyDocuments, qtyMismatch, excelOnlyKg, dbOnlyKg, productGaps, summary }}

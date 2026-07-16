@@ -5,7 +5,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -490,6 +490,15 @@ function App() {
   const pzCount = filteredRows.filter(r => r.operation === 'przyjecie').length
   const salesCount = filteredRows.filter(r => r.operation === 'sprzedaz').length
   const qtySum = filteredRows.reduce((s, r) => s + (Number(r.qty) || 0), 0)
+  const importExcelQtySummary = useMemo(
+    () => (filteredRows.length ? summarizeImportRowsByProduct(filteredRows, { canonicalProductName }) : null),
+    [filteredRows]
+  )
+  const importPreviewQtySummary = useMemo(() => {
+    const ops = importPreviewModal?.operations
+    if (!ops?.length || importPreviewModal?.loading) return null
+    return summarizeOperationsByProduct(ops, { canonicalProductName })
+  }, [importPreviewModal])
   const activeLots = useMemo(() => stockRows.filter(l => Number(l.remaining_qty || 0) > 0), [stockRows])
   const visibleWarehouseLots = useMemo(() => {
     const q = normalizeText(lotSearch)
@@ -7920,6 +7929,94 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  function formatImportMonthLabel(ym) {
+    if (!ym || ym === '—') return '—'
+    const [y, m] = String(ym).split('-')
+    return y && m ? `${m}/${y}` : ym
+  }
+
+  function renderImportProductQtyTable(products, emptyLabel) {
+    if (!products?.length) return <p className="hint">{emptyLabel}</p>
+    return (
+      <div className="table-wrap small import-qty-table">
+        <table>
+          <thead><tr><th>Asortyment</th><th>kg</th><th>Wiersze</th><th>Dok.</th></tr></thead>
+          <tbody>{products.map(p => (
+            <tr key={p.productName}>
+              <td><b>{p.productName}</b></td>
+              <td>{Number(p.kg || 0).toLocaleString('pl-PL')}</td>
+              <td>{p.lines}</td>
+              <td>{p.documents}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    )
+  }
+
+  function renderImportMonthlyQtyBlock(monthRows, kindLabel) {
+    if (!monthRows?.length) return null
+    return (
+      <div className="import-qty-month-grid">
+        {monthRows.map(block => (
+          <div key={`${kindLabel}-${block.month}`} className="import-qty-month-block">
+            <h5>{formatImportMonthLabel(block.month)} — {Number(block.totalKg || 0).toLocaleString('pl-PL')} kg {kindLabel}</h5>
+            <ul className="import-qty-month-list">
+              {block.products.slice(0, 12).map(p => (
+                <li key={p.productName}><b>{p.productName}</b>: {Number(p.kg || 0).toLocaleString('pl-PL')} kg</li>
+              ))}
+              {block.products.length > 12 && <li className="hint">… i {block.products.length - 12} innych</li>}
+            </ul>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  function renderImportProductSummaryPanel(summary, { title, subtitle } = {}) {
+    if (!summary || (!summary.pz?.length && !summary.wz?.length)) return null
+    return (
+      <details className="import-qty-summary">
+        <summary>
+          <b>{title || 'Ile kg na PZ i WZ (wg asortymentu)'}</b>
+          {subtitle && <span className="hint"> — {subtitle}</span>}
+          <span className="import-qty-summary-pills">
+            <span className="pill">PZ: {Number(summary.totalPzKg || 0).toLocaleString('pl-PL')} kg</span>
+            <span className="pill">WZ: {Number(summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</span>
+          </span>
+        </summary>
+        <div className="import-qty-summary-body">
+          <p className="hint">Podsumowanie z importu — osobno od kartoteki K01 (tam tylko przyjęcia PZ). WZ służy m.in. do weryfikacji K03/FIFO.</p>
+          <div className="import-qty-columns">
+            <div className="import-qty-col">
+              <h4>Przyjęcia PZ</h4>
+              <p className="hint">Łącznie <b>{Number(summary.totalPzKg || 0).toLocaleString('pl-PL')} kg</b> · {summary.pz.length} asortymentów</p>
+              {renderImportProductQtyTable(summary.pz, 'Brak pozycji PZ w danych.')}
+            </div>
+            <div className="import-qty-col">
+              <h4>Wydania WZ / FV</h4>
+              <p className="hint">Łącznie <b>{Number(summary.totalWzKg || 0).toLocaleString('pl-PL')} kg</b> · {summary.wz.length} asortymentów</p>
+              {renderImportProductQtyTable(summary.wz, 'Brak pozycji WZ/FV w danych.')}
+            </div>
+          </div>
+          {(summary.pzByMonth?.length > 0 || summary.wzByMonth?.length > 0) && (
+            <details className="import-qty-monthly">
+              <summary>Rozbicie miesięczne (wg daty dokumentu w pliku / bazie)</summary>
+              {summary.pzByMonth?.length > 0 && <>
+                <h4 className="import-qty-month-head">PZ wg miesiąca</h4>
+                {renderImportMonthlyQtyBlock(summary.pzByMonth, 'PZ')}
+              </>}
+              {summary.wzByMonth?.length > 0 && <>
+                <h4 className="import-qty-month-head">WZ wg miesiąca</h4>
+                {renderImportMonthlyQtyBlock(summary.wzByMonth, 'WZ')}
+              </>}
+            </details>
+          )}
+        </div>
+      </details>
+    )
+  }
+
   function renderImportAuditPanel() {
     if (!importAudit) return null
     const hasIssues = (importAudit.missingDocuments?.length || importAudit.emptyDocuments?.length || importAudit.qtyMismatch?.length || importAudit.productGaps?.length || importAudit.hiddenMatches?.length)
@@ -9052,6 +9149,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           {importNewDocCount > 0 && <span>Do zapisu: <b>{importNewDocCount}</b> dokumentów</span>}
           {importDuplicates.length > 0 && <span>Pominięte duplikaty: <b>{importDuplicates.length}</b></span>}
         </div>
+        {renderImportProductSummaryPanel(importExcelQtySummary, {
+          title: 'Ile kg na PZ i WZ — wczytany plik Excel',
+          subtitle: fileName || undefined
+        })}
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
           <tbody>{filteredRows.slice(0, 100).map((row, i) => <tr key={i}>
@@ -9079,6 +9180,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           {importNewDocCount > 0 && <span>Do zapisu: <b>{importNewDocCount}</b> dokumentów</span>}
           {importDuplicates.length > 0 && <span>Pominięte duplikaty: <b>{importDuplicates.length}</b></span>}
         </div>
+        {renderImportProductSummaryPanel(importExcelQtySummary, {
+          title: 'Ile kg na PZ i WZ — wczytany plik Excel',
+          subtitle: fileName || undefined
+        })}
         {renderImportAuditPanel()}
         <div className="table-wrap"><table>
           <thead><tr><th>Typ</th><th>Nr</th><th>Data</th><th>Produkt</th><th>Ilość</th><th>Kontrahent</th><th>Operacja</th></tr></thead>
@@ -9125,6 +9230,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <td className="row-actions"><button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, f.filename || f.file_name)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
         </tr>)}</tbody>
       </table></div>}
+      {importPreviewQtySummary && renderImportProductSummaryPanel(importPreviewQtySummary, {
+        title: 'Ile kg na PZ i WZ — zapisany import w bazie',
+        subtitle: importPreviewModal?.fileName || undefined
+      })}
       {importPreviewModal && !importPreviewModal.loading && (importPreviewModal.operations?.length > 0) && (
         <div className="import-status-panel" style={{ marginTop: 14 }}>
           <b>Podgląd: {importPreviewModal.fileName || 'import'}</b> — {importPreviewModal.operations.length} dokumentów.
