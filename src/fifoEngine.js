@@ -6,7 +6,7 @@
  * 2. PZ dostępne gdy data przyjęcia ≤ data WZ (lub ≤ data przerobu).
  * 3. Data PZ: z numeru PZ (np. PZ/022/30/06/2026) ma pierwszeństwo przed operation_date w bazie.
  * 4. Lipcowe PZ nie idą na czerwcową WZ; czerwcowe PZ z błędną datą w bazie nadal wchodzą (wg nr).
- * 5. WZ chronologicznie (data → created_at); partie PZ najstarsze pierwsze.
+ * 5. WZ chronologicznie (data → nr WZ rosnąco → created_at); partie PZ najstarsze pierwsze.
  */
 import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo, isInternalLotNumber, repairPzRowsFromLots, fifoClassDisplayLabel, canonicalProductName } from './k03Engine'
 import { inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
@@ -15,10 +15,24 @@ function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
 }
 
-/** Kolejność WZ w FIFO: data sprzedaży → zapis w bazie (created_at), bez numeru dokumentu. */
+/** Numer kolejny WZ/FV/FS z numeru dokumentu (np. WZ/009/30/06/2026 → 9). */
+export function saleDocumentSequence(documentNo = '') {
+  const norm = String(documentNo || '').trim().toUpperCase()
+  if (!norm) return Number.POSITIVE_INFINITY
+  const direct = norm.match(/^(?:WZ|FV|FS)\/?(\d+)/)
+  if (direct) return Number(direct[1])
+  const parts = norm.split('/').filter(Boolean)
+  if (parts.length >= 2 && /^\d+$/.test(parts[1])) return Number(parts[1])
+  return Number.POSITIVE_INFINITY
+}
+
+/** Kolejność WZ w FIFO: data sprzedaży → nr dokumentu (009 przed 010) → zapis w bazie. */
 export function compareFifoSaleOrder(a, b) {
-  return String(a.sale_date || '').localeCompare(String(b.sale_date || '')) ||
-    String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
+  const dateCmp = String(a.sale_date || '').slice(0, 10).localeCompare(String(b.sale_date || '').slice(0, 10))
+  if (dateCmp) return dateCmp
+  const seqCmp = saleDocumentSequence(a.sale_doc_no) - saleDocumentSequence(b.sale_doc_no)
+  if (seqCmp) return seqCmp
+  return String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
     String(a.operation_id || '').localeCompare(String(b.operation_id || '')) ||
     String(a.product_id || '').localeCompare(String(b.product_id || ''))
 }
@@ -599,6 +613,21 @@ function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap, match
   }
 }
 
+/**
+ * Wspólna symulacja FIFO do dnia asOfCutoff — ta sama logika co K03.
+ * PZ dla każdego WZ tylko z datą ≤ data tego WZ (nie globalny koniec miesiąca).
+ */
+export function simulateFifoSalesThroughDate(lotState, sortedSales, productMap, opMap, options = {}) {
+  const asOfCutoff = String(options.asOfCutoff || '9999-12-31').slice(0, 10)
+  const poolFilter = options.matchSpec || null
+  for (const sale of sortedSales) {
+    const saleDate = String(sale.sale_date || '').slice(0, 10)
+    if (!saleDate || saleDate > asOfCutoff) continue
+    if (poolFilter && !sameFifoPool(sale.matchSpec, poolFilter)) continue
+    simulateAllocation(sale, lotState, productMap, saleDate, opMap, sale.matchSpec)
+  }
+}
+
 /** Odejmuje z partii rozliczenia FIFO innych WZ (także „późniejszych” w sortowaniu). */
 function applyOtherSalesAllocations(base, lotState, excludeSaleKey, matchSpec, workflowBySaleKey = null) {
   const wfMap = workflowBySaleKey || base.workflowBySaleKey || new Map()
@@ -647,7 +676,7 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatch
 /**
  * FIFO wg klasy produktu:
  * 1. Tylko WZ/FV/FS
- * 2. WZ chronologicznie (data → created_at)
+ * 2. WZ chronologicznie (data → nr WZ → created_at)
  * 3. PZ z datą przyjęcia ≤ data WZ (data z nr PZ gdy jest w numerze)
  * 4. Partie PZ najstarsze pierwsze
  */
@@ -1127,6 +1156,19 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     ? summarizeGroupInventory(simulation.lotStateBeforeTarget, base.productMap, matchSpec, cutoff, base.opMap)
     : purchasedInventory
 
+  const targetDay = String(sale.sale_date || '').slice(0, 10)
+  const sameDayWzOrder = base.sortedSales
+    .filter(s => {
+      if (String(s.sale_date || '').slice(0, 10) !== targetDay) return false
+      const wf = workflowBySaleKey.get(s.key) || null
+      return sameFifoPool(effectiveSaleMatchSpec(s, wf), matchSpec)
+    })
+    .map(s => ({
+      wz_no: s.sale_doc_no,
+      kg: Number(s.sale_qty || 0),
+      isTarget: s.key === saleKey
+    }))
+
   return {
     ok: true,
     saleKey,
@@ -1159,6 +1201,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
       priorUnallocatedWzCount: priorReserve.priorUnallocatedCount,
       priorUnallocatedWzKg: priorReserve.priorUnallocatedQty,
       targetSaleQty: Number(sale.sale_qty || 0),
+      sameDayWzOrder,
       siblingClasses: siblingAudit
     }
   }

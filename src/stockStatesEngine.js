@@ -1,10 +1,11 @@
 /**
  * Stany – nieprzypisany surowiec z PZ na wybrany dzień (symulacja FIFO do daty).
+ * Używa tego samego silnika co K03: PZ ≤ data WZ, kolejność WZ wg compareFifoSaleOrder.
  */
 import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
-import { lotReceiptDate, compareFifoSaleOrder } from './fifoEngine'
+import { lotReceiptDate, compareFifoSaleOrder, simulateFifoSalesThroughDate } from './fifoEngine'
 
-export const STOCK_STATES_VERSION = '1.0'
+export const STOCK_STATES_VERSION = '1.1'
 
 async function fetchInChunks(client, table, select, column, ids, chunkSize = 80) {
   const uniqueIds = Array.from(new Set((ids || []).filter(Boolean)))
@@ -28,36 +29,6 @@ function isIncomingLotOperation(op) {
 
 function resolveGroup(product, productName = '', lotGroup = '') {
   return resolveFifoProductGroup(product, productName, lotGroup)
-}
-
-function simulateFifoToDate({ cutoff, lotState, sortedSales, productMap, opMap }) {
-  for (const sale of sortedSales) {
-    let remaining = Number(sale.sale_qty || 0)
-    const lots = Array.from(lotState.values())
-      .filter(lot => {
-        const receiptDate = lotReceiptDate(lot, opMap)
-        return fifoLotMatchesMatchSpec(lot, productMap, sale.matchSpec) &&
-          Number(lot.remaining_qty || 0) > 0 &&
-          receiptDate &&
-          receiptDate !== '0000-01-01' &&
-          receiptDate <= cutoff
-      })
-      .sort((a, b) =>
-        lotReceiptDate(a, opMap).localeCompare(lotReceiptDate(b, opMap)) ||
-        String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
-        String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
-      )
-
-    for (const lot of lots) {
-      if (remaining <= 0.0005) break
-      const available = Number(lot.remaining_qty || 0)
-      const take = Math.min(available, remaining)
-      if (take <= 0) continue
-      lot.remaining_qty = available - take
-      lotState.set(lot.id, lot)
-      remaining -= take
-    }
-  }
 }
 
 /**
@@ -112,8 +83,6 @@ export async function computeUnassignedPzStock(client, asOfDate) {
     })
   }
 
-  const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
-
   const saleGroups = new Map()
   for (const item of rozchodItems || []) {
     const op = opMap.get(item.operation_id)
@@ -143,7 +112,7 @@ export async function computeUnassignedPzStock(client, asOfDate) {
 
   const sortedSales = Array.from(saleGroups.values()).sort(compareFifoSaleOrder)
 
-  simulateFifoToDate({ cutoff, lotState, sortedSales, productMap, opMap })
+  simulateFifoSalesThroughDate(lotState, sortedSales, productMap, opMap, { asOfCutoff: cutoff })
 
   const byProduct = new Map()
   for (const lot of lotState.values()) {
@@ -200,7 +169,7 @@ export async function computeUnassignedPzStock(client, asOfDate) {
     totalUnassignedKg,
     lotCount,
     message: rows.length
-      ? `Stan na ${cutoff}: ${rows.length} asortymentów, ${totalUnassignedKg.toLocaleString('pl-PL')} kg nieprzypisane do WZ.`
+      ? `Stan na ${cutoff}: ${rows.length} asortymentów, ${totalUnassignedKg.toLocaleString('pl-PL')} kg nieprzypisane do WZ (FIFO jak K03).`
       : `Stan na ${cutoff}: brak nieprzypisanego surowca z PZ (wszystko rozliczone lub brak PZ do tej daty).`
   }
 }

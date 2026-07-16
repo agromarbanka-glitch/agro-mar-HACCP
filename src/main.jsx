@@ -1787,6 +1787,13 @@ function App() {
                 <span key={i}> Inna klasa ({s.classLabel}): {Number(s.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg PZ ≤ {preview.cutoffDate}.</span>
               ))}</>
             )}
+            {(preview.diagnostics.sameDayWzOrder || []).length > 1 && (
+              <p style={{ marginTop: 6, marginBottom: 0 }}>
+                Kolejność WZ tego dnia (FIFO): {(preview.diagnostics.sameDayWzOrder || []).map(w =>
+                  `${w.wz_no || '?'} (${Number(w.kg || 0).toLocaleString('pl-PL')} kg)${w.isTarget ? ' ← ta WZ' : ''}`
+                ).join(' → ')}
+              </p>
+            )}
           </div>
         )}
         {mismatch && preview && <div className="fifo-shortage-box">
@@ -9532,7 +9539,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'stany' && canSeeTab(authProfile, 'stany') && <>
     <section className="card stany-section-card">
-      <div className="section-title"><BarChart3/><div><h2>Stany – PZ nieprzypisane do WZ</h2><p>Stan na koniec wybranego dnia: ile surowca z PZ (data przyjęcia ≤ dzień) nie zostało jeszcze rozliczone na WZ z tego samego okresu (symulacja FIFO). Wersja silnika: {STOCK_STATES_VERSION}.</p></div></div>
+      <div className="section-title"><BarChart3/><div><h2>Stany – PZ nieprzypisane do WZ</h2><p>Stan na koniec wybranego dnia — ten sam silnik FIFO co K03 (PZ ≤ data WZ, kolejność WZ: data → nr dokumentu). Wersja: {STOCK_STATES_VERSION}.</p></div></div>
       <div className="form-grid compact">
         <label>Stan na dzień
           <input type="date" value={stanyAsOfDate} onChange={e => setStanyAsOfDate(e.target.value)} />

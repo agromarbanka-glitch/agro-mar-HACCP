@@ -19,7 +19,7 @@ import {
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
 import { operationImportKey, diffImportGroupAgainstStored, loadStoredImportOperations } from './importSaveEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.4'
+export const K03_WZ_ENGINE_VERSION = '1.5'
 
 function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
   const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys

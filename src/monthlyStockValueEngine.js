@@ -13,13 +13,12 @@
 import {
   isSaleOperation,
   resolveFifoProductGroup,
-  resolveFifoMatchSpec,
-  fifoLotMatchesMatchSpec
+  resolveFifoMatchSpec
 } from './k03Engine'
-import { lotReceiptDate, compareFifoSaleOrder } from './fifoEngine'
+import { lotReceiptDate, compareFifoSaleOrder, simulateFifoSalesThroughDate } from './fifoEngine'
 import { buildReportTitle } from './monthlyStockValueFromExcel'
 
-export const MONTHLY_STOCK_VALUE_VERSION = '1.3'
+export const MONTHLY_STOCK_VALUE_VERSION = '1.4'
 
 async function loadDirectionItems(client, direction) {
   const full = 'id, operation_id, product_id, qty, direction, raw_product_name, lot_id, unit_price_net'
@@ -121,35 +120,9 @@ function lotUnitPrice(lot, itemByLotId, itemByOpProduct) {
   return null
 }
 
-/** FIFO do dnia cutoff – sprzedaż wyłącznie po dacie WZ (sale_date). */
+/** FIFO do dnia cutoff – ta sama logika co K03 (PZ ≤ data WZ). */
 function simulateFifoToDate({ cutoff, lotState, sortedSales, productMap, opMap }) {
-  for (const sale of sortedSales) {
-    let remaining = Number(sale.sale_qty || 0)
-    const lots = Array.from(lotState.values())
-      .filter(lot => {
-        const receiptDate = lotReceiptDate(lot, opMap)
-        return fifoLotMatchesMatchSpec(lot, productMap, sale.matchSpec) &&
-          Number(lot.remaining_qty || 0) > 0 &&
-          receiptDate &&
-          receiptDate !== '0000-01-01' &&
-          receiptDate <= cutoff
-      })
-      .sort((a, b) =>
-        lotReceiptDate(a, opMap).localeCompare(lotReceiptDate(b, opMap)) ||
-        String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
-        String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
-      )
-
-    for (const lot of lots) {
-      if (remaining <= 0.0005) break
-      const available = Number(lot.remaining_qty || 0)
-      const take = Math.min(available, remaining)
-      if (take <= 0) continue
-      lot.remaining_qty = available - take
-      lotState.set(lot.id, lot)
-      remaining -= take
-    }
-  }
+  simulateFifoSalesThroughDate(lotState, sortedSales, productMap, opMap, { asOfCutoff: cutoff })
 }
 
 function ensureRow(map, key, label, productId, productMap) {
