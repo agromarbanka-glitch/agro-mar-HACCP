@@ -154,15 +154,13 @@ async function loadFifoBaseData(client, options = {}) {
   const productMap = new Map((products || []).map(p => [p.id, p]))
   const opMap = new Map((operations || []).map(o => [o.id, o]))
   const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
-  for (const item of saleItemsRaw || []) {
-    if (item.operation_id) saleOpIds.add(item.operation_id)
-  }
 
   const saleLines = []
   const saleGroups = new Map()
   for (const item of saleItemsRaw || []) {
     const op = opMap.get(item.operation_id)
     if (!item.operation_id || !item.product_id) continue
+    if (!op || !isSaleOperation(op)) continue
     const qty = Math.abs(Number(item.qty || 0))
     if (qty <= 0) continue
     const product = productMap.get(item.product_id)
@@ -614,10 +612,11 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatch
 
 /**
  * FIFO wg klasy produktu:
- * 1. WZ w kolejności daty sprzedaży (operation_date), potem created_at — nie numer WZ
- * 2. Ta sama klasa PZ (np. truskawka ≠ truskawka z szypułką)
- * 3. PZ z datą przyjęcia ≤ data WZ (bez przerobu) lub ≤ data przerobu
- * 4. Partie PZ w kolejności daty przyjęcia (najstarsze pierwsze)
+ * 1. Tylko dokumenty sprzedaży WZ/FV/FS — rozchód produkcji/MM nie zużywa puli PZ
+ * 2. WZ w kolejności daty sprzedaży (operation_date), potem created_at
+ * 3. Ta sama klasa PZ (np. truskawka ≠ truskawka z szypułką)
+ * 4. PZ z datą przyjęcia ≤ data WZ (bez przerobu) lub ≤ data przerobu
+ * 5. Partie PZ w kolejności daty przyjęcia (najstarsze pierwsze)
  */
 function runClassFifoSimulation(base, matchSpec, workflowBySaleKey, options = {}) {
   const targetSaleKey = options.targetSaleKey || null

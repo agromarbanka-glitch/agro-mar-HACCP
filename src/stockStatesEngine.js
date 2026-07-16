@@ -113,14 +113,12 @@ export async function computeUnassignedPzStock(client, asOfDate) {
   }
 
   const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
-  for (const item of rozchodItems || []) {
-    if (item.operation_id) saleOpIds.add(item.operation_id)
-  }
 
   const saleGroups = new Map()
   for (const item of rozchodItems || []) {
     const op = opMap.get(item.operation_id)
-    if (!item.operation_id || !item.product_id || !saleOpIds.has(item.operation_id)) continue
+    if (!item.operation_id || !item.product_id) continue
+    if (!op || !isSaleOperation(op)) continue
     const saleDate = String(op?.operation_date || '').slice(0, 10)
     if (!saleDate || saleDate > cutoff) continue
     const qty = Math.abs(Number(item.qty || 0))

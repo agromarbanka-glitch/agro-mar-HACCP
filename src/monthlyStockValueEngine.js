@@ -240,14 +240,9 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
     else row.purchased_missing_price_kg += qty
   }
 
-  const saleOpIds = new Set(operations.filter(isSaleOperation).map(o => o.id))
-  for (const item of rozchodItems) {
-    if (item.operation_id) saleOpIds.add(item.operation_id)
-  }
-
   for (const item of rozchodItems) {
     const op = opMap.get(item.operation_id)
-    if (!op || !saleOpIds.has(item.operation_id) || !opInMonth(op, monthStart, monthEnd)) continue
+    if (!op || !isSaleOperation(op) || !opInMonth(op, monthStart, monthEnd)) continue
     const qty = Math.abs(Number(item.qty || 0))
     if (qty <= 0) continue
     wzInMonth += 1
@@ -288,7 +283,8 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
   const saleGroups = new Map()
   for (const item of rozchodItems) {
     const op = opMap.get(item.operation_id)
-    if (!item.operation_id || !item.product_id || !saleOpIds.has(item.operation_id)) continue
+    if (!item.operation_id || !item.product_id) continue
+    if (!op || !isSaleOperation(op)) continue
     const saleDate = opDate(op)
     if (!saleDate || saleDate > monthEnd) continue
     const qty = Math.abs(Number(item.qty || 0))
@@ -320,7 +316,7 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
   let wzAfterMonthEnd = 0
   for (const item of rozchodItems) {
     const op = opMap.get(item.operation_id)
-    if (!op || !saleOpIds.has(item.operation_id)) continue
+    if (!op || !isSaleOperation(op)) continue
     const d = opDate(op)
     if (d && d > monthEnd) wzAfterMonthEnd += 1
   }

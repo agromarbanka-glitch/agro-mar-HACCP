@@ -7077,9 +7077,6 @@ async function recalculateFifoClientSide() {
   const productMap = new Map((products || []).map(p => [p.id, p]))
   const opMap = new Map((operations || []).map(o => [o.id, o]))
   const saleOpIds = new Set((operations || []).filter(isSaleOperation).map(o => o.id))
-  for (const item of saleItemsRaw || []) {
-    if (item.operation_id) saleOpIds.add(item.operation_id)
-  }
 
   const { data: existingAllocations, error: allocFetchErr } = await supabase
     .from('fifo_allocations')
@@ -7118,6 +7115,7 @@ async function recalculateFifoClientSide() {
   for (const item of saleItemsRaw || []) {
     const op = opMap.get(item.operation_id)
     if (!item.operation_id || !item.product_id) continue
+    if (!op || !isSaleOperation(op)) continue
     const qty = Math.abs(Number(item.qty || 0))
     if (qty <= 0) continue
     const product = productMap.get(item.product_id)
