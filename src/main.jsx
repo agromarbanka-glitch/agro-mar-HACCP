@@ -1795,7 +1795,14 @@ function App() {
               <span className="hint">
                 {Number(preview.diagnostics.purchasedWithinCutoffKg || 0) <= 0
                   ? `W bazie jest ${Number(preview.diagnostics.purchasedTotalKg).toLocaleString('pl-PL')} kg PZ, ale wszystkie mają datę późniejszą niż ${preview.cutoffDate}.`
-                  : `Jest ${Number(preview.diagnostics.remainingAfterCutoffKg).toLocaleString('pl-PL')} kg PZ po ${preview.cutoffDate} — jeśli towar był wcześniej, napraw daty z nr PZ (np. …/30/06/2026).`}
+                  : (
+                    <>
+                      Jest {Number(preview.diagnostics.remainingAfterCutoffKg).toLocaleString('pl-PL')} kg PZ po {preview.cutoffDate}
+                      {Number(preview.diagnostics.remainingAfterCutoffKg || 0) >= Number(preview.shortage || 0) - 0.5
+                        ? ' — część to czerwcowe PZ z lipcową datą w bazie. Kliknij naprawę (obsługuje też PZ/…/06/2026). Jeśli brak zostaje → Importy → „Napraw daty PZ i WZ w bazie (z pliku)”.'
+                        : `. Bilans: wcześniejsze WZ ${Number(preview.diagnostics.soldBeforeTargetKg || 0).toLocaleString('pl-PL')} kg + ta WZ ${Number(preview.saleQty || 0).toLocaleString('pl-PL')} kg = ${(Number(preview.diagnostics.soldBeforeTargetKg || 0) + Number(preview.saleQty || 0)).toLocaleString('pl-PL')} kg, a PZ ≤ ${preview.cutoffDate} to ${Number(preview.diagnostics.purchasedWithinCutoffKg || 0).toLocaleString('pl-PL')} kg.`}
+                    </>
+                  )}
               </span>
             </div>
           )

@@ -1673,24 +1673,9 @@ export async function repairDatesForImportFile(client, importedFileId, { onProgr
 
     for (const op of ops) {
       if (isWzMonthYearDocument(op.document_no)) continue
-      if (!documentNoHasExplicitDate(op.document_no)) continue
-      const correct = inferDateFromDocumentNo(op.document_no)
-      const current = String(op.operation_date || '').slice(0, 10)
-      if (!correct || correct === current) continue
-
-      await withImportRetry(() =>
-        client.from('operations').update({ operation_date: correct }).eq('id', op.id)
-      )
-      await withImportRetry(() =>
-        client.from('lots').update({ production_date: correct }).eq('source_operation_id', op.id)
-      )
-      await withImportRetry(() =>
-        client
-          .from('haccp_documents')
-          .update({ document_date: correct })
-          .eq('operation_id', op.id)
-          .eq('document_type', 'K01')
-      )
+      const correct = pzCorrectDateFromDocumentNo(op.document_no)
+      if (!pzOperationDateNeedsDocRepair(op.document_no, op.operation_date, correct)) continue
+      await applyPzOperationDateRepair(client, op, correct)
       fixed += 1
     }
 
@@ -1726,7 +1711,44 @@ export async function repairAfterImportSave(client, importedFileId, { onProgress
 
 /**
  * Poprawia daty operacji/partii/K01 wg numeru PZ (np. 07/07/2026 zamiast błędnego forward-fill 06.07).
+ * Obsługuje też PZ z miesiącem/rokiem w numerze (np. PZ/001/06/2026) — gdy w bazie jest późniejszy miesiąc.
  */
+function pzCorrectDateFromDocumentNo(documentNo) {
+  const no = String(documentNo || '').trim()
+  if (!no.toUpperCase().startsWith('PZ/')) return ''
+  if (isWzMonthYearDocument(no)) return ''
+  return inferDateFromDocumentNo(no)
+}
+
+function pzOperationDateNeedsDocRepair(documentNo, currentDate, correctDate) {
+  if (!correctDate) return false
+  const current = String(currentDate || '').slice(0, 10)
+  if (!current || current === '0000-01-01' || current === correctDate) return false
+  if (documentNoHasExplicitDate(documentNo)) return current !== correctDate
+  if (documentNoHasMonthYear(documentNo)) {
+    const docMonth = correctDate.slice(0, 7)
+    const curMonth = current.slice(0, 7)
+    return curMonth > docMonth
+  }
+  return false
+}
+
+async function applyPzOperationDateRepair(client, op, correctDate) {
+  await withImportRetry(() =>
+    client.from('operations').update({ operation_date: correctDate }).eq('id', op.id)
+  )
+  await withImportRetry(() =>
+    client.from('lots').update({ production_date: correctDate }).eq('source_operation_id', op.id)
+  )
+  await withImportRetry(() =>
+    client
+      .from('haccp_documents')
+      .update({ document_date: correctDate })
+      .eq('operation_id', op.id)
+      .eq('document_type', 'K01')
+  )
+}
+
 export async function repairDatesFromDocumentNumbers(client, { onProgress } = {}) {
   if (!client) throw new Error('Brak Supabase.')
   onProgress?.('Korygowanie dat PZ z numerów dokumentów…')
@@ -1746,24 +1768,9 @@ export async function repairDatesFromDocumentNumbers(client, { onProgress } = {}
     if (!ops?.length) break
 
     for (const op of ops) {
-      if (!documentNoHasExplicitDate(op.document_no)) continue
-      const correct = inferDateFromDocumentNo(op.document_no)
-      const current = String(op.operation_date || '').slice(0, 10)
-      if (!correct || correct === current) continue
-
-      await withImportRetry(() =>
-        client.from('operations').update({ operation_date: correct }).eq('id', op.id)
-      )
-      await withImportRetry(() =>
-        client.from('lots').update({ production_date: correct }).eq('source_operation_id', op.id)
-      )
-      await withImportRetry(() =>
-        client
-          .from('haccp_documents')
-          .update({ document_date: correct })
-          .eq('operation_id', op.id)
-          .eq('document_type', 'K01')
-      )
+      const correct = pzCorrectDateFromDocumentNo(op.document_no)
+      if (!pzOperationDateNeedsDocRepair(op.document_no, op.operation_date, correct)) continue
+      await applyPzOperationDateRepair(client, op, correct)
       fixed += 1
     }
 
