@@ -2188,32 +2188,9 @@ export function traceExcelDocumentInImport(rows, groups, documentNoPattern) {
   }
 }
 
-/** Podgląd operacji z zapisanego importu (bez zagnieżdżonego select — omija limity PostgREST). */
-export async function fetchImportPreviewOperations(client, importedFileId) {
-  if (!client || !importedFileId) return []
-
-  const allOps = []
-  const pageSize = 200
-  let offset = 0
-  while (true) {
-    const { data, error } = await withImportRetry(() =>
-      client
-        .from('operations')
-        .select('id, operation_type, operation_date, document_no, invoice_no, notes')
-        .eq('imported_file_id', importedFileId)
-        .order('operation_date', { ascending: false })
-        .order('document_no', { ascending: true })
-        .range(offset, offset + pageSize - 1)
-    )
-    if (error) throw error
-    if (!data?.length) break
-    allOps.push(...data)
-    if (data.length < pageSize) break
-    offset += pageSize
-  }
-
+async function attachOperationItemsToPreviewOps(client, allOps) {
   const itemsByOp = new Map()
-  const opIds = allOps.map(o => o.id)
+  const opIds = (allOps || []).map(o => o.id).filter(Boolean)
   for (let i = 0; i < opIds.length; i += 50) {
     const chunk = opIds.slice(i, i + 50)
     let itemOffset = 0
@@ -2237,11 +2214,87 @@ export async function fetchImportPreviewOperations(client, importedFileId) {
       itemOffset += 1000
     }
   }
-
-  return allOps.map(op => ({
+  return (allOps || []).map(op => ({
     ...op,
     operation_items: itemsByOp.get(op.id) || []
   }))
+}
+
+async function fetchOperationsByImportedFileId(client, importedFileId) {
+  const allOps = []
+  const pageSize = 200
+  let offset = 0
+  while (true) {
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, operation_type, operation_date, document_no, invoice_no, notes, imported_file_id')
+        .eq('imported_file_id', importedFileId)
+        .order('operation_date', { ascending: false, nullsFirst: false })
+        .order('document_no', { ascending: true })
+        .range(offset, offset + pageSize - 1)
+    )
+    if (error) throw error
+    if (!data?.length) break
+    allOps.push(...data)
+    if (data.length < pageSize) break
+    offset += pageSize
+  }
+  return allOps
+}
+
+/** Szuka operacji po numerach PZ/WZ (gdy brak powiązania imported_file_id — np. doklejone do starszego importu). */
+export async function fetchImportPreviewByDocumentNos(client, documentNos) {
+  if (!client || !documentNos?.length) return []
+  const variants = [...new Set(documentNos.flatMap(d => documentNoImportAliases(d)))]
+  const allOps = []
+  for (let i = 0; i < variants.length; i += 150) {
+    const chunk = variants.slice(i, i + 150)
+    const { data, error } = await withImportRetry(() =>
+      client
+        .from('operations')
+        .select('id, operation_type, operation_date, document_no, invoice_no, notes, imported_file_id')
+        .in('document_no', chunk)
+        .order('operation_date', { ascending: false, nullsFirst: false })
+        .order('document_no', { ascending: true })
+        .limit(500)
+    )
+    if (error) throw error
+    allOps.push(...(data || []))
+  }
+  const byId = new Map()
+  for (const op of allOps) byId.set(op.id, op)
+  return [...byId.values()]
+}
+
+/**
+ * Podgląd operacji z zapisanego importu (bez zagnieżdżonego select — omija limity PostgREST).
+ * @returns {{ operations, source: 'import_file'|'document_fallback'|'empty', importMeta }}
+ */
+export async function fetchImportPreviewOperations(client, importedFileId, { documentNos = [] } = {}) {
+  if (!client || !importedFileId) {
+    return { operations: [], source: 'empty', importMeta: null }
+  }
+
+  let importMeta = null
+  try {
+    const { data: fileRow, error: fileErr } = await withImportRetry(() =>
+      client.from('imported_files').select('id, filename, rows_count, status, created_at').eq('id', importedFileId).maybeSingle()
+    )
+    if (fileErr) throw fileErr
+    importMeta = fileRow || null
+  } catch { /* opcjonalne */ }
+
+  let allOps = await fetchOperationsByImportedFileId(client, importedFileId)
+  let source = allOps.length ? 'import_file' : 'empty'
+
+  if (!allOps.length && documentNos?.length) {
+    allOps = await fetchImportPreviewByDocumentNos(client, documentNos)
+    if (allOps.length) source = 'document_fallback'
+  }
+
+  const operations = await attachOperationItemsToPreviewOps(client, allOps)
+  return { operations, source, importMeta }
 }
 
 /** Ręczna korekta daty dokumentu PZ lub WZ z rejestru importu. */

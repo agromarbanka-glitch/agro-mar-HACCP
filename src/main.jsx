@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
@@ -7686,19 +7687,45 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
-  async function loadImportPreview(fileId, fileName = '') {
+  async function loadImportPreview(fileId, importFilename = '') {
     if (!supabase || !fileId) return
-    setImportPreviewModal({ fileId, fileName, loading: true, operations: [], error: '' })
+    setImportPreviewModal({ fileId, fileName: importFilename, loading: true, operations: [], error: '', source: '', previewNote: '' })
     setImportOpEditDates({})
     try {
-      const operations = await fetchImportPreviewOperations(supabase, fileId)
+      const documentNos = (importFilename && fileName && importFilename === fileName && filteredRows.length)
+        ? [...new Set(groupImportRows(filteredRows).map(g => g.documentNo).filter(Boolean))]
+        : []
+      const { operations, source, importMeta } = await fetchImportPreviewOperations(supabase, fileId, { documentNos })
+      let previewNote = ''
+      if (source === 'document_fallback') {
+        previewNote = 'Ten wpis importu nie ma własnych dokumentów — pokazuję PZ/WZ znalezione po numerach z wczytanego Excela (mogły powstać przy wcześniejszym imporcie).'
+      } else if (!operations.length && Number(importMeta?.rows_count || 0) > 0) {
+        previewNote = 'Import jest w rejestrze, ale brak dokumentów przypisanych do tego pliku — prawdopodobnie tylko doklejono pozycje do starszych PZ/WZ. Wczytaj ten sam Excel i kliknij Zapisz.'
+      }
       setImportPreview(operations)
-      setImportPreviewModal({ fileId, fileName, loading: false, operations, error: '' })
+      setImportPreviewModal({
+        fileId,
+        fileName: importFilename,
+        loading: false,
+        operations,
+        error: '',
+        source,
+        importMeta,
+        previewNote
+      })
       if (!operations.length) {
-        setMessage('Ten import nie ma zapisanych dokumentów w bazie (możliwy przerwany zapis).')
+        setMessage(previewNote || 'Ten import nie ma zapisanych dokumentów w bazie (możliwy przerwany zapis).')
       }
     } catch (err) {
-      setImportPreviewModal({ fileId, fileName, loading: false, operations: [], error: err?.message || String(err) })
+      setImportPreviewModal({
+        fileId,
+        fileName: importFilename,
+        loading: false,
+        operations: [],
+        error: err?.message || String(err),
+        source: '',
+        previewNote: ''
+      })
       setMessage(`Błąd podglądu importu: ${err?.message || err}`)
     }
   }
@@ -7866,55 +7893,75 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   function renderImportPreviewModal() {
     if (!importPreviewModal) return null
-    const { fileName, loading, operations, error } = importPreviewModal
+    const { fileName, loading, operations, error, previewNote, source } = importPreviewModal
     const filtered = operations || []
-    return (
+    const modal = (
       <div className="modal-backdrop import-preview-backdrop" onClick={() => setImportPreviewModal(null)}>
-        <div className="haccp-modal import-preview-modal" onClick={e => e.stopPropagation()}>
-          <h3>Podgląd importu: {fileName || 'plik Excel'}</h3>
-          <p className="hint">{loading ? 'Wczytywanie dokumentów…' : `${filtered.length} dokumentów w bazie. Możesz ręcznie poprawić datę PZ lub WZ.`}</p>
-          {!loading && filtered.length > 0 && (
-            <div className="actions no-print" style={{ marginBottom: 8 }}>
-              <button type="button" className="secondary mini" disabled={importDateRepairing || importWzDateRepairing} onClick={repairImportFileDates}>
-                {importDateRepairing ? 'Naprawa…' : 'Napraw daty PZ z numerów dokumentów'}
-              </button>
-              <button
-                type="button"
-                className="secondary mini"
-                disabled={importDateRepairing || importWzDateRepairing}
-                onClick={() => repairLoadedExcelDates({ pickFileIfNeeded: true })}
-                title="Poprawia daty PZ i WZ wg kolumny Data wystawienia — wybierze plik Excel, jeśli nie jest wczytany"
-              >
-                {importWzDateRepairing ? 'Naprawa z Excela…' : 'Napraw daty PZ i WZ z Excela'}
-              </button>
-            </div>
-          )}
-          {error && <p className="status danger">{error}</p>}
-          {!loading && filtered.length > 0 && (
-            <div className="table-wrap small import-preview-table">
-              <table>
-                <thead><tr><th>Typ</th><th>Data</th><th>Dokument</th><th>FV</th><th>Pozycje</th><th>Akcja</th></tr></thead>
-                <tbody>{filtered.map(op => {
-                  const editDate = importOpEditDates[op.id] ?? String(op.operation_date || '').slice(0, 10)
-                  const typeLabel = op.operation_type === 'przyjecie' ? 'PZ' : (op.operation_type === 'sprzedaz' ? 'WZ' : op.operation_type)
-                  return (
-                    <tr key={op.id}>
-                      <td>{typeLabel}</td>
-                      <td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setImportOpEditDates(prev => ({ ...prev, [op.id]: e.target.value }))} /></td>
-                      <td><b>{op.document_no}</b></td>
-                      <td>{op.invoice_no || '—'}</td>
-                      <td className="hint">{(op.operation_items || []).map(i => `${i.raw_product_name || ''}: ${Number(i.qty || 0).toLocaleString('pl-PL')} kg`).join(' · ')}</td>
-                      <td><button type="button" className="mini secondary" disabled={importOpDateSaving === op.id} onClick={() => saveImportOperationDate(op)}>{importOpDateSaving === op.id ? '…' : 'Zapisz datę'}</button></td>
-                    </tr>
-                  )
-                })}</tbody>
-              </table>
-            </div>
-          )}
-          <div className="actions"><button type="button" className="secondary" onClick={() => setImportPreviewModal(null)}>Zamknij</button></div>
+        <div className="haccp-modal import-preview-modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="import-preview-title">
+          <div className="import-preview-modal-header">
+            <h3 id="import-preview-title">Podgląd importu: {fileName || 'plik Excel'}</h3>
+            <p className="hint">
+              {loading
+                ? 'Wczytywanie dokumentów z bazy…'
+                : `${filtered.length} dokumentów${source === 'document_fallback' ? ' (znalezione po numerach PZ/WZ)' : ' przypisanych do tego importu'}.`}
+            </p>
+          </div>
+          <div className="import-preview-modal-body">
+            {previewNote && !loading && <p className="import-preview-source-note">{previewNote}</p>}
+            {!loading && filtered.length > 0 && (
+              <div className="actions no-print" style={{ marginBottom: 12 }}>
+                <button type="button" className="secondary mini" disabled={importDateRepairing || importWzDateRepairing} onClick={repairImportFileDates}>
+                  {importDateRepairing ? 'Naprawa…' : 'Napraw daty PZ z numerów dokumentów'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary mini"
+                  disabled={importDateRepairing || importWzDateRepairing}
+                  onClick={() => repairLoadedExcelDates({ pickFileIfNeeded: true })}
+                  title="Poprawia daty PZ i WZ wg kolumny Data wystawienia — wybierze plik Excel, jeśli nie jest wczytany"
+                >
+                  {importWzDateRepairing ? 'Naprawa z Excela…' : 'Napraw daty PZ i WZ z Excela'}
+                </button>
+              </div>
+            )}
+            {error && <p className="status danger">{error}</p>}
+            {loading && <p className="hint">Ładowanie…</p>}
+            {!loading && filtered.length === 0 && !error && (
+              <div className="import-preview-empty">
+                Brak dokumentów do wyświetlenia dla tego importu.
+                {previewNote ? ` ${previewNote}` : ' Wczytaj ten sam plik Excel w zakładce powyżej i kliknij Podgląd ponownie — wtedy wyszukamy PZ/WZ po numerach z pliku.'}
+              </div>
+            )}
+            {!loading && filtered.length > 0 && (
+              <div className="table-wrap small import-preview-table">
+                <table>
+                  <thead><tr><th>Typ</th><th>Data</th><th>Dokument</th><th>FV</th><th>Pozycje</th><th>Akcja</th></tr></thead>
+                  <tbody>{filtered.map(op => {
+                    const editDate = importOpEditDates[op.id] ?? String(op.operation_date || '').slice(0, 10)
+                    const typeLabel = op.operation_type === 'przyjecie' ? 'PZ' : (op.operation_type === 'sprzedaz' ? 'WZ' : op.operation_type)
+                    const itemsText = (op.operation_items || []).map(i => `${i.raw_product_name || ''}: ${Number(i.qty || 0).toLocaleString('pl-PL')} kg`).join(' · ')
+                    return (
+                      <tr key={op.id}>
+                        <td>{typeLabel}</td>
+                        <td><input className="cell-input pz-date-input" type="date" value={editDate || ''} onChange={e => setImportOpEditDates(prev => ({ ...prev, [op.id]: e.target.value }))} /></td>
+                        <td><b>{op.document_no}</b></td>
+                        <td>{op.invoice_no || '—'}</td>
+                        <td>{itemsText || <span className="hint">brak pozycji</span>}</td>
+                        <td><button type="button" className="mini secondary" disabled={importOpDateSaving === op.id} onClick={() => saveImportOperationDate(op)}>{importOpDateSaving === op.id ? '…' : 'Zapisz datę'}</button></td>
+                      </tr>
+                    )
+                  })}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          <div className="import-preview-modal-footer actions">
+            <button type="button" className="secondary" onClick={() => setImportPreviewModal(null)}>Zamknij</button>
+          </div>
         </div>
       </div>
     )
+    return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal
   }
 
   async function runImportDataCleanup() {
@@ -8946,7 +8993,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     <section className="card">
       <div className="section-title"><Upload/><div><h2>Import Excel (HACCP / magazyn)</h2><p>Wgraj operacje magazynowe: <b>PZ/WZ, daty, ilości, produkty</b> — bez ceny netto. Numery już w bazie są pomijane. <b>Wartość magazynu (ceny)</b> → Raporty → Wartość magazynu.</p></div></div>
       <input className="file" type="file" accept=".xls,.xlsx,.csv" onChange={handleFile} />
-      {message && <p className="message">{message}</p>}
+      {message && <div className="import-status-panel">{message}</div>}
       <div className="actions"><button onClick={saveToSupabase} disabled={importSaving || importResetting}>{importSaving ? `Zapisywanie… ${importProgress}` : 'Zapisz import do Supabase'}</button><button type="button" className="secondary" disabled={importWzDateRepairing || importSaving || importResetting} onClick={() => repairLoadedExcelDates({ pickFileIfNeeded: true })}>{importWzDateRepairing ? 'Naprawa dat…' : 'Napraw daty PZ i WZ w bazie (z pliku)'}</button>{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runImportDataCleanup}>{importCleaning ? 'Sprzątanie…' : 'Wyczyść pozostałości usuniętych importów'}</button>}{isAdmin(authProfile) && <button className="secondary" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runRemoveImportDuplicates}>{importDeduping ? 'Usuwam duplikaty…' : 'Usuń zduplikowane PZ'}</button>}{isAdmin(authProfile) && <button className="danger" disabled={importCleaning || importDeduping || importSaving || importResetting} onClick={runResetAllWarehouseImports}>{importResetting ? 'Reset…' : 'RESET WSZYSTKO (import + K03 + FIFO)'}</button>}</div>
       {rows.length > 0 && <>
         <div className="summary">
@@ -8993,7 +9040,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       <div className="section-title"><Upload/><div><h2>Rejestr importów Excel</h2><p>Podgląd wgranych plików i bezpieczne usuwanie importu przez administratora z podwójnym potwierdzeniem.</p></div></div>
       <div className="actions"><button className="secondary" onClick={loadImports}><RefreshCcw size={16}/> Odśwież importy</button></div>
       {importRows.length === 0 && <p className="hint">Brak importów do wyświetlenia albo uruchom SQL v21.</p>}
-      {importRows.length > 0 && <div className="table-wrap small"><table>
+      {importRows.length > 0 && <div className="table-wrap small import-registry-table"><table>
         <thead><tr><th>Plik</th><th>Data</th><th>Wiersze</th><th>Status</th><th>Akcje</th></tr></thead>
         <tbody>{importRows.map(f => <tr key={f.id}>
           <td><b>{f.filename || f.file_name || 'import.xlsx'}</b></td>
@@ -9003,7 +9050,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
           <td className="row-actions"><button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, f.filename || f.file_name)}><Eye size={14}/> Podgląd</button>{isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, f.filename || f.file_name)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}</td>
         </tr>)}</tbody>
       </table></div>}
-      {importPreview.length > 0 && !importPreviewModal && <><h3>Ostatni podgląd ({importPreview.length} dokumentów)</h3><p className="hint">Kliknij „Podgląd” przy pliku, aby otworzyć okno z edycją dat PZ/WZ.</p></>}
+      {importPreviewModal && !importPreviewModal.loading && (importPreviewModal.operations?.length > 0) && (
+        <div className="import-status-panel" style={{ marginTop: 14 }}>
+          <b>Podgląd: {importPreviewModal.fileName || 'import'}</b> — {importPreviewModal.operations.length} dokumentów.
+          {importPreviewModal.previewNote && <p className="hint" style={{ margin: '8px 0 0' }}>{importPreviewModal.previewNote}</p>}
+          <p className="hint" style={{ margin: '6px 0 0' }}>Pełna tabela z edycją dat jest w oknie modalnym (kliknij Podgląd ponownie, jeśli je zamknąłeś).</p>
+        </div>
+      )}
     </section>
     </>}
 
