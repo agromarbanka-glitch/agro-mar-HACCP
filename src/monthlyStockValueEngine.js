@@ -16,7 +16,7 @@ import {
   resolveFifoMatchSpec,
   fifoLotMatchesMatchSpec
 } from './k03Engine'
-import { lotReceiptDate } from './fifoEngine'
+import { lotReceiptDate, compareFifoSaleOrder } from './fifoEngine'
 import { buildReportTitle } from './monthlyStockValueFromExcel'
 
 export const MONTHLY_STOCK_VALUE_VERSION = '1.3'
@@ -310,12 +310,7 @@ export async function computeMonthlyStockValueReport(client, yearMonth) {
     saleGroups.set(key, current)
   }
 
-  const sortedSales = Array.from(saleGroups.values()).sort((a, b) =>
-    String(a.sale_date || '').localeCompare(String(b.sale_date || '')) ||
-    String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
-    String(a.sale_doc_no || '').localeCompare(String(b.sale_doc_no || '')) ||
-    String(a.product_id || '').localeCompare(String(b.product_id || ''))
-  )
+  const sortedSales = Array.from(saleGroups.values()).sort(compareFifoSaleOrder)
 
   simulateFifoToDate({ cutoff: monthEnd, lotState, sortedSales, productMap, opMap })
 

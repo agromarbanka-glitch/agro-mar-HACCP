@@ -91,7 +91,7 @@ function inPeriod(date, periodStart, periodEnd) {
 function simulateFifoExactName({ cutoffDate, lots, sales }) {
   const sortedSales = [...sales].sort((a, b) =>
     a.issueDate.localeCompare(b.issueDate) ||
-    a.documentNo.localeCompare(b.documentNo)
+    String(a.lineId || '').localeCompare(String(b.lineId || ''))
   )
 
   for (const sale of sortedSales) {
@@ -100,8 +100,7 @@ function simulateFifoExactName({ cutoffDate, lots, sales }) {
       .filter(l => l.productKey === sale.productKey && l.remaining_qty > 0 && l.issueDate <= cutoffDate)
       .sort((a, b) =>
         a.issueDate.localeCompare(b.issueDate) ||
-        a.documentNo.localeCompare(b.documentNo) ||
-        a.lineId.localeCompare(b.lineId)
+        String(a.lineId || '').localeCompare(String(b.lineId || ''))
       )
 
     for (const lot of pool) {

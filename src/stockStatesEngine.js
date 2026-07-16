@@ -2,7 +2,7 @@
  * Stany – nieprzypisany surowiec z PZ na wybrany dzień (symulacja FIFO do daty).
  */
 import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec } from './k03Engine'
-import { lotReceiptDate } from './fifoEngine'
+import { lotReceiptDate, compareFifoSaleOrder } from './fifoEngine'
 
 export const STOCK_STATES_VERSION = '1.0'
 
@@ -143,12 +143,7 @@ export async function computeUnassignedPzStock(client, asOfDate) {
     saleGroups.set(key, current)
   }
 
-  const sortedSales = Array.from(saleGroups.values()).sort((a, b) =>
-    String(a.sale_date || '').localeCompare(String(b.sale_date || '')) ||
-    String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
-    String(a.sale_doc_no || '').localeCompare(String(b.sale_doc_no || '')) ||
-    String(a.product_id || '').localeCompare(String(b.product_id || ''))
-  )
+  const sortedSales = Array.from(saleGroups.values()).sort(compareFifoSaleOrder)
 
   simulateFifoToDate({ cutoff, lotState, sortedSales, productMap, opMap })
 

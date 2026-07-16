@@ -7,6 +7,14 @@ function saleLineKey(operationId, productId) {
   return `${operationId}|${productId || 'null'}`
 }
 
+/** Kolejność WZ w FIFO: data sprzedaży → zapis w bazie (created_at), bez numeru dokumentu. */
+export function compareFifoSaleOrder(a, b) {
+  return String(a.sale_date || '').localeCompare(String(b.sale_date || '')) ||
+    String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
+    String(a.operation_id || '').localeCompare(String(b.operation_id || '')) ||
+    String(a.product_id || '').localeCompare(String(b.product_id || ''))
+}
+
 /** Data przyjęcia PZ widoczna w K03 – operation_date dokumentu źródłowego lub production_date partii. */
 export function lotReceiptDate(lot, opMap) {
   const opDate = opMap?.get?.(lot?.source_operation_id)?.operation_date
@@ -176,12 +184,7 @@ async function loadFifoBaseData(client, options = {}) {
     saleGroups.set(key, current)
   }
 
-  const sortedSales = Array.from(saleGroups.values()).sort((a, b) =>
-    String(a.sale_date || '').localeCompare(String(b.sale_date || '')) ||
-    String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
-    String(a.sale_doc_no || '').localeCompare(String(b.sale_doc_no || '')) ||
-    String(a.product_id || '').localeCompare(String(b.product_id || ''))
-  )
+  const sortedSales = Array.from(saleGroups.values()).sort(compareFifoSaleOrder)
 
   const allocationsBySaleKey = new Map()
   for (const alloc of allocationsRaw || []) {
@@ -611,7 +614,7 @@ function reservePriorUnallocatedSales(base, lotState, targetSaleKey, targetMatch
 
 /**
  * FIFO wg klasy produktu:
- * 1. WZ w kolejności daty sprzedaży (operation_date)
+ * 1. WZ w kolejności daty sprzedaży (operation_date), potem created_at — nie numer WZ
  * 2. Ta sama klasa PZ (np. truskawka ≠ truskawka z szypułką)
  * 3. PZ z datą przyjęcia ≤ data WZ (bez przerobu) lub ≤ data przerobu
  * 4. Partie PZ w kolejności daty przyjęcia (najstarsze pierwsze)
