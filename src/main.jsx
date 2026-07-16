@@ -4,7 +4,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -6786,20 +6786,34 @@ function App() {
           } else {
             loadMsg += ` Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ/WZ.`
             try {
-              const mergeEstimate = await estimateMergeNewItems(supabase, duplicates, details, {
+              const gap = await summarizeImportDuplicateGap(supabase, duplicates, details, {
                 normalizeText,
                 canonicalProductName,
                 normalizeFifoProductKey
               })
-              if (mergeEstimate > 0) {
+              if (gap.itemsToMerge > 0) {
                 loadMsg = loadMsg.replace(
                   / Brak nowych numerów — przy Zapisz dokleimy brakujące pozycje z Excela do istniejących PZ\/WZ\./,
-                  ` Do doklejenia z Excela: ok. ${mergeEstimate} pozycji w istniejących PZ/WZ.`
+                  ` Do doklejenia z Excela: ok. ${gap.itemsToMerge} pozycji w istniejących PZ/WZ.`
                 )
+              }
+              if (gap.emptyShells > 0) {
+                loadMsg += ` UWAGA: ${gap.emptyShells} PZ/WZ w bazie jest pustych (bez pozycji) — kliknij Zapisz, aby uzupełnić z Excela.`
+                if (gap.emptyExamples.length) {
+                  loadMsg += ` Np.: ${gap.emptyExamples.join(', ')}${gap.emptyShells > gap.emptyExamples.length ? '…' : ''}.`
+                }
+              } else if (gap.itemsToMerge === 0) {
+                loadMsg += ` System nie widzi brakujących pozycji w Excelu vs baza — jeśli brakuje PZ (np. PZ/002/29/06/2026/Kolonia), zrób Ctrl+F5 i wczytaj plik ponownie po aktualizacji.`
               }
             } catch {
               /* szacunek opcjonalny */
             }
+          }
+          const junePz002 = groups.find(g => /PZ\/002\/29\/06\/2026/i.test(String(g.documentNo || '')))
+          if (!junePz002) {
+            loadMsg += ` Nie wykryto w pliku PZ/002/29/06/2026 — pozycje mogły trafić pod inny numer (błąd starego importu).`
+          } else if (fresh.some(g => /PZ\/002\/29\/06\/2026/i.test(String(g.documentNo || '')))) {
+            loadMsg += ` PZ/002/29/06/2026 jest do zapisu jako nowy dokument.`
           }
           const fileMax = fileDateRange.split(' … ').pop()
           const freshMax = importGroupDateRange(fresh).split(' … ').pop()

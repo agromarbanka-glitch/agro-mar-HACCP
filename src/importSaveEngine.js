@@ -1221,6 +1221,34 @@ export async function estimateMergeNewItems(client, existingGroups, details, dep
   return total
 }
 
+/** Diagnostyka: puste PZ/WZ w bazie vs pozycje w Excelu (przy ponownym wczytaniu miesiąca). */
+export async function summarizeImportDuplicateGap(client, duplicateGroups, details, deps) {
+  if (!client || !duplicateGroups?.length) {
+    return { itemsToMerge: 0, emptyShells: 0, emptyExamples: [] }
+  }
+  const opIds = [...new Set(duplicateGroups.map(g => resolveOperationImportMeta(g, details)?.operationId).filter(Boolean))]
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+  let itemsToMerge = 0
+  let emptyShells = 0
+  const emptyExamples = []
+  for (const group of duplicateGroups) {
+    const meta = resolveOperationImportMeta(group, details)
+    const opId = meta?.operationId
+    if (!opId) continue
+    const storedItems = itemsByOp.get(opId) || []
+    const excelCount = group.items?.length || 0
+    if (storedItems.length === 0 && excelCount > 0) {
+      emptyShells += 1
+      itemsToMerge += excelCount
+      if (emptyExamples.length < 6) emptyExamples.push(group.documentNo)
+      continue
+    }
+    const diff = diffImportGroupAgainstStored(group, meta, storedItems, deps)
+    itemsToMerge += diff.newItems.length
+  }
+  return { itemsToMerge, emptyShells, emptyExamples }
+}
+
 async function deleteFifoAllocationsForLots(client, lotIds, chunkSize = 120) {
   const unique = [...new Set((lotIds || []).filter(Boolean))]
   for (let i = 0; i < unique.length; i += chunkSize) {
