@@ -9,7 +9,7 @@
  * - brakujące pozycje w istniejących PZ → doklejane z Excela (append)
  * - WZ: data z Excela (Data wystawienia), nie ostatni dzień miesiąca z numeru
  */
-export const IMPORT_SAVE_ENGINE_VERSION = '2.3'
+export const IMPORT_SAVE_ENGINE_VERSION = '2.4'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases, monthYearFromDocumentNo } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName, isPulpaProductName } from './k03Engine.js'
@@ -674,23 +674,25 @@ export async function runFullImportLotCleanup(client, filename, excludeImportId 
   return { ...prep, orphan_lots_removed: (prep?.orphan_lots_removed || 0) + extraLots }
 }
 
-/** Szybkie przygotowanie: tylko przerwany import tego pliku (bez skanowania całej bazy). */
+/** Szybkie przygotowanie: tylko przerwany import tego pliku (bez RPC — v42 w Supabase zawsze skanuje całą bazę). */
 async function prepareImportExcelSaveFast(client, filename, excludeImportId = null, onProgress) {
   onProgress?.('Szybkie czyszczenie przed zapisem…')
+  if (!filename) {
+    return { stale_in_progress_removed: 0, orphan_lots_removed: 0, fast: true, skipped: true }
+  }
 
-  const { data, error } = await withImportRetry(() =>
-    client.rpc('prepare_import_excel_save', {
-      p_filename: filename || null,
-      p_exclude_import_id: excludeImportId || null,
-      p_full_cleanup: false
-    })
-  )
-  if (!error) return { ...(data || {}), fast: true }
-
-  const errMsg = String(error?.message || '')
-  const rpcMissing = /function.*does not exist/i.test(errMsg)
-  const rpcNoFastParam = /p_full_cleanup|could not find the function/i.test(errMsg)
-  if (!rpcMissing && !rpcNoFastParam) throw error
+  let countQuery = client
+    .from('imported_files')
+    .select('id', { count: 'exact', head: true })
+    .is('deleted_at', null)
+    .eq('status', 'w_trakcie')
+    .ilike('filename', filename)
+  if (excludeImportId) countQuery = countQuery.neq('id', excludeImportId)
+  const { count, error: countErr } = await withImportRetry(() => countQuery)
+  if (countErr) throw countErr
+  if (!count) {
+    return { stale_in_progress_removed: 0, orphan_lots_removed: 0, fast: true, skipped: true }
+  }
 
   const stale = await purgeStaleInProgressImportsClient(client, filename, excludeImportId, onProgress)
   let orphanLots = 0
@@ -701,8 +703,7 @@ async function prepareImportExcelSaveFast(client, filename, excludeImportId = nu
   return {
     stale_in_progress_removed: stale.removed,
     orphan_lots_removed: orphanLots,
-    fast: true,
-    fallback: true
+    fast: true
   }
 }
 
@@ -753,7 +754,10 @@ export function formatPrepareImportResult(prep) {
   if ((prep.orphan_lots_removed || 0) > 0) {
     parts.push(`usunięto ${prep.orphan_lots_removed} osieroconych partii`)
   }
-  if (prep.fast && !prep.fallback) {
+  if (prep.skipped) {
+    parts.push('bez czyszczenia (brak przerwanego importu)')
+  }
+  if (prep.fast && !prep.fallback && !prep.skipped) {
     parts.push('tryb szybki (bez skanowania całej bazy)')
   }
   if (prep.needsMigration && prep.fallback) {

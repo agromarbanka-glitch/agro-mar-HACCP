@@ -25,7 +25,9 @@ Nigdy nie łącz tych ścieżek ani komunikatów UI.
 
 ## Zapis HACCP (Importy → Zapisz do Supabase)
 
-1. `prepareImportExcelSave` → duplikaty po **numerze PZ/WZ** → zapis tylko **fresh** (bez merge/append).
+1. **Szybkie przygotowanie (domyślnie):** tylko przerwany import tego samego pliku — **bez RPC** `prepare_import_excel_save` (stare v42 skanuje całą bazę minutami).
+2. Pełne czyszczenie osieroconych importów → przycisk admin „Wyczyść pozostałości usuniętych importów” lub migracja v44 + `{ fullCleanup: true }`.
+3. Duplikaty po **numerze PZ/WZ** (pełny nr z lokalizacją) → zapis tylko **fresh** + doklejanie brakujących pozycji.
 2. **Jeden przebieg**: operacje (chunk 250) → pozycje (500) → partie RPC `create_incoming_lots_batch` (chunk 600, **SQL v48**).
 3. **Bez** paczek po 40 dokumentów, **bez** `unit_price_net`, **bez** skanowania wszystkich K01 przed zapisem magazynu.
 4. Po zapisie magazynu: komunikat sukcesu od razu; **K01 + lekki repair w tle** (`repairWarehouseImportDuplicates` z `light: true`, `importedFileId`).

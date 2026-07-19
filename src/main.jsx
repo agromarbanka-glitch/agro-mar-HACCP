@@ -9165,7 +9165,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     try {
       const groups = groupImportRows(filteredRows)
-      setImportProgress('Szybkie czyszczenie przed zapisem…')
+      setImportProgress('Przygotowanie zapisu…')
       const prep = await prepareImportExcelSave(supabase, fileName, null, { onProgress: setImportProgress })
       const prepMsg = formatPrepareImportResult(prep)
       if (prepMsg) setMessage(prepMsg)
