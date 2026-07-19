@@ -980,16 +980,33 @@ function summarizeGroupInventory(lotState, productMap, matchSpec, cutoff, opMap,
   }
 }
 
-/** Audyt: ile kg PZ w innych klasach tej samej rodziny (np. szypułka obok truskawki). */
+/** Audyt: ile kg PZ w innych klasach tej samej rodziny (np. M1 obok PW, szypułka obok truskawki). */
 function auditSiblingClassInventory(base, matchSpec, cutoff) {
-  const variant = matchSpec?.variantKey
-  if (!variant) return null
+  const variant = String(matchSpec?.variantKey || '')
+  const selectedKeys = matchSpec?.mode === 'variant' && matchSpec.sourceKeys?.size
+    ? new Set(matchSpec.sourceKeys)
+    : new Set()
   const siblings = []
-  if (variant === 'truskawka') {
-    siblings.push(buildFifoMatchSpecFromSourceKeys('truskawka z szypulka', ['truskawka z szypulka']))
-  } else if (variant === 'truskawka z szypulka') {
-    siblings.push(buildFifoMatchSpecFromSourceKeys('truskawka', ['truskawka']))
+
+  if (variant === 'truskawka' || selectedKeys.has('truskawka')) {
+    if (!selectedKeys.has('truskawka z szypulka')) {
+      siblings.push(buildFifoMatchSpecFromSourceKeys('truskawka z szypulka', ['truskawka z szypulka']))
+    }
+  } else if (variant === 'truskawka z szypulka' || selectedKeys.has('truskawka z szypulka')) {
+    if (!selectedKeys.has('truskawka')) {
+      siblings.push(buildFifoMatchSpecFromSourceKeys('truskawka', ['truskawka']))
+    }
   }
+
+  const malinaKeys = ['malina pw', 'malina klasa i', 'malina extra']
+  const isMalinaContext = variant.startsWith('malina') || malinaKeys.some(k => selectedKeys.has(k))
+  if (isMalinaContext) {
+    for (const key of malinaKeys) {
+      if (selectedKeys.has(key)) continue
+      siblings.push(buildFifoMatchSpecFromSourceKeys(key, [key]))
+    }
+  }
+
   if (!siblings.length) return null
 
   const lotState = new Map(Array.from(base.lotState.entries()).map(([k, v]) => [k, { ...v }]))
@@ -999,13 +1016,13 @@ function auditSiblingClassInventory(base, matchSpec, cutoff) {
     resetIncomingLotsInPool(lotState, base.productMap, spec, base.opMap)
     const inv = summarizeGroupInventory(lotState, base.productMap, spec, cutoff, base.opMap)
     out.push({
-      classLabel: [...spec.sourceKeys].join(', '),
+      classLabel: fifoClassDisplayLabel(spec),
       purchasedWithinCutoffKg: inv.purchasedWithinCutoff,
       purchasedTotalKg: inv.purchasedTotal,
       lotCount: inv.lotCount
     })
   }
-  return out
+  return out.filter(s => Number(s.purchasedTotalKg || 0) > 0.5 || Number(s.purchasedWithinCutoffKg || 0) > 0.5)
 }
 
 function summarizeGroupSales(base, matchSpec, targetSaleKey) {

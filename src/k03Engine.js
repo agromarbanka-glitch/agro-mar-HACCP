@@ -406,12 +406,7 @@ function isPorzeczkaCzarnaKey(lotKey, group = '') {
     group === 'porzeczka_czarna'
 }
 
-/** Etykieta klasy FIFO do wyświetlania (np. porzeczka_czerwona → Porzeczka kolorowa). */
-export function fifoClassDisplayLabel(matchSpecOrKey) {
-  const spec = typeof matchSpecOrKey === 'object' ? matchSpecOrKey : null
-  const rawKey = spec
-    ? (spec.mode === 'variant' && spec.sourceKeys?.length ? spec.sourceKeys[0] : (spec.variantKey || spec.productGroup))
-    : String(matchSpecOrKey || '')
+function fifoLabelFromKey(rawKey) {
   const key = normalizeText(rawKey)
   if (key === 'porzeczka_czerwona' || isPorzeczkaKolorowaSourceKey(key)) return 'Porzeczka kolorowa'
   if (key === 'porzeczka_czarna' || key === 'porzeczka czarna') return 'Porzeczka czarna'
@@ -420,6 +415,22 @@ export function fifoClassDisplayLabel(matchSpecOrKey) {
   if (key === 'truskawka z szypulka') return 'Truskawka z szypułką'
   if (key.startsWith('malina')) return canonicalProductName(rawKey) || rawKey
   return rawKey || key
+}
+
+/** Etykieta klasy FIFO do wyświetlania (np. porzeczka_czerwona → Porzeczka kolorowa). */
+export function fifoClassDisplayLabel(matchSpecOrKey) {
+  const spec = typeof matchSpecOrKey === 'object' ? matchSpecOrKey : null
+  if (spec?.mode === 'variant' && spec.sourceKeys?.size) {
+    const keys = [...spec.sourceKeys]
+    if (keys.length > 1) {
+      return keys.map(k => fifoLabelFromKey(k)).join(' + ')
+    }
+    return fifoLabelFromKey(keys[0])
+  }
+  const rawKey = spec
+    ? (spec.variantKey || spec.productGroup)
+    : String(matchSpecOrKey || '')
+  return fifoLabelFromKey(rawKey)
 }
 
 /** Czy nazwa dotyczy pulpy (produkt po przerobie — nie surowiec przy PZ). */
@@ -436,9 +447,9 @@ export function canonicalProductName(productName = '') {
   if (/^tsz$/i.test(raw.trim())) return 'Truskawka z szypułką'
   if (/truskawka\s+(z\s*)?szyp|truskawka\s*szyp|\btsz\b/.test(text)) return 'Truskawka z szypułką'
   if (/truskawk/.test(text)) return 'Truskawka'
-  if (/^m1$/i.test(raw.trim()) || /malina\s+(klasa\s*)?(i|1)\b/.test(text)) return 'Malina klasa I'
-  if (/^mpw$/i.test(raw.trim()) || /malina\s+(swieza\s*)?pw\b/.test(text)) return 'Malina PW'
-  if (/^mex$/i.test(raw.trim()) || /malina\s+extra/.test(text)) return 'Malina extra'
+  if (/^m1$/i.test(raw.trim()) || /malina\s+(?:swieza\s+)?(?:klasa\s*)?(?:i|1)\b/.test(text) || text === 'malina i') return 'Malina klasa I'
+  if (/^mpw$/i.test(raw.trim()) || /malina\s+(?:swieza\s*)?pw\b/.test(text)) return 'Malina PW'
+  if (/^mex$/i.test(raw.trim()) || /malina\s+(?:swieza\s+)?extra\b/.test(text)) return 'Malina extra'
   if (/porzeczka\s+(kolor(\owa)?|czerwona)\s+pulpa/.test(text) || text === 'pkp') return 'Porzeczka kolorowa pulpa'
   if (/porzeczka\s+(kolor(\owa)?|czerwona)\b/.test(text) && !/pulpa/.test(text) || text === 'pk') return 'Porzeczka kolorowa'
   if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'Porzeczka czarna pulpa'
@@ -630,11 +641,11 @@ export function normalizeFifoProductKey(productName = '', product = null, lotGro
   if (/truskawk/.test(text)) return 'truskawka'
 
   if (/malina\s+pulpa/.test(text)) return 'malina pulpa'
-  if (/malina\s+(swieza\s*)?pw\b/.test(text)) return 'malina pw'
-  if (/malina\s+swieza/.test(text)) return 'malina pw'
+  if (/malina\s+(?:swieza\s+)?(?:klasa\s*)?(?:i|1)\b/.test(text) || text === 'malina i') return 'malina klasa i'
+  if (/malina\s+(?:swieza\s+)?extra\b/.test(text)) return 'malina extra'
+  if (/malina\s+(?:swieza\s*)?pw\b/.test(text)) return 'malina pw'
+  if (/malina\s+swieza\b/.test(text)) return 'malina pw'
   if (/malina\s+pw\b/.test(text)) return 'malina pw'
-  if (/malina\s+(klasa\s*)?(i|1)\b/.test(text) || text === 'malina i') return 'malina klasa i'
-  if (/malina\s+extra/.test(text)) return 'malina extra'
   if (/malina/.test(text)) return text
 
   if (/porzeczka\s+(kolorowa|kolor|czerwona)\s+pulpa/.test(text) || text === 'pkp') return 'porzeczka kolorowa pulpa'
