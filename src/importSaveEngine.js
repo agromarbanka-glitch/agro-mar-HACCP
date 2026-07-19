@@ -42,7 +42,7 @@ async function runWithConcurrency(tasks, concurrency, onTick) {
   return results
 }
 
-function isTransientNetworkError(err) {
+export function isTransientNetworkError(err) {
   const msg = String(err?.message || err || '')
   return /networkerror|failed to fetch|load failed|network request failed|fetch/i.test(msg)
 }
