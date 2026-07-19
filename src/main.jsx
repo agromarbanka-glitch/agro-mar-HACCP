@@ -8247,7 +8247,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </div>
         {importAudit.hiddenMatches?.length > 0 && (
           <div className="table-wrap small" style={{ marginTop: 8 }}>
-            <p className="hint"><b>Excel ma inny nr niż baza</b> — kg mogą być pod innym PZ (stary import). Podgląd importu pokazuje tylko ten plik.</p>
+            <p className="hint"><b>Inny zapis tego samego nr</b> (np. spacja po PZ) — nie mylić z inną lokalizacją: PZ/…/Kolonia i PZ/…/Świdno to osobne przyjęcia.</p>
             <table>
               <thead><tr><th>Nr w Excelu</th><th>Nr w bazie</th><th>kg Excel</th><th>kg baza</th><th>Import</th></tr></thead>
               <tbody>{importAudit.hiddenMatches.slice(0, 20).map((h, i) => (

@@ -26,20 +26,13 @@ export function normalizeDocumentNo(value) {
     .replace(/\\/g, '/')
 }
 
-/** Warianty nr do wyszukiwania w bazie (spacja po prefiksie, bez sufiksu lokalizacji). */
+/** Warianty nr do wyszukiwania w bazie — tylko format (spacja po prefiksie). Sufiks lokalizacji musi być identyczny. */
 export function documentNoImportAliases(documentNo) {
   const norm = normalizeDocumentNo(documentNo)
   if (!norm) return []
   const out = new Set([norm])
   const prefixSpace = norm.match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
   if (prefixSpace) out.add(`${prefixSpace[1]} ${prefixSpace[2]}`)
-  // PZ/002/29/06/2026/Kolonia → też PZ/002/29/06/2026 (stare wpisy bez sufiksu)
-  const withoutLocation = norm.replace(/^((?:PZ|WZ)\/\d+\/\d{1,2}\/\d{1,2}\/\d{4})\/[^/\d][^/]*$/iu, '$1')
-  if (withoutLocation !== norm) {
-    out.add(withoutLocation)
-    const m = withoutLocation.match(/^(PZ|WZ|MM|RR|FV|FS)(\/.*)$/i)
-    if (m) out.add(`${m[1]} ${m[2]}`)
-  }
   return [...out]
 }
 

@@ -17,6 +17,12 @@ alwaysApply: true
 
 Nigdy nie łącz tych ścieżek ani komunikatów UI.
 
+## Numery PZ/WZ — dopasowanie
+
+- **Pełny numer musi być identyczny** — sufiks lokalizacji (`/Kolonia`, `/Świdno`, `/Rybitwy`) to **osobne przyjęcia**, nie duplikaty.
+- `PZ/003/12/07/2026/Kolonia` ≠ `PZ/003/12/07/2026/Świdno` ≠ `PZ/003/12/07/2026`.
+- Jedyny dozwolony alias formatu: spacja po prefiksie (`PZ/…` vs `PZ /…`).
+
 ## Zapis HACCP (Importy → Zapisz do Supabase)
 
 1. `prepareImportExcelSave` → duplikaty po **numerze PZ/WZ** → zapis tylko **fresh** (bez merge/append).

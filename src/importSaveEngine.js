@@ -67,7 +67,7 @@ export async function getExistingOperationsForImport(client, groups) {
   let orphanCount = 0
   const documentNos = [...new Set(groups.map(g => normalizeDocumentNo(g.documentNo)).filter(Boolean))]
 
-  /** Warianty nr dokumentu (ze spacją po prefiksie, bez sufiksu lokalizacji). */
+  /** Warianty nr dokumentu (tylko spacja po prefiksie PZ/WZ — lokalizacja musi się zgadzać). */
   function documentNoQueryVariants(normalized) {
     return documentNoImportAliases(normalized)
   }
@@ -95,7 +95,7 @@ export async function getExistingOperationsForImport(client, groups) {
     if (!existingExact || String(candidate.createdAt || '') > String(existingExact.createdAt || '')) {
       details.set(exactKey, candidate)
     }
-    // Aliasy tylko do wyszukiwania meta — NIE do klucza duplikatu (Kolonia ≠ inny PZ).
+    // Aliasy tylko format (PZ/ vs PZ /) — ten sam pełny nr, ta sama lokalizacja.
     for (const alias of documentNoImportAliases(op.document_no)) {
       if (alias === exactNorm) continue
       const aliasKey = `${op.operation_type}|${alias}`
@@ -154,7 +154,7 @@ export function operationImportKey(group) {
   return `${group.operation}|${normalizeDocumentNo(group.documentNo)}`
 }
 
-/** Szuka metadanych operacji w bazie (dopasowanie także bez sufiksu /Kolonia itd.). */
+/** Szuka metadanych operacji w bazie — pełny nr PZ/WZ musi się zgadzać (w tym /Kolonia, /Świdno). */
 export function resolveOperationImportMeta(group, details) {
   if (!group || !details) return null
   const op = group.operation
@@ -167,13 +167,9 @@ export function resolveOperationImportMeta(group, details) {
 
 function groupExistsInImportKeys(group, existingKeys) {
   const op = group.operation
-  const doc = normalizeDocumentNo(group.documentNo)
-  if (existingKeys.has(`${op}|${doc}`)) return true
-  const m = doc.match(/^(PZ|WZ)(\/.*)$/i)
-  if (m && existingKeys.has(`${op}|${m[1]} ${m[2]}`)) return true
-  // Excel z /Kolonia — dopasuj bazę bez sufiksu (legacy), ale nie odwrotnie.
-  const base = doc.replace(/^((?:PZ|WZ)\/\d+\/\d{1,2}\/\d{1,2}\/\d{4})\/[^/\d][^/]*$/iu, '$1')
-  if (base !== doc && existingKeys.has(`${op}|${base}`)) return true
+  for (const alias of documentNoImportAliases(group.documentNo)) {
+    if (existingKeys.has(`${op}|${alias}`)) return true
+  }
   return false
 }
 
