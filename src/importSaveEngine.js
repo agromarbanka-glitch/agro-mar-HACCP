@@ -9,7 +9,7 @@
  * - brakujące pozycje w istniejących PZ → doklejane z Excela (append)
  * - WZ: data z Excela (Data wystawienia), nie ostatni dzień miesiąca z numeru
  */
-export const IMPORT_SAVE_ENGINE_VERSION = '2.2'
+export const IMPORT_SAVE_ENGINE_VERSION = '2.3'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases, monthYearFromDocumentNo } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName } from './k03Engine.js'
@@ -589,8 +589,10 @@ export async function purgeImportDataClientSide(client, importedFileId) {
 
   await deleteRowsInChunks(client, 'fifo_allocations', 'operation_id', opIds)
   if (lotIds.length) {
-    for (const lotId of lotIds) {
-      await withImportRetry(() => client.from('fifo_allocations').delete().or(`source_lot_id.eq.${lotId},output_lot_id.eq.${lotId}`))
+    for (let i = 0; i < lotIds.length; i += 50) {
+      const chunk = lotIds.slice(i, i + 50)
+      await withImportRetry(() => client.from('fifo_allocations').delete().in('source_lot_id', chunk))
+      await withImportRetry(() => client.from('fifo_allocations').delete().in('output_lot_id', chunk))
     }
     await deleteRowsInChunks(client, 'pz_fifo_change_log', 'lot_id', lotIds)
     for (let i = 0; i < lotIds.length; i += 80) {
@@ -610,7 +612,20 @@ export async function purgeImportDataClientSide(client, importedFileId) {
   return { operations: opIds.length, lots: lotIds.length }
 }
 
-async function purgeStaleInProgressImportsClient(client, filename, excludeImportId = null) {
+async function purgeImportByFileId(client, importedFileId) {
+  try {
+    const { error } = await withImportRetry(() =>
+      client.rpc('purge_import_excel_data', { p_imported_file_id: importedFileId })
+    )
+    if (!error) return
+    if (!/function.*does not exist/i.test(String(error.message || ''))) throw error
+  } catch (err) {
+    if (!/function.*does not exist/i.test(String(err?.message || ''))) throw err
+  }
+  return purgeImportDataClientSide(client, importedFileId)
+}
+
+async function purgeStaleInProgressImportsClient(client, filename, excludeImportId = null, onProgress) {
   if (!filename) return { removed: 0 }
   let query = client
     .from('imported_files')
@@ -622,9 +637,11 @@ async function purgeStaleInProgressImportsClient(client, filename, excludeImport
   const { data: stale, error } = await withImportRetry(() => query)
   if (error) throw error
   let removed = 0
-  for (const row of stale || []) {
-    await purgeImportDataClientSide(client, row.id)
-    await withImportRetry(() => client.from('imported_files').delete().eq('id', row.id))
+  const list = stale || []
+  for (let i = 0; i < list.length; i += 1) {
+    onProgress?.(`Usuwanie przerwanego importu (${i + 1}/${list.length})…`)
+    await purgeImportByFileId(client, list[i].id)
+    await withImportRetry(() => client.from('imported_files').delete().eq('id', list[i].id))
     removed += 1
   }
   return { removed }
@@ -652,8 +669,8 @@ async function purgeDeletedImportLotsClient(client) {
   return lots
 }
 
-export async function runFullImportLotCleanup(client, filename, excludeImportId = null) {
-  const prep = await prepareImportExcelSave(client, filename, excludeImportId)
+export async function runFullImportLotCleanup(client, filename, excludeImportId = null, options = {}) {
+  const prep = await prepareImportExcelSave(client, filename, excludeImportId, { ...options, fullCleanup: true })
   let extraLots = await purgeOrphanLotsRpc(client)
   try {
     extraLots += await purgeDeletedImportLotsClient(client)
@@ -661,20 +678,63 @@ export async function runFullImportLotCleanup(client, filename, excludeImportId 
   return { ...prep, orphan_lots_removed: (prep?.orphan_lots_removed || 0) + extraLots }
 }
 
-/** Przed zapisem: usuwa pozostałości usuniętych importów i przerwane importy tego samego pliku. */
-export async function prepareImportExcelSave(client, filename, excludeImportId = null) {
+/** Szybkie przygotowanie: tylko przerwany import tego pliku (bez skanowania całej bazy). */
+async function prepareImportExcelSaveFast(client, filename, excludeImportId = null, onProgress) {
+  onProgress?.('Szybkie czyszczenie przed zapisem…')
+
   const { data, error } = await withImportRetry(() =>
     client.rpc('prepare_import_excel_save', {
       p_filename: filename || null,
-      p_exclude_import_id: excludeImportId || null
+      p_exclude_import_id: excludeImportId || null,
+      p_full_cleanup: false
+    })
+  )
+  if (!error) return { ...(data || {}), fast: true }
+
+  const errMsg = String(error?.message || '')
+  const rpcMissing = /function.*does not exist/i.test(errMsg)
+  const rpcNoFastParam = /p_full_cleanup|could not find the function/i.test(errMsg)
+  if (!rpcMissing && !rpcNoFastParam) throw error
+
+  const stale = await purgeStaleInProgressImportsClient(client, filename, excludeImportId, onProgress)
+  let orphanLots = 0
+  if (stale.removed > 0) {
+    onProgress?.('Usuwanie osieroconych partii po przerwanym imporcie…')
+    orphanLots = await purgeOrphanLotsRpc(client)
+  }
+  return {
+    stale_in_progress_removed: stale.removed,
+    orphan_lots_removed: orphanLots,
+    fast: true,
+    fallback: true
+  }
+}
+
+/** Przed zapisem: domyślnie szybko (przerwany ten sam plik). Pełne sprzątanie: { fullCleanup: true }. */
+export async function prepareImportExcelSave(client, filename, excludeImportId = null, options = {}) {
+  const onProgress = options.onProgress
+  const fullCleanup = options.fullCleanup === true
+
+  if (!fullCleanup) {
+    return prepareImportExcelSaveFast(client, filename, excludeImportId, onProgress)
+  }
+
+  onProgress?.('Pełne czyszczenie przed zapisem (może potrwać)…')
+  const { data, error } = await withImportRetry(() =>
+    client.rpc('prepare_import_excel_save', {
+      p_filename: filename || null,
+      p_exclude_import_id: excludeImportId || null,
+      p_full_cleanup: true
     })
   )
   if (!error) return data || {}
 
-  if (!/function.*does not exist/i.test(String(error.message || ''))) throw error
+  const errMsg = String(error?.message || '')
+  if (!/function.*does not exist|p_full_cleanup|could not find the function/i.test(errMsg)) throw error
 
+  onProgress?.('Pełne czyszczenie (tryb awaryjny)…')
   const cleanup = await cleanupOrphanedDeletedImports(client)
-  const stale = await purgeStaleInProgressImportsClient(client, filename, excludeImportId)
+  const stale = await purgeStaleInProgressImportsClient(client, filename, excludeImportId, onProgress)
   const orphanLots = await purgeOrphanLotsRpc(client)
   return {
     needsMigration: true,
@@ -696,6 +756,9 @@ export function formatPrepareImportResult(prep) {
   }
   if ((prep.orphan_lots_removed || 0) > 0) {
     parts.push(`usunięto ${prep.orphan_lots_removed} osieroconych partii`)
+  }
+  if (prep.fast && !prep.fallback) {
+    parts.push('tryb szybki (bez skanowania całej bazy)')
   }
   if (prep.needsMigration && prep.fallback) {
     parts.push('użyto trybu awaryjnego (uruchom migrację v40+v42 w Supabase)')
