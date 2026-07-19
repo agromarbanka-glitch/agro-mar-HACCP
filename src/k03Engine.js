@@ -422,6 +422,11 @@ export function fifoClassDisplayLabel(matchSpecOrKey) {
   return rawKey || key
 }
 
+/** Czy nazwa dotyczy pulpy (produkt po przerobie — nie surowiec przy PZ). */
+export function isPulpaProductName(productName = '') {
+  return /pulpa/i.test(String(productName || ''))
+}
+
 /** Nazwa kanoniczna produktu – synonimy z importu mapowane na nazwy w systemie. */
 export function canonicalProductName(productName = '') {
   const raw = String(productName || '').trim()
@@ -434,9 +439,10 @@ export function canonicalProductName(productName = '') {
   if (/^m1$/i.test(raw.trim()) || /malina\s+(klasa\s*)?(i|1)\b/.test(text)) return 'Malina klasa I'
   if (/^mpw$/i.test(raw.trim()) || /malina\s+(swieza\s*)?pw\b/.test(text)) return 'Malina PW'
   if (/^mex$/i.test(raw.trim()) || /malina\s+extra/.test(text)) return 'Malina extra'
-  if (/porzeczka\s+kolor(\owa)?\s+pulpa/.test(text) || text === 'pkp') return 'Porzeczka kolorowa pulpa'
-  if (/porzeczka\s+(kolor(\owa)?|czerwona)\b/.test(text) || text === 'pk') return 'Porzeczka kolorowa'
+  if (/porzeczka\s+(kolor(\owa)?|czerwona)\s+pulpa/.test(text) || text === 'pkp') return 'Porzeczka kolorowa pulpa'
+  if (/porzeczka\s+(kolor(\owa)?|czerwona)\b/.test(text) && !/pulpa/.test(text) || text === 'pk') return 'Porzeczka kolorowa'
   if (/porzeczka\s+czarna\s+pulpa/.test(text) || text === 'pczp') return 'Porzeczka czarna pulpa'
+  if (isPorzeczkaCzarnaShorthand(text) && !/pulpa/.test(text)) return 'Porzeczka czarna'
   if (isPorzeczkaCzarnaShorthand(text)) return /pulpa/.test(text) ? 'Porzeczka czarna pulpa' : 'Porzeczka czarna'
   return raw
 }

@@ -1,6 +1,25 @@
 import { inferDateFromDocumentNo, resolveDocumentIssueDate } from './excelImport.js'
+import { canonicalProductName, isPulpaProductName } from './k03Engine.js'
 
-export const K01_ENGINE_VERSION = '1.2'
+export const K01_ENGINE_VERSION = '1.3'
+
+/** Nazwa surowca na K01 (przyjęcie PZ) — pulpa tylko gdy jest w PZ/Excelu, nie z katalogu produktów. */
+export function intakeProductDisplayName(productName = '') {
+  const raw = String(productName || '').trim()
+  if (!raw) return raw
+  const canonical = canonicalProductName(raw)
+  if (isPulpaProductName(canonical) && !isPulpaProductName(raw)) {
+    const lower = raw.toLowerCase()
+    if (/porzeczka/.test(lower)) {
+      if (/czerwona/.test(lower)) return 'Porzeczka czerwona'
+      if (/czarna/.test(lower)) return 'Porzeczka czarna'
+      return 'Porzeczka kolorowa'
+    }
+    if (/malina/.test(lower)) return canonicalProductName(raw) || raw
+    return canonical.replace(/\s+pulpa/gi, '').trim() || raw
+  }
+  return canonical || raw
+}
 
 /** Klucz logicznej linii K01 (FIFO: jeden wpis na PZ + data + kg). */
 export function k01LineDedupeKey(doc) {
@@ -40,7 +59,9 @@ export function buildK01DocFromLot(lot, operation, options = {}) {
     op.operation_date || lot.production_date || lot.created_at || '',
     op.document_no || ''
   ) || String(lot.production_date || lot.created_at || '').slice(0, 10)
-  const productName = lot.products?.name || lot.product_name || ''
+  const rawName = options.rawProductName || lot.raw_product_name || ''
+  const catalogName = lot.products?.name || lot.product_name || ''
+  const productName = intakeProductDisplayName(rawName || catalogName)
   const signature = options.defaultSignature || ''
   return {
     id: `K01-syn-${lot.id}`,
@@ -67,7 +88,7 @@ export function buildK01DocFromLot(lot, operation, options = {}) {
  * Tworzy brakujące K01 dla partii z operacji przyjęcia (PZ/MM).
  */
 export function buildSyntheticK01DocsFromTrace(trace = {}, haccpDocs = [], options = {}) {
-  const { lots = [], operations = [] } = trace
+  const { lots = [], operations = [], itemsByLotId = null } = trace
   const opMap = new Map((operations || []).map(o => [o.id, o]))
   const existingLotIds = new Set(
     (haccpDocs || [])
@@ -92,7 +113,10 @@ export function buildSyntheticK01DocsFromTrace(trace = {}, haccpDocs = [], optio
     if (!isIncomingLotOperation(op)) continue
     if (existingLotIds.has(lot.id)) continue
     if (lot.lot_no && existingLotNos.has(lot.lot_no)) continue
-    const draft = buildK01DocFromLot(lot, op, options)
+    const draft = buildK01DocFromLot(lot, op, {
+      ...options,
+      rawProductName: itemsByLotId?.get?.(lot.id) || options.rawProductName || null
+    })
     const lineKey = k01LineDedupeKey(draft)
     if (existingLineKeys.has(lineKey) || pendingLineKeys.has(lineKey)) continue
     pendingLineKeys.add(lineKey)
@@ -100,6 +124,47 @@ export function buildSyntheticK01DocsFromTrace(trace = {}, haccpDocs = [], optio
   }
 
   return result.sort((a, b) => String(a.document_date).localeCompare(String(b.document_date)))
+}
+
+/** Poprawia K01 przyjęć: usuwa „pulpa” gdy w PZ/Excelu była tylko porzeczka/malina świeża. */
+export async function repairK01IntakeProductNames(client, { lotIds = null, onProgress } = {}) {
+  if (!client) return 0
+  onProgress?.('Sprawdzanie nazw surowca na K01…')
+  let query = client
+    .from('haccp_documents')
+    .select('id, product_name, lot_id')
+    .eq('document_type', 'K01')
+    .ilike('product_name', '%pulpa%')
+  if (lotIds?.length) query = query.in('lot_id', lotIds)
+  const { data: docs, error } = await query.limit(5000)
+  if (error) throw error
+  if (!docs?.length) return 0
+
+  const ids = docs.map(d => d.lot_id).filter(Boolean)
+  const rawByLot = new Map()
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100)
+    const { data: items, error: itemErr } = await client
+      .from('operation_items')
+      .select('lot_id, raw_product_name')
+      .in('lot_id', chunk)
+    if (itemErr) throw itemErr
+    for (const item of items || []) {
+      if (item.lot_id && item.raw_product_name) rawByLot.set(item.lot_id, item.raw_product_name)
+    }
+  }
+
+  let fixed = 0
+  for (const doc of docs) {
+    const raw = rawByLot.get(doc.lot_id)
+    if (!raw || isPulpaProductName(raw)) continue
+    const nextName = intakeProductDisplayName(raw)
+    if (!nextName || nextName === doc.product_name) continue
+    const { error: updErr } = await client.from('haccp_documents').update({ product_name: nextName }).eq('id', doc.id)
+    if (updErr) throw updErr
+    fixed += 1
+  }
+  return fixed
 }
 
 export function buildK01InsertPayload(doc) {

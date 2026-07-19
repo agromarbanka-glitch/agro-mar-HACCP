@@ -11,7 +11,7 @@ import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
-import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload } from './k01Engine'
+import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
 } from './k02Engine'
@@ -8858,6 +8858,23 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (!candidateLots.length) return 0
 
     const lotIds = candidateLots.map(l => l.id).filter(Boolean)
+    const repairedNames = await repairK01IntakeProductNames(supabase, {
+      lotIds: lotIds.length ? lotIds : null
+    })
+
+    const itemsByLotId = new Map()
+    if (lotIds.length) {
+      const itemRows = await fetchSupabaseInChunks(
+        'operation_items',
+        'lot_id, raw_product_name',
+        'lot_id',
+        lotIds
+      )
+      for (const row of itemRows) {
+        if (row.lot_id && row.raw_product_name) itemsByLotId.set(row.lot_id, row.raw_product_name)
+      }
+    }
+
     let k01Existing = []
     if (lotIds.length) {
       const rows = await fetchSupabaseInChunks(
@@ -8888,7 +8905,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     const existingLotIds = new Set(k01Existing.map(d => d.lot_id).filter(Boolean))
 
     const pendingLots = candidateLots.filter(l => !existingLotIds.has(l.id))
-    if (!pendingLots.length) return 0
+    if (!pendingLots.length) return repairedNames
 
     const opIds = Array.from(new Set(pendingLots.map(l => l.source_operation_id).filter(Boolean)))
     const operations = opIds.length
@@ -8900,11 +8917,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       )
       : []
 
-    const trace = { lots: pendingLots, operations }
+    const trace = { lots: pendingLots, operations, itemsByLotId }
     const pending = buildSyntheticK01DocsFromTrace(trace, k01Existing, {
       defaultSignature: defaultK01Employee || ''
     })
-    if (!pending.length) return 0
+    if (!pending.length) return repairedNames
 
     let inserted = 0
     const insertErrors = []
@@ -8921,7 +8938,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (insertErrors.length) {
       console.warn('K01 partial insert errors', insertErrors)
     }
-    return inserted
+    return inserted + repairedNames
   }
 
   async function syncAutoK01ForImportFile(importedFileId) {

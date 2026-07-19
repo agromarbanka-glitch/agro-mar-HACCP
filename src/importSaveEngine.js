@@ -12,7 +12,7 @@
 export const IMPORT_SAVE_ENGINE_VERSION = '2.3'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases, monthYearFromDocumentNo } from './excelImport.js'
-import { repairPorzeczkaProductGroups, canonicalProductName } from './k03Engine.js'
+import { repairPorzeczkaProductGroups, canonicalProductName, isPulpaProductName } from './k03Engine.js'
 import { invalidateFifoBaseCache } from './fifoEngine.js'
 import { k01LineDedupeKey } from './k01Engine.js'
 
@@ -785,8 +785,7 @@ async function fetchNamesInChunks(client, table, column, names, selectCols = '*'
 }
 
 async function ensureProductIds(client, productNames, deps) {
-  const unique = [...new Set(productNames.map(n => (deps.canonicalProductName?.(n) || n) || 'Produkt do dopasowania'))]
-  const { normalizeText, baseCodeForProduct, productGroupForName, canonicalProductName } = deps
+  const { normalizeText, baseCodeForProduct, productGroupForName, canonicalProductName: canonFn } = deps
   const map = new Map()
 
   const { data: catalog, error: catalogErr } = await withImportRetry(() =>
@@ -796,17 +795,57 @@ async function ensureProductIds(client, productNames, deps) {
 
   for (const p of catalog || []) {
     map.set(normalizeText(p.name), p.id)
-    const canonical = canonicalProductName?.(p.name) || p.name
-    map.set(normalizeText(canonical), p.id)
+    const canonical = canonFn?.(p.name) || p.name
+    const canonKey = normalizeText(canonical)
+    const existingId = map.get(canonKey)
+    if (!existingId) {
+      map.set(canonKey, p.id)
+      continue
+    }
+    const existing = (catalog || []).find(x => x.id === existingId)
+    if (!isPulpaProductName(p.name) && isPulpaProductName(existing?.name)) {
+      map.set(canonKey, p.id)
+    }
   }
 
-  const missing = unique.filter(name => !map.has(normalizeText(name)))
-  if (!missing.length) return map
+  const missingRaw = [...new Set((productNames || []).filter(Boolean))]
+  const missing = missingRaw.filter(rawName => {
+    const canonical = canonFn?.(rawName) || rawName
+    const needPulpa = isPulpaProductName(rawName)
+    const canonKey = normalizeText(canonical)
+    const rawKey = normalizeText(rawName)
+    if (map.has(rawKey)) {
+      const id = map.get(rawKey)
+      const p = (catalog || []).find(x => x.id === id)
+      if (p && isPulpaProductName(p.name) === needPulpa) return false
+    }
+    const candidate = (catalog || []).find(p => {
+      const pCanon = normalizeText(canonFn?.(p.name) || p.name)
+      return (pCanon === canonKey || normalizeText(p.name) === rawKey) && isPulpaProductName(p.name) === needPulpa
+    })
+    if (candidate) {
+      map.set(rawKey, candidate.id)
+      if (!needPulpa) map.set(canonKey, candidate.id)
+      return false
+    }
+    if (map.has(canonKey)) {
+      const id = map.get(canonKey)
+      const p = (catalog || []).find(x => x.id === id)
+      if (p && isPulpaProductName(p.name) === needPulpa) return false
+      if (!needPulpa && p && isPulpaProductName(p.name)) return true
+    }
+    return !map.has(canonKey) && !map.has(rawKey)
+  }).map(rawName => canonFn?.(rawName) || rawName)
+  const missingUnique = [...new Set(missing.map(name => normalizeText(name)).filter(Boolean))]
+    .map(key => missing.find(n => normalizeText(n) === key))
+    .filter(Boolean)
+
+  if (!missingUnique.length) return map
 
   const codesInUse = new Set((catalog || []).map(p => p.code))
   const toInsert = []
 
-  for (const name of missing) {
+  for (const name of missingUnique) {
     const key = normalizeText(name)
     let code = baseCodeForProduct(name)
     let suffix = 2
