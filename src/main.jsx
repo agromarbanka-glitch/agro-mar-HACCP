@@ -1515,8 +1515,12 @@ function App() {
 
   function toggleK03FifoSourceKey(sourceKey, checked) {
     setK03WzModal(m => {
-      if (!checked) return m
-      return { ...m, fifoSourceKeys: [sourceKey], preview: null, confirmMismatch: false, manualRows: [] }
+      const current = [...(m.fifoSourceKeys || [])]
+      const next = checked
+        ? (current.includes(sourceKey) ? current : [...current, sourceKey])
+        : current.filter(k => k !== sourceKey)
+      if (next.length === current.length && next.every((k, i) => k === current[i])) return m
+      return { ...m, fifoSourceKeys: next, preview: null, confirmMismatch: false, manualRows: [] }
     })
   }
 

@@ -523,7 +523,7 @@ const FIFO_SOURCE_PICKERS = {
     }
   },
   malina: {
-    hint: 'Każda klasa maliny ma osobną pulę (PW ≠ klasa I ≠ extra). Zaznacz tylko klasy faktycznie używane przy tym WZ.',
+    hint: 'Każda klasa maliny ma osobną pulę (PW ≠ klasa I ≠ extra). Możesz zaznaczyć kilka klas, gdy na jednej partii mieszasz np. malinę PW i klasa I.',
     choices: [
       { key: 'malina pw', label: 'Malina świeża PW (Mpw)' },
       { key: 'malina klasa i', label: 'Malina klasa I (M1)' },
