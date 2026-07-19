@@ -706,7 +706,8 @@ function runClassFifoSimulation(base, matchSpec, workflowBySaleKey, options = {}
     const sale = base.sortedSales[i]
     const wf = wfMap.get(sale.key) || null
     const saleSpec = effectiveSaleMatchSpec(sale, wf)
-    if (!sameFifoPool(saleSpec, matchSpec)) continue
+    const poolSpec = sale.key === targetSaleKey ? targetSpec : saleSpec
+    if (!sameFifoPool(poolSpec, matchSpec)) continue
 
     if (sale.key === targetSaleKey) {
       lotStateBeforeTarget = new Map(Array.from(lotState.entries()).map(([k, v]) => [k, { ...v }]))
@@ -1178,7 +1179,8 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
     .filter(s => {
       if (String(s.sale_date || '').slice(0, 10) !== targetDay) return false
       const wf = workflowBySaleKey.get(s.key) || null
-      return sameFifoPool(effectiveSaleMatchSpec(s, wf), matchSpec)
+      const spec = s.key === saleKey ? matchSpec : effectiveSaleMatchSpec(s, wf)
+      return sameFifoPool(spec, matchSpec)
     })
     .map(s => ({
       wz_no: s.sale_doc_no,
