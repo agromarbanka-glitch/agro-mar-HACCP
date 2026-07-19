@@ -28,7 +28,8 @@ export function k01LineDedupeKey(doc) {
   const dateFromNo = inferDateFromDocumentNo(no)
   const date = dateFromNo || String(doc?.document_date || '').slice(0, 10)
   if (/^PZ\//i.test(no)) {
-    return `${no}|${date}|${qty}`
+    const prod = String(doc?.product_name || '').trim().toLowerCase()
+    return `${no}|${date}|${prod}|${qty}`
   }
   const prod = String(doc?.product_name || '').trim().toLowerCase()
   return `${no}|${date}|${prod}|${qty}`
@@ -130,15 +131,31 @@ export function buildSyntheticK01DocsFromTrace(trace = {}, haccpDocs = [], optio
 export async function repairK01IntakeProductNames(client, { lotIds = null, onProgress } = {}) {
   if (!client) return 0
   onProgress?.('Sprawdzanie nazw surowca na K01…')
-  let query = client
-    .from('haccp_documents')
-    .select('id, product_name, lot_id')
-    .eq('document_type', 'K01')
-    .ilike('product_name', '%pulpa%')
-  if (lotIds?.length) query = query.in('lot_id', lotIds)
-  const { data: docs, error } = await query.limit(5000)
-  if (error) throw error
-  if (!docs?.length) return 0
+  const lotIdSet = lotIds?.length ? new Set(lotIds) : null
+  const docs = []
+  const pageSize = 500
+  let offset = 0
+
+  while (docs.length < 5000) {
+    const { data, error } = await client
+      .from('haccp_documents')
+      .select('id, product_name, lot_id')
+      .eq('document_type', 'K01')
+      .ilike('product_name', '%pulpa%')
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1)
+    if (error) throw error
+    const chunk = data || []
+    if (!chunk.length) break
+    for (const row of chunk) {
+      if (lotIdSet && !lotIdSet.has(row.lot_id)) continue
+      docs.push(row)
+    }
+    if (chunk.length < pageSize) break
+    offset += pageSize
+  }
+
+  if (!docs.length) return 0
 
   const ids = docs.map(d => d.lot_id).filter(Boolean)
   const rawByLot = new Map()

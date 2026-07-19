@@ -8858,9 +8858,14 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     if (!candidateLots.length) return 0
 
     const lotIds = candidateLots.map(l => l.id).filter(Boolean)
-    const repairedNames = await repairK01IntakeProductNames(supabase, {
-      lotIds: lotIds.length ? lotIds : null
-    })
+    let repairedNames = 0
+    try {
+      repairedNames = await repairK01IntakeProductNames(supabase, {
+        lotIds: lotIds.length <= 400 ? lotIds : null
+      })
+    } catch (repairErr) {
+      console.warn('repair K01 intake names', repairErr)
+    }
 
     const itemsByLotId = new Map()
     if (lotIds.length) {
@@ -9015,9 +9020,14 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     setMessage('Odświeżanie kartotek HACCP…')
     try {
       if (repair) {
-        const repairResult = await repairWarehouseImportDuplicates(supabase, { onProgress: setMessage })
-        if ((repairResult?.k01_removed || 0) + (repairResult?.items_removed || 0) > 0) {
-          setMessage(`${formatRepairWarehouseResult(repairResult)} Wczytywanie listy…`)
+        try {
+          const repairResult = await repairWarehouseImportDuplicates(supabase, { onProgress: setMessage })
+          if ((repairResult?.k01_removed || 0) + (repairResult?.items_removed || 0) > 0) {
+            setMessage(`${formatRepairWarehouseResult(repairResult)} Wczytywanie listy…`)
+          }
+        } catch (repairErr) {
+          console.warn('repairWarehouseImportDuplicates', repairErr)
+          setMessage(`Naprawa duplikatów: ${repairErr?.message || repairErr} — wczytuję kartoteki…`)
         }
       }
       await loadHaccpDocs({ syncK01, force: true, skipBusy: true })
@@ -9038,10 +9048,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     const run = (async () => {
       try {
         if (options.syncK01) {
-          setMessage('Sprawdzanie brakujących kart K01…')
-          const k01Added = await syncAutoK01Documents(null, { minProductionDate: options.minProductionDate })
-          if (k01Added > 0 && generation === haccpLoadGenerationRef.current) {
-            setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
+          try {
+            setMessage('Sprawdzanie brakujących kart K01…')
+            const k01Added = await syncAutoK01Documents(null, { minProductionDate: options.minProductionDate })
+            if (k01Added > 0 && generation === haccpLoadGenerationRef.current) {
+              setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
+            }
+          } catch (syncErr) {
+            console.warn('syncAutoK01Documents', syncErr)
+            if (generation === haccpLoadGenerationRef.current) {
+              setMessage(`K01: ${syncErr?.message || syncErr} — wczytuję zapisane kartoteki z bazy…`)
+            }
           }
         }
         const data = await fetchAllHaccpDocuments(supabase)
@@ -9049,11 +9066,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         setHaccpDocs(data)
         if (data.length >= HACCP_DOCS_LOAD_MAX) {
           setMessage(`Wczytano ${data.length.toLocaleString('pl-PL')} kartotek (górny limit). Użyj filtra dat w panelu bocznym, aby zawęzić widok.`)
+        } else if (generation === haccpLoadGenerationRef.current && !data.length && options.syncK01) {
+          setMessage('Brak kartotek w bazie — sprawdź Importy → Zapisz lub Kartoteki → Odśwież ponownie.')
         }
         return data
       } catch (err) {
         if (generation !== haccpLoadGenerationRef.current) throw err
-        setHaccpDocs([])
         const msg = String(err?.message || err)
         if (/permission denied|row-level security|42501/i.test(msg)) {
           setMessage('Brak dostępu do kartotek po zalogowaniu. Uruchom w Supabase SQL: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql')
