@@ -45,12 +45,49 @@ export function inferK03LotCode(productName, product, options = {}) {
   const mode = options.mode || 'bez_przerobu'
   const variantKey = normalizeFifoProductKey(productName, product)
   const isMalina = /^malina/.test(variantKey)
-  if (mode === 'przerob' && isMalina) return 'Mpulpa'
+  if (mode === 'przerob' && isMalina) return 'Mp'
   if (variantKey === 'malina pw' || variantKey === 'malina swieza') return 'Mpw'
   if (variantKey === 'malina klasa i') return 'M1'
   if (variantKey === 'malina extra') return 'Mex'
-  if (variantKey === 'malina pulpa') return 'Mpulpa'
+  if (variantKey === 'malina pulpa') return 'Mp'
   return inferProductCode(productName, product)
+}
+
+/** Rok w numerze partii K03 (ISO lub dd.mm.rrrr). */
+export function k03LotReferenceYear(referenceDate) {
+  const raw = String(referenceDate || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 4)
+  const pl = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
+  if (pl) return pl[3]
+  const yearMatch = raw.match(/(\d{4})/)
+  if (yearMatch) return yearMatch[1]
+  return String(new Date().getFullYear())
+}
+
+/** Kolejny numer sekwencji partii gotowej (Mp/00N/2026). */
+export function nextK03LotSequence(existingForms, productId, productName, code, year) {
+  const nameKey = normalizeText(productName || '')
+  let maxSeq = 0
+  for (const f of existingForms || []) {
+    if (productId && f.data?.product_id && f.data.product_id !== productId) continue
+    if (!productId && normalizeText(f.product_name || '') !== nameKey) continue
+    const lot = String(f.lot_no || '').trim()
+    const m = lot.match(/^([A-Za-z]{1,8})\/(\d{1,5})\/(\d{2,4})$/)
+    if (!m) continue
+    if (m[1].toLowerCase() !== String(code).toLowerCase()) continue
+    const lotYear = m[3].length === 2 ? `20${m[3]}` : m[3]
+    if (lotYear !== String(year)) continue
+    maxSeq = Math.max(maxSeq, Number(m[2]) || 0)
+  }
+  return maxSeq + 1
+}
+
+export function formatK03LotNo(code, seq, year) {
+  return `${code}/${String(seq).padStart(3, '0')}/${year}`
+}
+
+function preservedK03LotNo(form) {
+  return String(form?.lot_no || form?.data?.k03_workflow?.lot_no || '').trim()
 }
 
 export function isInternalLotNumber(value = '') {
@@ -213,29 +250,35 @@ export function formatK03Receiver(value) {
 }
 
 function assignFinishedLotNumbers(forms, productMap) {
-  const counters = new Map()
   const sorted = [...(forms || [])].sort((a, b) =>
     String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
     String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
     String(a.product_name || '').localeCompare(String(b.product_name || ''))
   )
   const lotById = new Map()
+  const assignedInRun = []
   for (const form of sorted) {
+    if (preservedK03LotNo(form)) continue
     const product = productMap?.get?.(form.data?.product_id)
-    const year = String(form.document_date || '').slice(0, 4) || String(new Date().getFullYear())
-    const productKey = form.data?.product_id || normalizeText(form.product_name || 'produkt')
-    const counterKey = `${productKey}|${year}`
-    const seq = (counters.get(counterKey) || 0) + 1
-    counters.set(counterKey, seq)
-    const code = inferK03LotCode(form.product_name, product, { mode: form.data?.k03_workflow?.mode || 'bez_przerobu' })
-    lotById.set(form.id, `${code}/${String(seq).padStart(3, '0')}/${year}`)
+    const year = k03LotReferenceYear(form.document_date)
+    const mode = form.data?.k03_workflow?.mode || 'bez_przerobu'
+    const code = inferK03LotCode(form.product_name, product, { mode })
+    const seq = nextK03LotSequence([...(forms || []), ...assignedInRun], form.data?.product_id, form.product_name, code, year)
+    const lotNo = formatK03LotNo(code, seq, year)
+    lotById.set(form.id, lotNo)
+    assignedInRun.push({ ...form, lot_no: lotNo })
   }
-  return (forms || []).map(form => lotById.has(form.id) ? { ...form, lot_no: lotById.get(form.id) } : form)
+  return (forms || []).map(form => {
+    const preserved = preservedK03LotNo(form)
+    if (preserved) return form
+    return lotById.has(form.id) ? { ...form, lot_no: lotById.get(form.id) } : form
+  })
 }
 
 function finalizeK03LotNumbers(forms, productMap, outputLotByKey = new Map()) {
   const toAssign = []
   const withDbLot = (forms || []).map(form => {
+    if (preservedK03LotNo(form)) return form
     const dbKey = `${form.data?.sale_operation_id}|${form.data?.product_id || 'null'}`
     const fromDb = outputLotByKey.get(dbKey)
     if (fromDb) return { ...form, lot_no: fromDb }
@@ -673,7 +716,7 @@ export const K03_CLASS_FILTER_TREE = [
       { id: 'malina pw', label: 'Świeża PW (Mpw)' },
       { id: 'malina klasa i', label: 'Klasa I (M1)' },
       { id: 'malina extra', label: 'Extra (Mex)' },
-      { id: 'malina pulpa', label: 'Pulpa (Mpulpa)' }
+      { id: 'malina pulpa', label: 'Pulpa (Mp)' }
     ]
   },
   {
@@ -1559,6 +1602,9 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
         wz_date: doc.data?.wz_date || doc.document_date,
         rawRowPatches: doc.data?.k03_edits?.rawRowPatches || null
       },
+      k03_workflow: doc.data?.k03_workflow
+        ? { ...doc.data.k03_workflow, lot_no: doc.lot_no }
+        : doc.data?.k03_workflow,
       frozen: unfreeze ? false : (freeze || (wasFrozen && !unfreeze)),
       frozen_at: freeze ? new Date().toISOString() : (unfreeze ? null : (doc.data?.frozen_at || null)),
       rawRows: doc.data?.rawRows || [],

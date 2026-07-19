@@ -10,6 +10,9 @@ import {
   applyK03DocEdits,
   inferProductCode,
   inferK03LotCode,
+  k03LotReferenceYear,
+  nextK03LotSequence,
+  formatK03LotNo,
   productGroupForName,
   repairPzRowsFromLots,
   formNeedsPzRepair,
@@ -219,15 +222,15 @@ export function wzStatusLabel(status) {
 }
 
 function suggestLotNo(existingForms, productName, productId, productMap, referenceDate, options = {}) {
-  const year = String(referenceDate || '').slice(0, 4) || String(new Date().getFullYear())
+  const year = k03LotReferenceYear(referenceDate)
   const product = productMap?.get?.(productId)
   const code = inferK03LotCode(productName, product, options)
   const sameProduct = (existingForms || []).filter(f =>
     (f.data?.product_id === productId || normalizeKey(f.product_name) === normalizeKey(productName)) &&
     String(f.lot_no || '').includes(`/${year}`)
   )
-  const seq = sameProduct.length + 1
-  return `${code}/${String(seq).padStart(3, '0')}/${year}`
+  const seq = nextK03LotSequence(sameProduct, productId, productName, code, year)
+  return formatK03LotNo(code, seq, year)
 }
 
 async function loadK03LotSuggestForms(client, productId, productName, year) {

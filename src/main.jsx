@@ -1138,10 +1138,14 @@ function App() {
     setK03Overrides(prev => ({ ...prev, [doc.id]: mergedOverride }))
 
     const mergedDoc = applyK03DocEdits(doc, mergedOverride)
+    const workflow = mergedDoc.data?.k03_workflow
+      ? { ...mergedDoc.data.k03_workflow, lot_no: mergedDoc.lot_no }
+      : mergedDoc.data?.k03_workflow
     const toSave = {
       ...mergedDoc,
       data: {
         ...mergedDoc.data,
+        k03_workflow: workflow,
         k03_edits: {
           lot_no: mergedDoc.lot_no,
           wz_date: mergedDoc.data?.wz_date || mergedDoc.document_date,
@@ -1150,6 +1154,7 @@ function App() {
       }
     }
 
+    setK03FormsRaw(forms => forms.map(f => f.id === doc.id ? toSave : f))
     setSelectedHaccpDoc(prev => {
       if (!prev?.groupPreview) return prev
       const group = prev.group
@@ -1164,9 +1169,14 @@ function App() {
     })
 
     if (supabase) {
-      saveK03Snapshot(supabase, toSave, { freeze: doc.frozen === true, userRole: userRole }).catch(err => {
-        console.warn('K03 save', err)
-      })
+      saveK03Snapshot(supabase, toSave, { freeze: doc.frozen === true, userRole: userRole })
+        .then(() => {
+          if (patch.lot_no != null) setMessage(`K03: zapisano numer partii ${toSave.lot_no || '—'}.`)
+        })
+        .catch(err => {
+          console.warn('K03 save', err)
+          setMessage(`K03: błąd zapisu – ${err?.message || err}`)
+        })
     }
   }
 
@@ -3905,8 +3915,15 @@ function App() {
         || selection?.group
         || null
     }
-    const freshById = new Map((haccpDocs || []).map(d => [d.id, d]))
     const opened = selection.group
+    if (opened.type === 'K03') {
+      const k03ById = new Map((syntheticK03Docs || []).map(d => [d.id, d]))
+      return {
+        ...opened,
+        docs: (opened.docs || []).map(d => k03ById.get(d.id) || d)
+      }
+    }
+    const freshById = new Map((haccpDocs || []).map(d => [d.id, d]))
     const mergedDocs = (opened.docs || []).map(d => freshById.get(d.id) || d)
     const freshMeta = haccpMonthlyGroups.find(g => g.key === opened.key)
       || hubManualGroups.find(g => g.key === opened.key)
@@ -4742,7 +4759,7 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg. Numer partii, datę WZ i nr PZ możesz poprawić ręcznie – zapis następuje po wyjściu z pola.`}</span>
+          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ. Numer partii, datę WZ i nr PZ możesz poprawić ręcznie – zapis po wyjściu z pola.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg. Numer partii, datę WZ i nr PZ możesz poprawić ręcznie – zapis następuje po wyjściu z pola.`}</span>
         </div>
         <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {paper.year}<br/><b>Miesiąc:</b> {paper.month}<br/><b>Strona:</b></td></tr></tbody></table>
         <table className="k03-fields"><tbody>
@@ -4752,7 +4769,7 @@ function App() {
           </td></tr>
           <tr><td><b>Numer WZ:</b> {paper.wzNo}</td><td><b>Ilość WZ (kg):</b> {paper.saleTotal.toLocaleString('pl-PL')}</td></tr>
           <tr><td><b>Nadany numer partii wyrobu gotowego:</b>
-            <input className="cell-input no-print" type="text" defaultValue={paper.lotNo || ''} key={`k03-lot-${doc.id}-${paper.lotNo}`} placeholder="np. Mp/001/2024" onBlur={e => { if (e.target.value !== (paper.lotNo || '')) patchK03Document(doc, { lot_no: e.target.value.trim() }) }} />
+            <input className="cell-input no-print" type="text" defaultValue={paper.lotNo || ''} key={`k03-lot-${doc.id}-${paper.lotNo}`} placeholder="np. Mp/001/2026" onBlur={e => { if (e.target.value !== (paper.lotNo || '')) patchK03Document(doc, { lot_no: e.target.value.trim() }) }} />
             <span className="print-only">{paper.lotNo || '-'}</span>
           </td><td><b>Odbiorca:</b> {paper.receiver || '-'}</td></tr>
         </tbody></table>
