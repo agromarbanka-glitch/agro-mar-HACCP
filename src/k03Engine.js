@@ -279,8 +279,9 @@ function finalizeK03LotNumbers(forms, productMap, outputLotByKey = new Map()) {
   const toAssign = []
   const withDbLot = (forms || []).map(form => {
     if (preservedK03LotNo(form)) return form
-    const dbKey = `${form.data?.sale_operation_id}|${form.data?.product_id || 'null'}`
-    const fromDb = outputLotByKey.get(dbKey)
+    const base = `${form.data?.sale_operation_id}|${form.data?.product_id || 'null'}`
+    const dbKey = `${base}|${form.data?.operation_item_id || ''}`
+    const fromDb = outputLotByKey.get(dbKey) || outputLotByKey.get(base)
     if (fromDb) return { ...form, lot_no: fromDb }
     toAssign.push(form)
     return form
@@ -1065,9 +1066,15 @@ function saleOperationDate(op) {
   return String(op?.created_at || '').slice(0, 10) || '0000-01-01'
 }
 
-function saleLineKey(operationId, productId, productName = '') {
+function saleLineKey(operationId, productId, productName = '', operationItemId = null) {
   const pid = productId || `raw:${normalizeText(productName || 'produkt')}`
+  if (operationItemId) return `${operationId}|${pid}|${operationItemId}`
   return `${operationId}|${pid}`
+}
+
+/** Klucz pozycji WZ – jedna pozycja dokumentu = jeden K03 / jedna partia. */
+export function k03SaleLineKey(operationId, productId, productName = '', operationItemId = null) {
+  return saleLineKey(operationId, productId, productName, operationItemId)
 }
 
 async function fetchInChunks(client, table, select, column, ids, chunkSize = 80) {
@@ -1208,6 +1215,7 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
       excludedFuturePzQty,
       sale_operation_id: saleLine.operation_id,
       product_id: saleLine.product_id,
+      operation_item_id: saleLine.operation_item_id || null,
       k03_source: source,
       fifo_cutoff_date: cutoffDate !== '0000-01-01' ? cutoffDate : wzDate,
       k03_workflow: workflow
@@ -1222,29 +1230,32 @@ export function buildK03FormDoc(saleLine, pzRows, productMap, contractorMap, sou
 /** Formularze K03 z wczytanego Excela (gdy baza jeszcze nie zwraca WZ). */
 export function buildK03FormsFromExcelRows(excelRows) {
   const saleLines = new Map()
+  const lineCounters = new Map()
   for (const row of excelRows || []) {
     if (row.operation !== 'sprzedaz') continue
     if (!row.documentNo || !row.productName) continue
     const qty = Math.abs(Number(row.qty) || 0)
     if (qty <= 0) continue
-    const key = `${row.documentNo}|${normalizeText(row.productName)}`
-    const current = saleLines.get(key) || {
+    const sub = `${row.documentNo}|${normalizeText(row.productName)}`
+    const idx = lineCounters.get(sub) || 0
+    lineCounters.set(sub, idx + 1)
+    const key = `${sub}|${idx}`
+    saleLines.set(key, {
       key,
       operation_id: key,
       product_id: null,
+      operation_item_id: null,
       raw_product_name: row.productName,
       document_no: row.documentNo,
       issue_date: row.issueDate || '0000-01-01',
       receiver_name: row.contractorName || '',
-      qty: 0,
+      qty,
       op: {
         document_no: row.documentNo,
         operation_date: row.issueDate,
         contractor_id: null
       }
-    }
-    current.qty += qty
-    saleLines.set(key, current)
+    })
   }
 
   const emptyMap = new Map()
@@ -1268,17 +1279,17 @@ export function buildK03FormsFromImportPreview(importOps) {
       const qty = Math.abs(Number(item.qty || 0))
       if (qty <= 0) continue
       const rawName = item.raw_product_name || ''
-      const key = saleLineKey(op.id, item.product_id, rawName)
-      const current = saleLines.get(key) || {
+      const itemId = item.id || null
+      const key = saleLineKey(op.id, item.product_id, rawName, itemId)
+      saleLines.set(key, {
         key,
         operation_id: op.id,
+        operation_item_id: itemId,
         product_id: item.product_id || null,
         raw_product_name: rawName,
-        qty: 0,
+        qty,
         op
-      }
-      current.qty += qty
-      saleLines.set(key, current)
+      })
     }
   }
   const emptyMap = new Map()
@@ -1376,17 +1387,16 @@ export async function loadK03Forms(client) {
       if (qty <= 0) continue
       const product = productMap.get(item.product_id)
       const rawName = item.raw_product_name || product?.name || ''
-      const key = saleLineKey(opId, item.product_id, rawName)
-      const current = saleLines.get(key) || {
+      const key = saleLineKey(opId, item.product_id, rawName, item.id)
+      saleLines.set(key, {
         key,
         operation_id: opId,
+        operation_item_id: item.id || null,
         product_id: item.product_id || null,
         raw_product_name: rawName,
-        qty: 0,
+        qty,
         op
-      }
-      current.qty += qty
-      saleLines.set(key, current)
+      })
     }
   }
 
@@ -1405,7 +1415,8 @@ export async function loadK03Forms(client) {
   const outputLotByKey = new Map()
   for (const lot of outputLots) {
     if (!lot?.lot_no) continue
-    outputLotByKey.set(`${lot.source_operation_id}|${lot.product_id || 'null'}`, lot.lot_no)
+    const base = `${lot.source_operation_id}|${lot.product_id || 'null'}`
+    outputLotByKey.set(base, lot.lot_no)
   }
 
   const forms = finalizeK03LotNumbers(
