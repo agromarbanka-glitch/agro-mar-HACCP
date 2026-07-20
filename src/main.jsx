@@ -9166,14 +9166,21 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
   async function syncAutoR11Documents(k03Forms = [], currentDocs = []) {
     if (!supabase) return 0
     const r11Existing = (currentDocs || []).filter(d => d.document_type === 'R11')
-    const pending = buildR11SyncPayloads(k03Forms, r11Existing)
-    if (!pending.length) return 0
-    let inserted = 0
-    for (const doc of pending) {
+    const { toInsert, toRepair } = buildR11SyncPayloads(k03Forms, r11Existing)
+    let changed = 0
+    for (const doc of toInsert) {
       const { error } = await supabase.from('haccp_documents').insert(doc)
-      if (!error) inserted += 1
+      if (!error) changed += 1
     }
-    return inserted
+    for (const item of toRepair) {
+      const { error } = await supabase.from('haccp_documents').update({
+        data: item.data,
+        status: item.data?.uwagi_pn === 'N' ? 'N' : 'P',
+        updated_at: new Date().toISOString()
+      }).eq('id', item.id)
+      if (!error) changed += 1
+    }
+    return changed
   }
 
   async function syncAutoK07Documents(lotsData, operations, allocations, currentDocs, k03Forms = []) {

@@ -32,8 +32,9 @@ import {
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 import {
-  buildR11CalendarRows, r11ColumnsFromDocs, r11MagnetsForDoc, r11UwagiForDoc,
-  r11MakeColumn, R11_HEADER
+  buildR11CalendarRows, r11MagnetsForDoc, r11UwagiForDoc,
+  r11MakeColumn, R11_HEADER, resolveR11Columns, buildR11SparseDisplayRows,
+  buildR11ManualRowPayload
 } from './r11Engine'
 import { confirmDelete } from './authEngine'
 import { batchInsertHaccpDocuments } from './haccpLoadHelpers'
@@ -1250,8 +1251,8 @@ export function RMonthlyReportPreview({
   }
 
   if (cfg.layout === 'r11-magnets') {
-    const magnetCols = columns.length ? columns : r11ColumnsFromDocs(docs)
-    const calendar = buildR11CalendarRows(period, docs)
+    const magnetCols = resolveR11Columns(docs, group.columns)
+    const displayRows = buildR11SparseDisplayRows(docs, 9)
     const colSpan = Math.max(magnetCols.length, 1)
 
     async function addR11ColumnToGroup(label) {
@@ -1263,7 +1264,7 @@ export function RMonthlyReportPreview({
       try {
         for (const doc of docs) {
           const dayOff = doc.data?.is_day_off
-          const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [col.id]: dayOff ? '' : '-' }
+          const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [col.id]: dayOff ? '' : '+' }
           const { error } = await supabase.from('haccp_documents').update({
             data: { ...(doc.data || {}), magnet_columns: nextCols, magnets },
             updated_at: new Date().toISOString()
@@ -1307,6 +1308,30 @@ export function RMonthlyReportPreview({
       else await loadHaccpDocs()
     }
 
+    async function addR11ManualRow(dateStr) {
+      if (!supabase) return
+      const date = dateStr || `${period}-01`
+      const payload = buildR11ManualRowPayload(period, date, magnetCols, {}, defaultEmployee)
+      try {
+        const { error } = await supabase.from('haccp_documents').insert(payload)
+        if (error) throw error
+        await loadHaccpDocs()
+        setMessage('R11: dodano wiersz – uzupełnij kolumny.')
+      } catch (err) {
+        setMessage(`R11: ${err.message}`)
+      }
+    }
+
+    async function deleteR11Row(doc) {
+      if (!supabase || !doc?.id) return
+      if (!allowDelete) { setMessage('Tylko administrator może usuwać.'); return }
+      if (!confirmDelete(`Wpis R11 z dnia ${formatRMonthlyPlDate(doc.document_date)}.`)) return
+      if (onAuditDelete) await onAuditDelete([doc], 'R11 wiersz')
+      else await supabase.from('haccp_documents').delete().eq('id', doc.id)
+      await loadHaccpDocs()
+      setMessage('R11: usunięto wiersz.')
+    }
+
     const headR11 = (
       <table className="r13-head"><tbody><tr>
         <td className="r13-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
@@ -1316,6 +1341,10 @@ export function RMonthlyReportPreview({
     )
 
     return <div className="monthly-paper r13-paper r11-paper">{toolbar}{headR11}
+      <div className="no-print employee-signature-row" style={{ marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+        <button type="button" className="mini secondary" onClick={() => addR11ManualRow(`${period}-01`)}>+ Dodaj wiersz</button>
+        <span className="hint">Wpisy z przerobu maliny/porzeczki (K03) uzupełniają się automatycznie. Każda kolumna edytowalna.</span>
+      </div>
       {allowDelete && <div className="no-print card inner-card" style={{ marginBottom: 12 }}>
         <b>Dodaj miejsce kontroli magnesu do tej kartoteki:</b>
         <div className="r13-add-column-row" style={{ marginTop: 8 }}>
@@ -1330,39 +1359,41 @@ export function RMonthlyReportPreview({
           <th colSpan={colSpan}>Miejsce magnesów (*P/N)/</th>
           <th rowSpan={2}>{cfg.signLabel}</th>
           <th rowSpan={2}>Uwagi (skuteczność)<br/>(magnesy czyste) (P/N)*</th>
+          <th rowSpan={2} className="no-print">Akcje</th>
         </tr>
         <tr>{magnetCols.map(col => <th key={col.id}>{col.label}</th>)}</tr>
       </thead><tbody>
-        {calendar.map(row => {
-          const doc = row.doc
-          const off = row.isSunday
-          if (!doc) {
-            return <tr key={row.date} className={`${off ? 'r13-day-off' : ''} r13-missing no-print`}>
-              <td>{row.lp}</td><td>{formatRMonthlyPlDate(row.date)}</td>
-              {magnetCols.map(col => <td key={col.id}>—</td>)}
-              <td colSpan={2}><button type="button" className="mini secondary" onClick={() => addMissingDay(row.date)}>Dodaj dzień</button></td>
+        {displayRows.map(row => {
+          if (row.blank) {
+            return <tr key={row.key} className="blank-row editable-blank">
+              <td>{row.lp}</td>
+              <td>
+                <input type="date" className="cell-input no-print" defaultValue="" onBlur={e => { if (e.target.value) void addR11ManualRow(e.target.value) }} />
+              </td>
+              {magnetCols.map(col => <td key={col.id}></td>)}
+              <td></td><td></td><td className="no-print"></td>
             </tr>
           }
-          const isOff = off || doc.data?.is_day_off
-          const isPrzerob = doc.data?.auto_source === 'k03_przerob' || doc.data?.auto_source === 'k03_przerob_edited'
+          const doc = row.doc
+          const isOff = doc.data?.is_day_off
+          const isPrzerob = doc.data?.auto_source === 'k03_przerob' || doc.data?.auto_source === 'k03_przerob_edited' || doc.data?.auto_source === 'manual'
           const magnets = r11MagnetsForDoc(doc, magnetCols)
           const uwagi = r11UwagiForDoc(doc, isOff)
           const przerobHint = doc.data?.przerob_products?.length
-            ? ` (${doc.data.przerob_products.join(', ')})`
+            ? doc.data.przerob_products.join(', ')
             : ''
           return <tr key={doc.id} className={`${isOff ? 'r13-day-off' : ''}${isPrzerob ? ' r11-przerob-row' : ''}`}>
             <td>{row.lp}</td>
             <td>
               <input type="date" className="cell-input no-print" value={String(doc.document_date || '').slice(0, 10)} onChange={e => saveR11Date(doc, e.target.value)} />
-              <span className="print-only">{formatRMonthlyPlDate(doc.document_date)}{przerobHint}</span>
-              {isPrzerob && <span className="hint no-print">{przerobHint || ' przerób'}</span>}
+              <span className="print-only">{formatRMonthlyPlDate(doc.document_date)}{przerobHint ? ` (${przerobHint})` : ''}</span>
             </td>
             {magnetCols.map(col => {
-              const val = magnets[col.id] ?? (isOff ? '' : '-')
+              const val = magnets[col.id] ?? (isOff ? '' : '+')
               return <td key={col.id}>
                 <input className="cell-input no-print mini" list={`r11-mag-${col.id}`} value={val} onChange={e => saveMagnet(doc, col.id, e.target.value)} />
                 <datalist id={`r11-mag-${col.id}`}><option value="+"/><option value="-"/></datalist>
-                <span className="print-only">{val || '—'}</span>
+                <span className="print-only">{val || ''}</span>
               </td>
             })}
             <td>
@@ -1375,16 +1406,19 @@ export function RMonthlyReportPreview({
               <select className="mini-select no-print" value={isOff ? (doc.data?.uwagi_pn || '') : (doc.data?.uwagi_pn ?? 'P')} onChange={e => saveUwagi(doc, e.target.value)}>
                 <option value="">—</option><option value="P">P</option><option value="N">N</option>
               </select>
-              <span className="print-only">{uwagi || '—'}</span>
+              <span className="print-only">{uwagi || ''}</span>
+            </td>
+            <td className="no-print col-actions">
+              {allowDelete && <button type="button" className="mini danger" onClick={() => void deleteR11Row(doc)}>Usuń</button>}
             </td>
           </tr>
         })}
       </tbody></table>
       <div className="r13-legend">
-        * <b>+</b> – wykryto metal; <b>–</b> – brak wykrycia metalu.<br/>
+        Wpisy powstają automatycznie w dni przerobu pulpy (malina, porzeczka czarna – K03): w obu miejscach magnesów „+”, uwagi „P”.<br/>
+        * <b>+</b> – kontrola / brak zastrzeżeń w miejscu kontroli; <b>–</b> – brak wykrycia metalu (wg wzoru).<br/>
         ** <b>P</b> – prawidłowo (magnesy czyste, skuteczne); <b>N</b> – nieprawidłowo.<br/>
-        Dni przerobu pulpy (malina / porzeczka czarna z K03) uzupełniają się automatycznie: magnesy „–”, uwagi „P”. Każdy miesiąc to osobna kartoteka. Wszystkie kolumny można poprawić ręcznie.<br/>
-        Dni wolne od pracy (niedziele) oznaczone jasnoczerwonym – domyślnie puste, uzupełniane ręcznie w razie pracy.
+        Każda kolumna jest edytowalna ręcznie. Puste wiersze u dołu – wpisz datę, aby dodać wpis.
       </div>
     </div>
   }

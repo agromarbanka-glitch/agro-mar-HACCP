@@ -158,7 +158,7 @@ export const R_MONTHLY_CONFIGS = {
     ],
     columnLabel: 'Miejsca kontroli magnesów',
     addColumnLabel: 'Dodaj miejsce magnesu',
-    createHint: 'Wpisy powstają automatycznie w dni przerobu pulpy (malina, porzeczka czarna – decyzja w K03): w magnesach „–”, uwagi „P”. Osobna kartoteka na każdy miesiąc. Pozostałe dni dodaj ręcznie.',
+    createHint: 'Wpisy auto w dni przerobu maliny/porzeczki czarnej (K03): „+” w magnesach, „P” w uwagach. Osobna kartoteka na miesiąc. Odśwież kartoteki po K03.',
     signLabel: 'Podpis'
   }
 }

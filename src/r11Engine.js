@@ -1,11 +1,11 @@
 /**
  * Raport R11 – kontrola magnesów (układ 1:1 ze wzorem Word/Excel).
- * Kartoteka miesięczna: wpisy auto z K03 (przerób malina / porzeczka czarna) – „–” w magnesach, „P” w uwagach.
+ * Kartoteka miesięczna: wpisy tylko w dni przerobu pulpy (malina / porzeczka czarna z K03) – „+” w magnesach, „P” w uwagach.
  */
 import { normalizePn, shouldIncludeK03InK07, k06EvaluationDateFromK03 } from './haccpFormsEngine'
 import { calendarDaysInMonth, isSundayDate, formatR13PlDate } from './r13Engine'
 
-export const R11_ENGINE_VERSION = '1.1'
+export const R11_ENGINE_VERSION = '1.2'
 export const R11_COLUMNS_STORAGE = 'agro-mar-r11-columns-v1'
 
 export const R11_HEADER = {
@@ -30,7 +30,7 @@ export function loadR11Columns() {
     const raw = localStorage.getItem(R11_COLUMNS_STORAGE)
     if (!raw) return R11_DEFAULT_COLUMNS.map(c => ({ ...c }))
     const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed) || !parsed.length) return R11_DEFAULT_COLUMNS.map(c => ({ ...c }))
+    if (!isValidR11ColumnSet(parsed)) return R11_DEFAULT_COLUMNS.map(c => ({ ...c }))
     return parsed.map((c, i) => ({
       id: String(c.id || `magnet-${i + 1}`),
       label: String(c.label || `Magnes ${i + 1}`)
@@ -51,11 +51,34 @@ export function r11MakeColumn(label) {
   return { id: `${base}-${Date.now().toString(36).slice(-4)}`, label: trimmed }
 }
 
+export function isValidR11Column(col) {
+  if (!col?.id || !col?.label) return false
+  if (R11_DEFAULT_COLUMNS.some(d => d.id === col.id)) return true
+  const label = String(col.label).toLowerCase()
+  return /magn|mlyn|młyn|pulp|zbiornik|rozdrabn|separator|metal|wann|młynk/.test(label)
+}
+
+export function isValidR11ColumnSet(cols) {
+  if (!Array.isArray(cols) || !cols.length || cols.length > 8) return false
+  return cols.every(isValidR11Column)
+}
+
+/** Zawsze zwraca poprawne kolumny miejsc magnesów (nigdy imiona pracowników z R00). */
+export function resolveR11Columns(docs = [], groupCols = null) {
+  const fromGroup = Array.isArray(groupCols) && isValidR11ColumnSet(groupCols) ? groupCols : null
+  if (fromGroup) return fromGroup.map(c => ({ ...c }))
+  const fromDocs = r11ColumnsFromDocs(docs, [])
+  if (isValidR11ColumnSet(fromDocs)) return fromDocs.map(c => ({ ...c }))
+  const fromStorage = loadR11Columns()
+  if (isValidR11ColumnSet(fromStorage)) return fromStorage.map(c => ({ ...c }))
+  return R11_DEFAULT_COLUMNS.map(c => ({ ...c }))
+}
+
 export function defaultR11Magnets(columns, dayOff = false, przerob = false) {
   const magnets = {}
   for (const col of columns || []) {
     if (dayOff) magnets[col.id] = ''
-    else magnets[col.id] = przerob ? '-' : '-'
+    else magnets[col.id] = przerob ? '+' : ''
   }
   return magnets
 }
@@ -77,10 +100,10 @@ export function collectR11PrzerobDaysFromK03(k03Forms = []) {
 }
 
 export function buildR11PrzerobDayPayload(yearMonth, date, columns, meta = {}, signedBy = '') {
-  const cols = (columns || loadR11Columns()).map(c => ({ ...c }))
+  const cols = resolveR11Columns([], columns).map(c => ({ ...c }))
   const sunday = isSundayDate(date)
   const sortOrder = calendarDaysInMonth(yearMonth).findIndex(d => d.date === date) + 1
-  const magnets = defaultR11Magnets(cols, sunday, true)
+  const magnets = defaultR11Magnets(cols, sunday, !sunday)
   return {
     document_type: 'R11',
     document_date: date,
@@ -94,18 +117,79 @@ export function buildR11PrzerobDayPayload(yearMonth, date, columns, meta = {}, s
       magnet_columns: cols,
       magnets,
       uwagi_pn: sunday ? '' : 'P',
-      auto_source: 'k03_przerob',
+      auto_source: meta.auto_source || 'k03_przerob',
       k03_keys: meta.k03Keys || [],
       przerob_products: meta.products || []
     },
-    signed_by_operator: sunday ? '' : (signedBy || ''),
+    signed_by_operator: signedBy || '',
     qty: 0,
     updated_at: new Date().toISOString()
   }
 }
 
+export function buildR11ManualRowPayload(yearMonth, date, columns, seed = {}, signedBy = '') {
+  const cols = resolveR11Columns([], columns).map(c => ({ ...c }))
+  const magnets = { ...defaultR11Magnets(cols, false, true) }
+  for (const col of cols) {
+    if (seed.magnets?.[col.id] !== undefined) magnets[col.id] = String(seed.magnets[col.id])
+  }
+  const lp = Number(seed.sort_order) || 0
+  return {
+    document_type: 'R11',
+    document_date: date,
+    document_no: `R11/${yearMonth}/reczny-${Date.now().toString(36)}`,
+    product_name: `${R11_HEADER.title} ${R11_HEADER.subtitle}`,
+    status: 'P',
+    data: {
+      month_key: yearMonth,
+      sort_order: lp || 999,
+      is_day_off: false,
+      magnet_columns: cols,
+      magnets,
+      uwagi_pn: seed.uwagi_pn === 'N' ? 'N' : 'P',
+      auto_source: 'manual',
+      przerob_products: seed.przerob_products || []
+    },
+    signed_by_operator: signedBy || '',
+    qty: 0,
+    updated_at: new Date().toISOString()
+  }
+}
+
+/** Wiersze do wyświetlenia – tylko zapisane dni (bez pustego kalendarza). */
+export function buildR11SparseDisplayRows(docs = [], minBlankRows = 6) {
+  const dataRows = sortR11Docs(docs).map((doc, i) => ({ lp: i + 1, doc, blank: false }))
+  const blanks = Math.max(0, minBlankRows - dataRows.length)
+  const blankRows = Array.from({ length: blanks }, (_, i) => ({
+    lp: dataRows.length + i + 1,
+    doc: null,
+    blank: true,
+    key: `r11-blank-${i}`
+  }))
+  return [...dataRows, ...blankRows]
+}
+
+/** Naprawa zapisów z błędnymi kolumnami (np. imiona z R00). */
+export function r11RepairDocData(doc, columns = resolveR11Columns([doc])) {
+  const cols = columns.map(c => ({ ...c }))
+  const raw = { ...(doc?.data?.magnets || {}) }
+  const magnets = {}
+  for (const col of cols) {
+    const val = raw[col.id]
+    if (val === '+' || val === '-') magnets[col.id] = val
+    else if (doc?.data?.auto_source === 'k03_przerob' || doc?.data?.auto_source === 'k03_przerob_edited') magnets[col.id] = '+'
+    else magnets[col.id] = val === '' || val === undefined ? '' : String(val)
+  }
+  return {
+    magnet_columns: cols,
+    magnets,
+    uwagi_pn: doc?.data?.is_day_off ? (doc.data?.uwagi_pn || '') : (doc?.data?.uwagi_pn || 'P')
+  }
+}
+
 /** Payloady R11 do insertu – jeden wiersz na dzień przerobu z K03 (malina / porzeczka czarna). */
-export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], columns = loadR11Columns()) {
+export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], columns = null) {
+  const cols = resolveR11Columns([], columns)
   const przerobDays = collectR11PrzerobDaysFromK03(k03Forms)
   const existingByDate = new Map(
     (existingR11Docs || [])
@@ -113,24 +197,53 @@ export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], column
       .map(d => [String(d.document_date || '').slice(0, 10), d])
   )
   const toInsert = []
+  const toRepair = []
   for (const [date, meta] of przerobDays) {
-    if (existingByDate.has(date)) continue
     const yearMonth = date.slice(0, 7)
-    toInsert.push(buildR11PrzerobDayPayload(yearMonth, date, columns, meta))
+    const existing = existingByDate.get(date)
+    if (!existing) {
+      toInsert.push(buildR11PrzerobDayPayload(yearMonth, date, cols, meta))
+      continue
+    }
+    const repaired = r11RepairDocData(existing, cols)
+    const invalidCols = !isValidR11ColumnSet(existing.data?.magnet_columns)
+    const oldMagnets = existing.data?.magnets || {}
+    const weakMagnets = cols.some(c => {
+      const v = oldMagnets[c.id]
+      return v === '-' || v === '' || v === undefined || v === null
+    })
+    if (invalidCols || (existing.data?.auto_source === 'k03_przerob' && weakMagnets)) {
+      toRepair.push({
+        id: existing.id,
+        data: { ...(existing.data || {}), ...repaired }
+      })
+    }
   }
-  return toInsert
+  const repairIds = new Set(toRepair.map(r => r.id))
+  for (const doc of existingR11Docs || []) {
+    if (repairIds.has(doc.id)) continue
+    if (!isValidR11ColumnSet(doc.data?.magnet_columns)) {
+      repairIds.add(doc.id)
+      toRepair.push({
+        id: doc.id,
+        data: { ...(doc.data || {}), ...r11RepairDocData(doc, cols) }
+      })
+    }
+  }
+  return { toInsert, toRepair }
 }
 
-export function r11ColumnsFromDocs(docs, fallback = loadR11Columns()) {
+export function r11ColumnsFromDocs(docs, fallback = null) {
   const first = sortR11Docs(docs)[0]
   const stored = first?.data?.magnet_columns
-  if (Array.isArray(stored) && stored.length) {
+  if (Array.isArray(stored) && stored.length && isValidR11ColumnSet(stored)) {
     return stored.map((c, i) => ({
       id: String(c.id || `magnet-${i + 1}`),
       label: String(c.label || `Magnes ${i + 1}`)
     }))
   }
-  return fallback.map(c => ({ ...c }))
+  const fb = fallback ?? R11_DEFAULT_COLUMNS
+  return fb.map(c => ({ ...c }))
 }
 
 export function r11MagnetsForDoc(doc, columns) {
@@ -242,23 +355,23 @@ function r11PrintHeader(period, escapeHtml) {
 export function buildR11PrintHtml(group, escapeHtml) {
   const docs = sortR11Docs(group.docs || [])
   const period = String(group.period || '')
-  const columns = group.columns || r11ColumnsFromDocs(docs)
-  const calendar = buildR11CalendarRows(period, docs)
+  const columns = resolveR11Columns(docs, group.columns)
+  const displayRows = buildR11SparseDisplayRows(docs, 9)
   const colSpan = Math.max(columns.length, 1)
   const subHeaders = columns.map(c => `<th>${escapeHtml(c.label)}</th>`).join('')
 
-  const rows = calendar.map(row => {
-    const doc = row.doc
-    const dayOff = row.isSunday || doc?.data?.is_day_off
-    const offCls = dayOff ? 'day-off' : ''
-    if (!doc) {
-      const emptyCells = columns.map(() => '<td>—</td>').join('')
-      return `<tr class="${offCls}"><td>${row.lp}</td><td>${escapeHtml(formatR13PlDate(row.date))}</td>${emptyCells}<td></td><td>—</td></tr>`
+  const rows = displayRows.map(row => {
+    if (row.blank) {
+      const emptyCells = columns.map(() => '<td></td>').join('')
+      return `<tr><td>${row.lp}</td><td></td>${emptyCells}<td></td><td></td></tr>`
     }
+    const doc = row.doc
+    const dayOff = doc?.data?.is_day_off
+    const offCls = dayOff ? 'day-off' : ''
     const magnets = r11MagnetsForDoc(doc, columns)
     const magnetCells = columns.map(col => {
       const val = r11MagnetDisplay(magnets[col.id])
-      return `<td>${escapeHtml(val)}</td>`
+      return `<td>${escapeHtml(val === '—' ? '' : val)}</td>`
     }).join('')
     const uwagi = r11UwagiForDoc(doc, dayOff)
     return `<tr class="${offCls}">
@@ -266,7 +379,7 @@ export function buildR11PrintHtml(group, escapeHtml) {
       <td>${escapeHtml(formatR13PlDate(doc.document_date))}</td>
       ${magnetCells}
       <td>${escapeHtml(doc.signed_by_operator || '')}</td>
-      <td>${escapeHtml(uwagi || '—')}</td>
+      <td>${escapeHtml(uwagi || '')}</td>
     </tr>`
   }).join('')
 
@@ -302,28 +415,28 @@ ${r11PrintHeader(period, escapeHtml)}
 export function buildR11ExcelRows(group) {
   const docs = sortR11Docs(group.docs || [])
   const period = String(group.period || '')
-  const columns = group.columns || r11ColumnsFromDocs(docs)
-  const calendar = buildR11CalendarRows(period, docs)
+  const columns = resolveR11Columns(docs, group.columns)
+  const displayRows = buildR11SparseDisplayRows(docs, 9)
   const header = ['Lp.', 'Data', ...columns.map(c => c.label), 'Podpis', 'Uwagi (skuteczność) (magnesy czyste) (P/N)*']
   const rows = [
     ['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'],
     [`${R11_HEADER.title} ${R11_HEADER.subtitle}`, '', '', '', `Okres: ${period}`, `Wersja ${R11_HEADER.version}`],
     header
   ]
-  calendar.forEach(row => {
-    const doc = row.doc
-    if (!doc) {
-      rows.push([row.lp, formatR13PlDate(row.date), ...columns.map(() => '—'), '', ''])
+  displayRows.forEach(row => {
+    if (row.blank) {
+      rows.push([row.lp, '', ...columns.map(() => ''), '', ''])
       return
     }
-    const dayOff = row.isSunday || doc.data?.is_day_off
+    const doc = row.doc
+    const dayOff = doc.data?.is_day_off
     const magnets = r11MagnetsForDoc(doc, columns)
     rows.push([
       row.lp,
       formatR13PlDate(doc.document_date) + (dayOff ? ' (dzień wolny)' : ''),
       ...columns.map(col => r11MagnetDisplay(magnets[col.id])),
       doc.signed_by_operator || '',
-      r11UwagiForDoc(doc, dayOff) || '—'
+      r11UwagiForDoc(doc, dayOff) || ''
     ])
   })
   return rows

@@ -6,7 +6,7 @@ import { calendarDaysInMonth, isSundayDate } from './r13Engine'
 import { k01DocsByDay } from './k02Engine'
 import {
   buildR11MonthPayloads, buildR11SingleDayPayload, buildR11PrintHtml, buildR11ExcelRows,
-  r11ColumnsFromDocs
+  r11ColumnsFromDocs, resolveR11Columns
 } from './r11Engine'
 import { getRMonthlyConfig, rMonthlyStorageKey } from './rMonthlyConfigs'
 
@@ -418,10 +418,22 @@ export function buildRMonthlyPeriodGroups(code, docs) {
       const allDocs = sortRMonthlyDocs(g.docs)
       const rows = allDocs.filter(d => !d.data?.is_shell)
       const keepAll = ['register-rows', 'station-matrix', 'r04-control', 'single-month', 'quarter-trend'].includes(cfg.layout)
-      const columns = code === 'R00' ? r00ResolveColumns(rows.length ? rows : allDocs, loadRMonthlyColumns(code)) : columnsFromDocs(code, rows.length ? rows : allDocs)
+      const columns = code === 'R00' ? r00ResolveColumns(rows.length ? rows : allDocs, loadRMonthlyColumns(code))
+        : code === 'R11' ? resolveR11Columns(rows.length ? rows : allDocs)
+        : columnsFromDocs(code, rows.length ? rows : allDocs)
       let docsForGroup = keepAll ? allDocs : (rows.length ? rows : allDocs.filter(d => !d.data?.is_shell))
       if (cfg.layout === 'r04-control') {
         docsForGroup = allDocs.filter(d => !d.data?.is_shell && (d.data?.stations || d.data?.readings))
+      }
+      if (cfg.layout === 'r11-magnets') {
+        docsForGroup = allDocs.filter(d => {
+          if (d.data?.is_shell) return false
+          if (d.data?.auto_source) return true
+          if (d.data?.przerob_products?.length) return true
+          if (d.signed_by_operator) return true
+          const vals = Object.values(d.data?.magnets || {})
+          return vals.some(v => v === '+')
+        })
       }
       const vehicleRegNo = code === 'R03'
         ? (rows[0]?.data?.vehicle_reg_no || columns[0]?.label || '')
@@ -602,9 +614,7 @@ export function buildRMonthlyMonthPayloads(code, yearMonth, signedBy = '', colum
   }
 
   if (cfg.layout === 'r11-magnets') {
-    const cols = (columnDefs?.length ? columnDefs : loadRMonthlyColumns(code)).map(c => ({ ...c }))
-    saveRMonthlyColumns(code, cols)
-    return buildR11MonthPayloads(yearMonth, signedBy, cols)
+    return []
   }
 
   if (cfg.layout === 'station-matrix') {
