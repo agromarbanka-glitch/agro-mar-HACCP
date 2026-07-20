@@ -3579,6 +3579,48 @@ function App() {
     return value === 'N' ? 'N' : 'P'
   }
 
+  function k01SignedBy(doc) {
+    return String(doc?.signed_by_operator || doc?.data?.podpis_przyjmujacego || '').trim()
+  }
+
+  /** Dopasowanie zapisanego podpisu do listy pracowników (select musi mieć dokładne value). */
+  function matchEmployeeSelectValue(name, employeeList = employees) {
+    const stored = String(name || '').trim()
+    if (!stored) return ''
+    const exact = (employeeList || []).find(e => e.full_name === stored)
+    if (exact) return exact.full_name
+    const norm = normalizeText(stored)
+    const fuzzy = (employeeList || []).find(e => normalizeText(e.full_name) === norm)
+    return fuzzy?.full_name || stored
+  }
+
+  function employeeSelectOptions(currentValue, employeeList = employees) {
+    const matched = matchEmployeeSelectValue(currentValue, employeeList)
+    const list = [...(employeeList || [])]
+    if (matched && !list.some(e => e.full_name === matched)) {
+      list.unshift({ id: `saved-${matched}`, full_name: matched })
+    }
+    return list
+  }
+
+  function applyHaccpDocPatchToSelection(prev, id, patch) {
+    if (!prev || !id) return prev
+    if (prev.groupPreview && prev.group?.docs?.some(d => d.id === id)) {
+      return {
+        ...prev,
+        group: {
+          ...prev.group,
+          docs: patchHaccpDocInList(prev.group.docs, id, patch)
+        }
+      }
+    }
+    if (prev.id === id) {
+      const nextData = patch.data !== undefined ? { ...(prev.data || {}), ...patch.data } : prev.data
+      return { ...prev, ...patch, data: nextData }
+    }
+    return prev
+  }
+
   async function editHaccpDataField(doc, field, label, currentValue, options = {}) {
     if (!supabase || !doc) return
     let workingDoc = doc
@@ -3702,11 +3744,11 @@ function App() {
               <td className={pn('wybarwienie_zapach_brak_uszkodzen') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="wybarwienie_zapach_brak_uszkodzen" label="Wybarwienie/zapach/brak uszkodzeń mechanicznych" pn>{pn('wybarwienie_zapach_brak_uszkodzen')}</K01Value></td>
               <td className={pn('brak_zgnilizny_zaplesnienia_zagrzybienia') === 'N' ? 'pn-n' : ''}><K01Value doc={doc} field="brak_zgnilizny_zaplesnienia_zagrzybienia" label="Brak zgnilizny/zapleśnienia/zagrzybienia" pn>{pn('brak_zgnilizny_zaplesnienia_zagrzybienia')}</K01Value></td>
               <td>
-                <select className="mini-select no-print" value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e => setDocumentEmployee(doc, e.target.value)}>
+                <select className="mini-select no-print" value={matchEmployeeSelectValue(k01SignedBy(doc))} onChange={e => void setDocumentEmployee(doc, e.target.value)}>
                   <option value="">Wybierz pracownika</option>
-                  {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                  {employeeSelectOptions(k01SignedBy(doc)).map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
                 </select>
-                <span className="print-only">{doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''}</span>
+                <span className="print-only">{k01SignedBy(doc)}</span>
               </td>
             </tr>
             {blankRows.map((_, i) => <tr key={i} className="blank-row"><td>{i+2}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>)}
@@ -3717,9 +3759,9 @@ function App() {
       <div className="modal-actions no-print inline-actions employee-signature-row">
         <button className="secondary" onClick={() => editHaccpDataField(doc, 'uwagi', 'Uwagi', doc.data?.uwagi || '')}>Edytuj uwagi</button>
         <label>Podpis przyjmującego
-          <select value={doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''} onChange={e => setDocumentEmployee(doc, e.target.value)}>
+          <select value={matchEmployeeSelectValue(k01SignedBy(doc))} onChange={e => void setDocumentEmployee(doc, e.target.value)}>
             <option value="">Wybierz pracownika</option>
-            {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            {employeeSelectOptions(k01SignedBy(doc)).map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
           </select>
         </label>
       </div>
@@ -3925,9 +3967,15 @@ function App() {
           signed_by_operator: name,
           updated_at: new Date().toISOString()
         }
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+        if (!isPersistedHaccpDoc(doc)) continue
+        const { data: saved, error } = await supabase
+          .from('haccp_documents')
+          .update(payload)
+          .eq('id', doc.id)
+          .select(HACCP_DOC_LIST_SELECT)
+          .maybeSingle()
         if (error) throw error
-        mergeHaccpDoc(doc.id, payload)
+        mergeHaccpDoc(doc.id, saved || payload)
         supabase.from('haccp_document_history').insert({
           document_id: doc.id,
           action: 'wybor_pracownika_zbiorczy',
@@ -3969,7 +4017,7 @@ function App() {
           {Array.from({length: maxRows}).map((_,i) => {
             const doc = docs[i]
             if (!doc) return <tr className="blank-row" key={`blank-${i}`}><td>{i+1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            const signed = doc.signed_by_operator || doc.data?.podpis_przyjmujacego || ''
+            const signed = k01SignedBy(doc)
             return <tr key={doc.id}>
               <td>{i+1}</td>
               <td>{doc.document_date}</td>
@@ -3988,7 +4036,7 @@ function App() {
                 <span className="print-only">{normalizePN(doc.data?.brak_zgnilizny_zaplesnienia_zagrzybienia)}</span>
               </td>
               <td>
-                <select className="mini-select no-print" value={signed} onChange={e=>setDocumentEmployeeFromGroup(doc,e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                <select className="mini-select no-print" value={matchEmployeeSelectValue(signed)} onChange={e => void setDocumentEmployeeFromGroup(doc, e.target.value)}><option value="">Wybierz pracownika</option>{employeeSelectOptions(signed).map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
                 <span className="print-only">{signed}</span>
               </td>
             </tr>
@@ -8593,27 +8641,45 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function setDocumentEmployee(doc, employeeName) {
     if (!supabase || !doc) return
+    if (!isPersistedHaccpDoc(doc)) {
+      setMessage('Ten wpis nie jest jeszcze zapisany w bazie — kliknij „Odśwież kartoteki” lub zapisz import PZ.')
+      return
+    }
     const name = String(employeeName || '').trim()
     const payload = {
       data: { ...(doc.data || {}), podpis_przyjmujacego: name },
       signed_by_operator: name || null,
       updated_at: new Date().toISOString()
     }
+    const previous = {
+      signed_by_operator: doc.signed_by_operator || null,
+      podpis: doc.data?.podpis_przyjmujacego || ''
+    }
+    mergeHaccpDoc(doc.id, payload)
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+      const { data: saved, error } = await supabase
+        .from('haccp_documents')
+        .update(payload)
+        .eq('id', doc.id)
+        .select(HACCP_DOC_LIST_SELECT)
+        .maybeSingle()
       if (error) throw error
-      mergeHaccpDoc(doc.id, payload)
+      if (saved) mergeHaccpDoc(doc.id, saved)
       supabase.from('haccp_document_history').insert({
         document_id: doc.id,
         action: 'wybor_pracownika',
         field_name: 'podpis_przyjmujacego',
-        old_value: doc.signed_by_operator || doc.data?.podpis_przyjmujacego || '',
+        old_value: previous.signed_by_operator || previous.podpis || '',
         new_value: name,
         reason: 'Wybór podpisu przyjmującego z listy pracowników',
         changed_by: userRole
       }).then(() => {}).catch(() => {})
-      setMessage('Podpis przyjmującego zapisany.')
+      setMessage(name ? `Podpis „${name}” zapisany.` : 'Podpis wyczyszczony.')
     } catch (err) {
+      mergeHaccpDoc(doc.id, {
+        data: { ...(doc.data || {}), podpis_przyjmujacego: previous.podpis },
+        signed_by_operator: previous.signed_by_operator
+      })
       setMessage(`Błąd zapisu podpisu: ${err.message}`)
     }
   }
@@ -9090,16 +9156,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   function mergeHaccpDoc(id, patch) {
     setHaccpDocs(prev => patchHaccpDocInList(prev, id, patch))
-    setSelectedHaccpDoc(prev => {
-      if (!prev?.groupPreview || !prev.group?.docs?.some(d => d.id === id)) return prev
-      return {
-        ...prev,
-        group: {
-          ...prev.group,
-          docs: patchHaccpDocInList(prev.group.docs, id, patch)
-        }
-      }
-    })
+    setSelectedHaccpDoc(prev => applyHaccpDocPatchToSelection(prev, id, patch))
   }
 
   function haccpDocBelongsToGroup(doc, group) {
