@@ -10,7 +10,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildSyntheticK07DocsFromTrace, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -377,9 +377,12 @@ function App() {
     try { return localStorage.getItem(K02_DEFAULT_EMPLOYEE_KEY) || '' } catch { return '' }
   })
   const [k07Overrides, setK07Overrides] = useState({})
+  const [k07ManualExtra, setK07ManualExtra] = useState([])
+  const [k07BlankDrafts, setK07BlankDrafts] = useState({})
   const [k07DeletePending, setK07DeletePending] = useState(null)
   const [k07BulkGodzina, setK07BulkGodzina] = useState('')
   const [k07BulkStanSita, setK07BulkStanSita] = useState('P')
+  const [defaultK07Employee, setDefaultK07Employee] = useState('')
   const K07_HIDDEN_STORAGE_KEY = 'agro-mar-k07-hidden-v1'
   const [k07HiddenKeys, setK07HiddenKeys] = useState(() => {
     try {
@@ -656,9 +659,9 @@ function App() {
     [formsTraceContext, k04Overrides, syntheticK03Docs]
   )
   const syntheticK07Docs = useMemo(
-    () => buildSyntheticK07DocsFromTrace(formsTraceContext, k07Overrides, haccpDocs)
+    () => buildAllSyntheticK07Docs(formsTraceContext, syntheticK03Docs, k07Overrides, haccpDocs)
       .filter(d => !k07HiddenKeys.has(k07RowHideKey(d))),
-    [formsTraceContext, k07Overrides, haccpDocs, k07HiddenKeys]
+    [formsTraceContext, syntheticK03Docs, k07Overrides, haccpDocs, k07HiddenKeys]
   )
   const syntheticK06FromK03 = useMemo(
     () => buildSyntheticK06DocsFromK03(syntheticK03Docs, haccpDocs, k06Overrides)
@@ -686,23 +689,22 @@ function App() {
     const fromDb = (haccpDocs || []).filter(d =>
       d.document_type === 'K07' && !k07HiddenKeys.has(k07RowHideKey(d))
     )
-    const extraSynthetic = syntheticK07Docs.filter(d => {
-      const opId = d.data?.operation_id || d.operation_id
-      const etap = d.data?.kontrola_etap
-      if (opId && etap) {
-        return !fromDb.some(x =>
-          (x.data?.operation_id || x.operation_id) === opId && x.data?.kontrola_etap === etap
-        )
-      }
-      return !fromDb.some(x => x.id === d.id)
-    })
-    return [...fromDb, ...extraSynthetic].sort((a, b) =>
+    const dbKeys = new Set(fromDb.map(k07DedupeKey))
+    const extraSynthetic = syntheticK07Docs.filter(d => !dbKeys.has(k07DedupeKey(d)))
+    const synthKeys = new Set([...dbKeys, ...extraSynthetic.map(k07DedupeKey)])
+    const extraManual = (k07ManualExtra || []).filter(d =>
+      d.document_type === 'K07' &&
+      !k07HiddenKeys.has(k07RowHideKey(d)) &&
+      !synthKeys.has(k07DedupeKey(d)) &&
+      !fromDb.some(x => x.id === d.id)
+    )
+    return [...fromDb, ...extraSynthetic, ...extraManual].sort((a, b) =>
       String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
-      String(a.data?.operation_id || a.operation_id || '').localeCompare(String(b.data?.operation_id || b.operation_id || '')) ||
       String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || '')) ||
+      String(a.product_name || '').localeCompare(String(b.product_name || '')) ||
       String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
     )
-  }, [haccpDocs, syntheticK07Docs, k07HiddenKeys])
+  }, [haccpDocs, syntheticK07Docs, k07ManualExtra, k07HiddenKeys])
 
   const dashboardSyntheticK02 = useMemo(() => buildSyntheticK02Docs(haccpDocs), [haccpDocs, k02Overrides])
 
@@ -1983,16 +1985,11 @@ function App() {
   async function saveK07DocumentField(doc, patch = {}) {
     if (!supabase || !doc) return null
     try {
-      const live = getLiveK07Doc(doc, { ...(k07Overrides[doc.id] || {}), ...patch })
-      const opId = live.data?.operation_id || live.operation_id
-      const etap = live.data?.kontrola_etap || ''
-      const existing = (haccpDocs || []).find(d => {
-        if (d.document_type !== 'K07') return false
-        const dOp = d.data?.operation_id || d.operation_id
-        if (opId && etap) return dOp === opId && d.data?.kontrola_etap === etap
-        if (opId) return dOp === opId && !d.data?.kontrola_etap
-        return isPersistedHaccpDoc(d) && d.id === doc.id
-      }) || (isPersistedHaccpDoc(doc) && !opId ? doc : null)
+      const live = getLiveK07Doc(doc, { [doc.id]: { ...(k07Overrides[doc.id] || {}), ...patch } })
+      const dedupeKey = k07DedupeKey(live)
+      const existing = (haccpDocs || []).find(d =>
+        d.document_type === 'K07' && k07DedupeKey(d) === dedupeKey
+      ) || (isPersistedHaccpDoc(doc) ? doc : null)
 
       if (!existing && isSyntheticK07Doc(doc)) {
         const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK07InsertPayload(live)).select('*').single()
@@ -2003,6 +2000,7 @@ function App() {
           delete next[doc.id]
           return next
         })
+        setK07ManualExtra(prev => prev.filter(d => d.id !== doc.id))
         mergeHaccpDoc(workingDoc.id, workingDoc)
         return workingDoc
       }
@@ -2016,6 +2014,7 @@ function App() {
       const payload = {
         data: nextData,
         status,
+        document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : base.document_date,
         product_name: nextData.surowiec || base.product_name,
         lot_no: nextData.numer_partii || base.lot_no,
         signed_by_operator: signed || null,
@@ -2031,6 +2030,7 @@ function App() {
           return next
         })
       }
+      setK07ManualExtra(prev => prev.filter(d => d.id !== doc.id))
       mergeHaccpDoc(workingDoc.id, workingDoc)
       return workingDoc
     } catch (err) {
@@ -2039,9 +2039,30 @@ function App() {
     }
   }
 
+  function k07BlankRowId(period, rowIndex) {
+    return `K07-manual-${period}-${rowIndex}`
+  }
+
+  function ensureK07ManualRow(group, rowIndex) {
+    const period = group?.period || haccpMonth || ''
+    const id = k07BlankRowId(period, rowIndex)
+    if (k07ManualExtra.some(d => d.id === id)) return id
+    const blank = buildManualK07BlankDoc(period, id, { document_date: `${period}-01` })
+    setK07ManualExtra(prev => [...prev, blank])
+    return id
+  }
+
+  function addK07ManualRow(group) {
+    const period = group?.period || haccpMonth || ''
+    const startIndex = Math.max(group?.docs?.length || 0, k07ManualExtra.filter(d => String(d.id).startsWith(`K07-manual-${period}-`)).length)
+    ensureK07ManualRow(group, startIndex)
+    setMessage('K07: dodano pusty wiersz – kliknij komórkę i wpisz dane.')
+  }
+
   function hideK07Row(doc) {
     const key = k07RowHideKey(doc)
     if (!key) return
+    setK07ManualExtra(prev => prev.filter(d => k07RowHideKey(d) !== key && d.id !== doc.id))
     setK07HiddenKeys(prev => {
       const next = new Set(prev)
       next.add(key)
@@ -4223,9 +4244,13 @@ function App() {
     }
 
     if (group.type === 'K07') {
-      const maxRows = Math.max(11, docs.length)
+      const period = group.period
+      const manualForPeriod = k07ManualExtra.filter(d => String(d.id).startsWith(`K07-manual-${period}-`))
+      const allDocs = [...docs, ...manualForPeriod.filter(m => !docs.some(d => d.id === m.id))]
+      const maxRows = Math.max(11, allDocs.length + 2)
       return <div className="monthly-paper k02-original k07-original">
         <div className="no-print employee-signature-row k07-bulk-row" style={{marginBottom: '10px', flexWrap: 'wrap', gap: '10px'}}>
+          <button type="button" className="mini secondary" onClick={() => addK07ManualRow(group)}>+ Dodaj wiersz</button>
           <label>Podpis (cała kolumna)
             <select value={defaultK07Employee} onChange={e => setDefaultK07Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
@@ -4259,29 +4284,102 @@ function App() {
           <th className="col-date">Data</th><th className="col-etap">Etap</th><th className="col-time">Godzina</th><th className="col-product">Rodzaj przerabianego surowca</th><th className="col-lot">Produkowany numer partii</th><th className="col-pn">Stan sita<br/>(P/N)*</th><th className="col-sign">Podpis kontrolującego</th><th className="col-actions no-print">Akcje</th>
         </tr></thead><tbody>
           {Array.from({length: maxRows}).map((_,i) => {
-            const baseDoc = docs[i]
-            if (!baseDoc) return <tr className="blank-row" key={`k07-blank-${i}`}><td className="col-date"></td><td className="col-etap"></td><td className="col-time"></td><td className="col-product"></td><td className="col-lot"></td><td className="col-pn"></td><td className="col-sign"></td><td className="col-actions no-print"></td></tr>
+            const manualId = k07BlankRowId(period, i)
+            const baseDoc = allDocs[i] || k07ManualExtra.find(d => d.id === manualId) || null
+            if (!baseDoc) {
+              const draftKey = `${period}|${i}`
+              const draft = k07BlankDrafts[draftKey] || {
+                document_date: `${period}-01`,
+                kontrola_etap: 'przed',
+                godzina: '',
+                surowiec: '',
+                numer_partii: '',
+                stan_sita: 'P',
+                podpis_kontrolujacego: ''
+              }
+              const initBlank = () => ensureK07ManualRow(group, i)
+              const setDraft = (field, value) => setK07BlankDrafts(prev => ({
+                ...prev,
+                [draftKey]: { ...(prev[draftKey] || draft), [field]: value }
+              }))
+              const commitDraft = async (field, value) => {
+                const nextDraft = { ...draft, [field]: value }
+                setK07BlankDrafts(prev => ({ ...prev, [draftKey]: nextDraft }))
+                const hasContent = nextDraft.godzina || nextDraft.surowiec || nextDraft.numer_partii || nextDraft.podpis_kontrolujacego
+                if (!hasContent) return
+                ensureK07ManualRow(group, i)
+                const doc = buildManualK07BlankDoc(period, manualId, nextDraft)
+                await saveK07DocumentField(doc, nextDraft)
+                setK07BlankDrafts(prev => {
+                  const next = { ...prev }
+                  delete next[draftKey]
+                  return next
+                })
+              }
+              return <tr className="blank-row editable-blank" key={`k07-blank-${i}`}>
+                <td className="col-date">
+                  <input className="cell-input no-print" type="date" value={draft.document_date} onFocus={initBlank} onChange={e => setDraft('document_date', e.target.value)} onBlur={e => void commitDraft('document_date', e.target.value)} />
+                </td>
+                <td className="col-etap">
+                  <select className="mini-select no-print" value={draft.kontrola_etap} onFocus={initBlank} onChange={e => { setDraft('kontrola_etap', e.target.value); void commitDraft('kontrola_etap', e.target.value) }}>
+                    {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
+                  </select>
+                </td>
+                <td className="col-time">
+                  <input className="cell-input no-print" type="time" value={draft.godzina} onFocus={initBlank} onChange={e => setDraft('godzina', e.target.value)} onBlur={e => void commitDraft('godzina', e.target.value)} placeholder="--:--" />
+                </td>
+                <td className="col-product left">
+                  <input className="cell-input no-print wide" type="text" value={draft.surowiec} onFocus={initBlank} onChange={e => setDraft('surowiec', e.target.value)} onBlur={e => void commitDraft('surowiec', e.target.value)} placeholder="np. malina" />
+                </td>
+                <td className="col-lot">
+                  <input className="cell-input no-print" type="text" value={draft.numer_partii} onFocus={initBlank} onChange={e => setDraft('numer_partii', e.target.value)} onBlur={e => void commitDraft('numer_partii', e.target.value)} placeholder="nr partii" />
+                </td>
+                <td className={`col-pn${draft.stan_sita === 'N' ? ' pn-n' : ''}`}>
+                  <select className="mini-select no-print" value={draft.stan_sita} onFocus={initBlank} onChange={e => void commitDraft('stan_sita', e.target.value)}><option value="P">P</option><option value="N">N</option></select>
+                </td>
+                <td className="col-sign">
+                  <select className="mini-select no-print" value={draft.podpis_kontrolujacego} onFocus={initBlank} onChange={e => void commitDraft('podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                </td>
+                <td className="col-actions no-print"></td>
+              </tr>
+            }
             const doc = getLiveK07Doc(baseDoc, k07Overrides)
             const d = normalizeK07Data(doc.data || {}, doc)
+            const docDate = doc.document_date || `${period}-01`
             const godzina = d.godzina || ''
             const surowiec = d.surowiec || doc.product_name || ''
             const numerPartii = d.numer_partii || doc.lot_no || ''
             const stan = formNormalizePn(d.stan_sita || 'P')
             const signed = doc.signed_by_operator || d.podpis_kontrolujacego || ''
-            const etapLabel = d.kontrola_label || (d.kontrola_etap === 'przed' ? 'Przed przerobem' : d.kontrola_etap === 'po' ? 'Po przerobie' : '')
+            const etap = d.kontrola_etap || 'przed'
+            const etapLabel = d.kontrola_label || (etap === 'przed' ? 'Przed przerobem' : etap === 'po' ? 'Po przerobie' : '')
+            const onEtapChange = (value) => {
+              const meta = K07_KONTROLA_ETAPY.find(e => e.id === value) || K07_KONTROLA_ETAPY[0]
+              setK07Override(doc, 'kontrola_etap', value)
+              setK07Override(doc, 'kontrola_label', meta.label)
+              void saveK07DocumentField(doc, { kontrola_etap: value, kontrola_label: meta.label })
+            }
             return <tr key={doc.id}>
-              <td className="col-date">{doc.document_date}</td>
-              <td className="col-etap">{etapLabel || '—'}</td>
+              <td className="col-date">
+                <input className="cell-input no-print" type="date" value={docDate} onChange={e => setK07Override(doc, 'document_date', e.target.value)} onBlur={e => void saveK07DocumentField(doc, { document_date: e.target.value })} />
+                <span className="print-only">{docDate}</span>
+              </td>
+              <td className="col-etap">
+                <select className="mini-select no-print" value={etap} onChange={e => onEtapChange(e.target.value)}>
+                  {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
+                </select>
+                <span className="print-only">{etapLabel || '—'}</span>
+              </td>
               <td className="col-time">
                 <input className="cell-input no-print" type="time" value={godzina} onChange={e => setK07Override(doc, 'godzina', e.target.value)} onBlur={e => void commitK07Override(doc, 'godzina', e.target.value)} placeholder="--:--" />
                 <span className="print-only">{godzina || '—'}</span>
               </td>
               <td className="col-product left">
-                <input className="cell-input no-print wide" type="text" value={surowiec} onChange={e => setK07Override(doc, 'surowiec', e.target.value)} onBlur={e => void commitK07Override(doc, 'surowiec', e.target.value)} />
+                <input className="cell-input no-print wide" type="text" value={surowiec} onChange={e => setK07Override(doc, 'surowiec', e.target.value)} onBlur={e => void commitK07Override(doc, 'surowiec', e.target.value)} placeholder="np. malina" />
                 <span className="print-only">{surowiec}</span>
               </td>
               <td className="col-lot">
-                <input className="cell-input no-print" type="text" value={numerPartii} onChange={e => setK07Override(doc, 'numer_partii', e.target.value)} onBlur={e => void commitK07Override(doc, 'numer_partii', e.target.value)} />
+                <input className="cell-input no-print" type="text" value={numerPartii} onChange={e => setK07Override(doc, 'numer_partii', e.target.value)} onBlur={e => void commitK07Override(doc, 'numer_partii', e.target.value)} placeholder="nr partii" />
                 <span className="print-only">{numerPartii}</span>
               </td>
               <td className={`col-pn${stan === 'N' ? ' pn-n' : ''}`}>
@@ -4305,7 +4403,7 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K07: jedna kartoteka miesięczna – 2 wpisy na każdy przerób na pulpę (przed i po). Godziny uzupełniasz ręcznie lub zbiorczo u góry. Usuwanie wiersza: Usuń → Potwierdź.</p>
+        <p className="hint no-print">K07: 2 wpisy na każdy przerób (przed i po) – generowane z K03 (decyzja: przerób) i z magazynu. Kliknij pusty wiersz lub „Dodaj wiersz”, wpisz dane – zapis przy opuszczeniu pola. Usuwanie: Usuń → Potwierdź.</p>
       </div>
     }
 
@@ -7563,8 +7661,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         setFormsTrace({ allocations: traceAllocations || [], operations: Array.from(opById.values()) })
         const traceOps = Array.from(opById.values())
         const k06Added = await syncAutoK06Documents()
-        const { data: k07Existing } = await supabase.from('haccp_documents').select('id, document_type, operation_id, data').eq('document_type', 'K07')
-        const k07Added = await syncAutoK07Documents(lotsData, traceOps, traceAllocations || [], k07Existing || [])
+        const { data: k07Existing } = await supabase.from('haccp_documents').select('id, document_type, operation_id, document_date, product_name, lot_no, data').eq('document_type', 'K07')
+        const { data: k03ForK07 } = await supabase.from('haccp_documents').select('*').eq('document_type', 'K03')
+        const k07Added = await syncAutoK07Documents(lotsData, traceOps, traceAllocations || [], k07Existing || [], k03ForK07 || [])
         const k01Added = await syncAutoK01Documents(lotsData)
         if (k06Added > 0 || k07Added > 0 || k01Added > 0) await loadHaccpDocs()
       } catch {
@@ -9059,10 +9158,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     throw lastErr
   }
 
-  async function syncAutoK07Documents(lotsData, operations, allocations, currentDocs) {
+  async function syncAutoK07Documents(lotsData, operations, allocations, currentDocs, k03Forms = []) {
     if (!supabase) return 0
     const trace = { lots: lotsData, operations, allocations }
-    const pending = buildSyntheticK07DocsFromTrace(trace, {}, currentDocs)
+    const pending = buildAllSyntheticK07Docs(trace, k03Forms, {}, currentDocs)
     if (!pending.length) return 0
     let inserted = 0
     for (const doc of pending) {

@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.6'
+export const HACCP_FORMS_VERSION = '1.7'
 
 function normalizeText(value) {
   return String(value || '')
@@ -177,14 +177,24 @@ function applyK04Override(doc, ov = {}) {
   }
 }
 
+export const K07_KONTROLA_ETAPY = [
+  { id: 'przed', label: 'Przed przerobem' },
+  { id: 'po', label: 'Po przerobie' }
+]
+
 function applyK07Override(doc, ov = {}) {
-  const base = normalizeK07Data(doc.data || {})
+  const base = normalizeK07Data(doc.data || {}, doc)
   const merged = { ...base, ...ov }
   if (Object.prototype.hasOwnProperty.call(ov, 'surowiec')) merged.surowiec = ov.surowiec
   if (Object.prototype.hasOwnProperty.call(ov, 'numer_partii')) merged.numer_partii = ov.numer_partii
   if (Object.prototype.hasOwnProperty.call(ov, 'partia')) merged.numer_partii = ov.partia
+  if (Object.prototype.hasOwnProperty.call(ov, 'kontrola_etap')) {
+    merged.kontrola_etap = ov.kontrola_etap
+    merged.kontrola_label = ov.kontrola_label || K07_KONTROLA_ETAPY.find(e => e.id === ov.kontrola_etap)?.label || merged.kontrola_label
+  }
   return {
     ...doc,
+    document_date: ov.document_date ?? doc.document_date,
     product_name: merged.surowiec || doc.product_name || '',
     lot_no: merged.numer_partii || doc.lot_no || '',
     data: merged,
@@ -193,26 +203,42 @@ function applyK07Override(doc, ov = {}) {
   }
 }
 
-export const K07_KONTROLA_ETAPY = [
-  { id: 'przed', label: 'Przed przerobem' },
-  { id: 'po', label: 'Po przerobie' }
-]
-
 export function k07SyntheticId(operationId, etap) {
   return `K07-${operationId}-${etap}`
 }
 
-export function k07RowHideKey(doc) {
+export function k07SyntheticIdFromK03(k03Key, etap) {
+  const base = String(k03Key || '').replace(/^K03-/, '')
+  return `K07-K03-${base}-${etap}`
+}
+
+/** Klucz deduplikacji wpisu K07 (para przerób × etap). */
+export function k07DedupeKey(doc) {
+  const etap = doc?.data?.kontrola_etap || 'przed'
+  const k03Key = doc?.data?.k03_key
+  if (k03Key) return `k03:${k03Key}|${etap}`
   const opId = doc?.data?.operation_id || doc?.operation_id
-  const etap = doc?.data?.kontrola_etap || ''
-  if (opId && etap) return `${opId}|${etap}`
-  return String(doc?.id || '').trim()
+  if (opId) return `op:${opId}|${etap}`
+  return `id:${doc?.id || ''}|${etap}`
+}
+
+export function k07RowHideKey(doc) {
+  return k07DedupeKey(doc) || String(doc?.id || '').trim()
+}
+
+export function shouldIncludeK03InK07(k03) {
+  if (!k03?.product_name) return false
+  const mode = k03.data?.k03_workflow?.mode
+  if (mode !== 'przerob') return false
+  const evalDate = k06EvaluationDateFromK03(k03)
+  return Boolean(evalDate && evalDate !== '0000-01-01')
 }
 
 export function isSyntheticK07Doc(doc) {
   if (!doc || doc.document_type !== 'K07') return false
   if (doc.synthetic) return true
   const id = String(doc.id || '')
+  if (id.startsWith('K07-manual-')) return true
   return id.startsWith('K07-') && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 }
 
@@ -220,12 +246,188 @@ function k07CoverageForOp(haccpDocs, opId) {
   const entries = (haccpDocs || []).filter(d =>
     d.document_type === 'K07' && (d.data?.operation_id || d.operation_id) === opId
   )
-  const etaps = new Set(entries.map(d => d.data?.kontrola_etap).filter(Boolean))
-  const legacy = entries.some(d => !d.data?.kontrola_etap)
+  const etaps = new Set(entries.map(d => d.data?.kontrola_etap || 'przed'))
   return {
-    przed: etaps.has('przed') || legacy,
+    przed: etaps.has('przed'),
     po: etaps.has('po')
   }
+}
+
+function k07CoverageForK03(haccpDocs, k03Key) {
+  const entries = (haccpDocs || []).filter(d =>
+    d.document_type === 'K07' && d.data?.k03_key === k03Key
+  )
+  const etaps = new Set(entries.map(d => d.data?.kontrola_etap || 'przed'))
+  return {
+    przed: etaps.has('przed'),
+    po: etaps.has('po')
+  }
+}
+
+function buildK07PoFromTemplate(przedDoc, overrides = {}) {
+  const opId = przedDoc.data?.operation_id || przedDoc.operation_id
+  const k03Key = przedDoc.data?.k03_key || ''
+  const id = k03Key ? k07SyntheticIdFromK03(k03Key, 'po') : k07SyntheticId(opId, 'po')
+  const ov = overrides[id] || {}
+  const base = {
+    id,
+    synthetic: true,
+    document_type: 'K07',
+    operation_id: opId || null,
+    document_date: przedDoc.document_date,
+    product_name: przedDoc.product_name || '',
+    lot_no: przedDoc.lot_no || '',
+    document_no: k03Key
+      ? `K07/K03/${String(k03Key).replace(/^K03-/, '')}/po`
+      : `K07/${przedDoc.document_no || przedDoc.document_date || 'brak'}/po`,
+    chamber_code: 'CCP1',
+    qty: 0,
+    status: 'P',
+    data: {
+      ...normalizeK07Data(przedDoc.data || {}, przedDoc),
+      kontrola_etap: 'po',
+      kontrola_label: 'Po przerobie',
+      godzina: '',
+      podpis_kontrolujacego: '',
+      k03_key: k03Key || przedDoc.data?.k03_key || null,
+      auto_source: przedDoc.data?.auto_source || 'k03_przerob'
+    },
+    signed_by_operator: '',
+    document_version: 'I/2024',
+    created_at: przedDoc.document_date
+  }
+  return applyK07Override(base, ov)
+}
+
+/** Uzupełnia brakujące wpisy „Po przerobie” gdy w bazie jest tylko „Przed”. */
+export function buildMissingK07PoPairs(haccpDocs = [], overrides = {}) {
+  const result = []
+  const seen = new Set()
+  const groups = new Map()
+
+  for (const d of (haccpDocs || []).filter(x => x.document_type === 'K07')) {
+    const k03Key = d.data?.k03_key || ''
+    const opId = d.data?.operation_id || d.operation_id
+    const groupKey = k03Key ? `k03:${k03Key}` : (opId ? `op:${opId}` : `id:${d.id}`)
+    if (!groups.has(groupKey)) groups.set(groupKey, [])
+    groups.get(groupKey).push(d)
+  }
+
+  for (const [, entries] of groups) {
+    const hasPo = entries.some(e => e.data?.kontrola_etap === 'po')
+    if (hasPo) continue
+    const przed = entries.find(e => (e.data?.kontrola_etap || 'przed') === 'przed') || entries[0]
+    if (!przed) continue
+    const po = buildK07PoFromTemplate(przed, overrides)
+    if (seen.has(po.id)) continue
+    seen.add(po.id)
+    result.push(po)
+  }
+  return result
+}
+
+function buildK07EntryFromK03(k03, etap, overrides = {}) {
+  const wf = k03.data?.k03_workflow || {}
+  const k03Key = k03.id
+  const id = k07SyntheticIdFromK03(k03Key, etap)
+  const ov = overrides[id] || {}
+  const date = k06EvaluationDateFromK03(k03)
+  const surowiec = String(k03.product_name || '').trim() || 'Przerób na pulę (CCP1)'
+  const numerPartii = String(k03.lot_no || wf.lot_no || '').trim()
+  const opId = k03.data?.sale_operation_id || null
+  const etapMeta = K07_KONTROLA_ETAPY.find(e => e.id === etap) || { id: etap, label: etap }
+  const base = {
+    id,
+    synthetic: true,
+    document_type: 'K07',
+    operation_id: opId,
+    document_date: date,
+    product_name: surowiec,
+    lot_no: numerPartii,
+    document_no: `K07/K03/${String(k03Key).replace(/^K03-/, '')}/${etap}`,
+    chamber_code: 'CCP1',
+    qty: Number(k03.qty || k03.data?.saleQty || 0),
+    status: 'P',
+    data: {
+      godzina: '',
+      surowiec,
+      numer_partii: numerPartii,
+      stan_sita: 'P',
+      podpis_kontrolujacego: '',
+      operation_id: opId,
+      k03_key: k03Key,
+      k03_mode: 'przerob',
+      auto_source: 'k03_przerob',
+      kontrola_etap: etapMeta.id,
+      kontrola_label: etapMeta.label,
+      wz_no: k03.document_no || k03.data?.wz_no || ''
+    },
+    signed_by_operator: '',
+    document_version: 'I/2024',
+    created_at: date
+  }
+  return applyK07Override(base, ov)
+}
+
+/** K07 z kart K03 (decyzja: przerób na pulę) – 2 wpisy na każdy K03. */
+export function buildSyntheticK07DocsFromK03(k03Forms = [], haccpDocs = [], overrides = {}) {
+  const result = []
+  const existingIds = new Set((haccpDocs || []).filter(d => d.document_type === 'K07').map(d => d.id))
+
+  for (const k03 of k03Forms || []) {
+    if (!shouldIncludeK03InK07(k03)) continue
+    const k03Key = k03.id
+    const coverage = k07CoverageForK03(haccpDocs, k03Key)
+
+    for (const etap of K07_KONTROLA_ETAPY) {
+      if (coverage[etap.id]) continue
+      const id = k07SyntheticIdFromK03(k03Key, etap.id)
+      if (existingIds.has(id)) continue
+      result.push(buildK07EntryFromK03(k03, etap.id, overrides))
+    }
+  }
+
+  return result.sort((a, b) =>
+    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || '')) ||
+    String(a.product_name || '').localeCompare(String(b.product_name || ''))
+  )
+}
+
+/** Pusty wiersz K07 do ręcznego uzupełnienia w kartotece miesięcznej. */
+export function buildManualK07BlankDoc(period, manualId, seed = {}, overrides = {}) {
+  const date = String(seed.document_date || `${period}-01`).slice(0, 10)
+  const etap = seed.kontrola_etap === 'po' ? 'po' : 'przed'
+  const etapMeta = K07_KONTROLA_ETAPY.find(e => e.id === etap) || K07_KONTROLA_ETAPY[0]
+  const id = manualId || `K07-manual-${period}-${Date.now()}`
+  const ov = overrides[id] || {}
+  const base = {
+    id,
+    synthetic: true,
+    document_type: 'K07',
+    operation_id: null,
+    document_date: date,
+    product_name: String(seed.surowiec || '').trim(),
+    lot_no: String(seed.numer_partii || seed.lot_no || '').trim(),
+    document_no: `K07/reczny/${date}/${etap}`,
+    chamber_code: 'CCP1',
+    qty: 0,
+    status: 'P',
+    data: {
+      godzina: String(seed.godzina || ''),
+      surowiec: String(seed.surowiec || ''),
+      numer_partii: String(seed.numer_partii || seed.lot_no || ''),
+      stan_sita: normalizePn(seed.stan_sita || 'P'),
+      podpis_kontrolujacego: String(seed.podpis_kontrolujacego || ''),
+      auto_source: 'manual',
+      kontrola_etap: etapMeta.id,
+      kontrola_label: etapMeta.label
+    },
+    signed_by_operator: seed.podpis_kontrolujacego || '',
+    document_version: 'I/2024',
+    created_at: date
+  }
+  return applyK07Override(base, ov)
 }
 
 function buildK07EntryFromProduction(op, etap, trace, overrides = {}) {
@@ -284,6 +486,10 @@ export function normalizeK07Data(data = {}, doc = {}) {
     stan_sita: normalizePn(data.stan_sita || 'P'),
     podpis_kontrolujacego: data.podpis_kontrolujacego || '',
     operation_id: data.operation_id || doc.operation_id || null,
+    k03_key: data.k03_key || null,
+    k03_mode: data.k03_mode || null,
+    auto_source: data.auto_source || null,
+    wz_no: data.wz_no || '',
     kontrola_etap: etap,
     kontrola_label: data.kontrola_label || (etap === 'przed' ? 'Przed przerobem' : etap === 'po' ? 'Po przerobie' : '')
   }
@@ -443,11 +649,13 @@ export function buildSyntheticK04Docs(allDocs, overrides = {}) {
 
 /**
  * K07 – dwa wpisy na każdy przerób (przed i po): kontrola sita CCP1.
+ * Źródła: operacje produkcji w magazynie + brakujące pary „po” z istniejących wpisów.
  */
 export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}, haccpDocs = []) {
   const { operations = [] } = trace
   const result = []
-  const existingIds = new Set((haccpDocs || []).filter(d => d.document_type === 'K07').map(d => d.id))
+  const existingKeys = new Set((haccpDocs || []).filter(d => d.document_type === 'K07').map(k07DedupeKey))
+  const pendingKeys = new Set()
 
   for (const op of operations) {
     if (normalizeText(op.operation_type) !== 'produkcja') continue
@@ -458,16 +666,46 @@ export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}, haccp
 
     for (const etap of K07_KONTROLA_ETAPY) {
       if (coverage[etap.id]) continue
-      const id = k07SyntheticId(op.id, etap.id)
-      if (existingIds.has(id)) continue
-      result.push(buildK07EntryFromProduction(op, etap.id, trace, overrides))
+      const doc = buildK07EntryFromProduction(op, etap.id, trace, overrides)
+      const key = k07DedupeKey(doc)
+      if (existingKeys.has(key) || pendingKeys.has(key)) continue
+      pendingKeys.add(key)
+      result.push(doc)
     }
+  }
+
+  for (const doc of buildMissingK07PoPairs(haccpDocs, overrides)) {
+    const key = k07DedupeKey(doc)
+    if (existingKeys.has(key) || pendingKeys.has(key)) continue
+    pendingKeys.add(key)
+    result.push(doc)
   }
 
   return result.sort((a, b) =>
     String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
     String(a.data?.operation_id || a.operation_id || '').localeCompare(String(b.data?.operation_id || b.operation_id || '')) ||
-    String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || ''))
+    String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || '')) ||
+    String(a.product_name || '').localeCompare(String(b.product_name || ''))
+  )
+}
+
+/** Pełna lista syntetycznych K07: K03 przerób + magazyn produkcji + brakujące „po”. */
+export function buildAllSyntheticK07Docs(trace = {}, k03Forms = [], overrides = {}, haccpDocs = []) {
+  const fromK03 = buildSyntheticK07DocsFromK03(k03Forms, haccpDocs, overrides)
+  const fromTrace = buildSyntheticK07DocsFromTrace(trace, overrides, haccpDocs)
+  const keys = new Set()
+  const merged = []
+  for (const doc of [...fromK03, ...fromTrace]) {
+    const key = k07DedupeKey(doc)
+    if (keys.has(key)) continue
+    keys.add(key)
+    merged.push(doc)
+  }
+  return merged.sort((a, b) =>
+    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || '')) ||
+    String(a.product_name || '').localeCompare(String(b.product_name || '')) ||
+    String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
   )
 }
 
