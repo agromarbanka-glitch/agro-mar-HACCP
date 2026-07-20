@@ -23,15 +23,12 @@ import {
 import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
 import { operationImportKey, diffImportGroupAgainstStored, loadStoredImportOperations } from './importSaveEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.7'
+export const K03_WZ_ENGINE_VERSION = '1.6'
 
-function fifoOptionsFromLine(line = {}, options = {}) {
-  const workflow = line?.workflow || {}
+function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
   const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys
   const fifoOpts = keys?.length ? { fifoSourceKeys: keys } : {}
   if (options.frozenKeys?.size) fifoOpts.frozenKeys = options.frozenKeys
-  if (line?.key) fifoOpts.saleKey = line.key
-  if (line?.operation_item_id) fifoOpts.operation_item_id = line.operation_item_id
   return fifoOpts
 }
 
@@ -53,7 +50,7 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
   if (mode === 'przerob' && !przerobDate) throw new Error('Brak daty przerobu w zapisie K03.')
 
   const k03Key = line.formId || `K03-${line.key}`
-  const fifoOpts = fifoOptionsFromLine(line, options)
+  const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
   const fifoResult = await persistFifoForSale(client, line.operation_id, line.product_id, cutoffDate, {
     k03_key: k03Key,
     change_type: 'k03_resync_fifo',
@@ -80,7 +77,6 @@ async function resyncK03Line(client, line, changedBy, logReason = 'Synchronizacj
     {
       key: line.key,
       operation_id: line.operation_id,
-      operation_item_id: line.operation_item_id || null,
       product_id: line.product_id,
       raw_product_name: line.product_name,
       qty: line.qty,
@@ -341,7 +337,6 @@ export async function loadWzQueue(client, options = {}) {
       key: form.id.replace(/^K03-/, ''),
       formId: form.id,
       operation_id: form.data?.sale_operation_id,
-      operation_item_id: form.data?.operation_item_id || null,
       product_id: form.data?.product_id,
       product_name: canonicalProductName(form.product_name),
       product_group: form.product_group || form.data?.product_group || productGroupForName(form.product_name),
@@ -438,7 +433,7 @@ export async function previewK03Workflow(client, line, options = {}) {
   const dateErr = validatePrzerobDate(mode, przerobDate, wzDate)
   if (dateErr) return { ok: false, error: dateErr }
 
-  const fifoOpts = fifoOptionsFromLine(line, options)
+  const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
   return previewFifoForSale(client, line.operation_id, line.product_id, cutoffDate, fifoOpts)
 }
 
@@ -456,7 +451,7 @@ export async function generateK03Workflow(client, line, options = {}) {
   const dateErr = validatePrzerobDate(mode, przerobDate, wzDate)
   if (dateErr) throw new Error(dateErr)
 
-  const fifoOpts = fifoOptionsFromLine(line, options)
+  const fifoOpts = fifoOptionsFromWorkflow(line.workflow, options)
   const onProgress = options.onProgress
   onProgress?.('fifo_preview')
   const preview = options.existingPreview?.ok &&
@@ -530,7 +525,6 @@ export async function generateK03Workflow(client, line, options = {}) {
     {
       key: line.key,
       operation_id: line.operation_id,
-      operation_item_id: line.operation_item_id || null,
       product_id: line.product_id,
       raw_product_name: line.product_name,
       qty: line.qty,
@@ -621,7 +615,6 @@ export async function changeK03Workflow(client, line, options = {}) {
   onProgress?.('fifo_revert')
   await revertFifoForSale(client, line.operation_id, line.product_id, {
     k03_key: line.formId || `K03-${line.key}`,
-    operation_item_id: line.operation_item_id || null,
     change_type: 'k03_change_decision',
     change_reason: reason,
     changed_by: changedBy
@@ -792,7 +785,6 @@ export async function revertK03Workflow(client, line, options = {}) {
   onProgress?.('Cofanie rozliczenia FIFO…')
   await revertFifoForSale(client, line.operation_id, line.product_id, {
     k03_key: k03Key,
-    operation_item_id: line.operation_item_id || null,
     change_type: 'k03_reverted',
     change_reason: options.reason || 'Cofnięcie decyzji K03/WZ',
     changed_by: changedBy

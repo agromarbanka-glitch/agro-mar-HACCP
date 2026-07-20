@@ -8,25 +8,11 @@
  * 4. Lipcowe PZ nie idą na czerwcową WZ; czerwcowe PZ z błędną datą w bazie nadal wchodzą (wg nr).
  * 5. WZ chronologicznie (data → nr WZ rosnąco → created_at); partie PZ najstarsze pierwsze.
  */
-import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo, isInternalLotNumber, repairPzRowsFromLots, fifoClassDisplayLabel, canonicalProductName, k03SaleLineKey } from './k03Engine'
+import { isSaleOperation, resolveFifoProductGroup, resolveFifoMatchSpec, buildFifoMatchSpecFromSourceKeys, fifoLotMatchesMatchSpec, sameFifoPool, normalizeFifoProductKey, resolveFifoSourcePzNo, isInternalLotNumber, repairPzRowsFromLots, fifoClassDisplayLabel, canonicalProductName } from './k03Engine'
 import { inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument } from './excelImport.js'
 
-function saleLineKey(operationId, productId, productName = '', operationItemId = null) {
-  return k03SaleLineKey(operationId, productId, productName, operationItemId)
-}
-
-function saleKeyForSale(sale) {
-  return sale?.key || saleLineKey(sale?.operation_id, sale?.product_id, sale?.product_name, sale?.operation_item_id)
-}
-
-function saleKeyFromOptions(operationId, productId, options = {}) {
-  if (options.saleKey) return options.saleKey
-  return saleLineKey(
-    operationId,
-    productId,
-    options.product_name || options.productName || '',
-    options.operation_item_id || options.operationItemId || null
-  )
+function saleLineKey(operationId, productId) {
+  return `${operationId}|${productId || 'null'}`
 }
 
 /** Numer kolejny WZ/FV/FS z numeru dokumentu (np. WZ/009/30/06/2026 → 9). */
@@ -48,8 +34,7 @@ export function compareFifoSaleOrder(a, b) {
   if (seqCmp) return seqCmp
   return String(a.sale_created_at || '').localeCompare(String(b.sale_created_at || '')) ||
     String(a.operation_id || '').localeCompare(String(b.operation_id || '')) ||
-    String(a.product_id || '').localeCompare(String(b.product_id || '')) ||
-    String(a.operation_item_id || '').localeCompare(String(b.operation_item_id || ''))
+    String(a.product_id || '').localeCompare(String(b.product_id || ''))
 }
 
 /** Data przyjęcia PZ do FIFO – numer PZ (dzień w nr) ma pierwszeństwo przed operation_date w bazie. */
@@ -128,11 +113,7 @@ export function frozenKeysFromSnapshots(snapshots = []) {
     }
     const opId = snap.data?.sale_operation_id || snap.operation_id
     const productId = snap.data?.product_id
-    const itemId = snap.data?.operation_item_id || null
-    if (opId && productId) {
-      keys.add(saleLineKey(opId, productId, '', itemId))
-      if (!itemId) keys.add(saleLineKey(opId, productId))
-    }
+    if (opId && productId) keys.add(saleLineKey(opId, productId))
   }
   return keys
 }
@@ -166,17 +147,6 @@ export function prefetchFifoBaseData(client) {
   return loadFifoBaseData(client).catch(() => null)
 }
 
-async function fetchFifoAllocations(client) {
-  try {
-    return await fetchAllPaginated(client, 'fifo_allocations', 'id, operation_id, source_lot_id, product_id, qty, operation_item_id')
-  } catch (err) {
-    const msg = String(err?.message || err || '')
-    if (!/operation_item_id/i.test(msg)) throw err
-    const rows = await fetchAllPaginated(client, 'fifo_allocations', 'id, operation_id, source_lot_id, product_id, qty')
-    return (rows || []).map(r => ({ ...r, operation_item_id: null }))
-  }
-}
-
 async function loadFifoBaseData(client, options = {}) {
   if (!options.forceReload && fifoBaseCache) {
     return fifoBaseCache
@@ -187,7 +157,7 @@ async function loadFifoBaseData(client, options = {}) {
     fetchAllPaginated(client, 'operation_items', 'id, operation_id, product_id, qty, direction, raw_product_name', {
       filters: [{ type: 'eq', column: 'direction', value: 'rozchod' }]
     }),
-    fetchFifoAllocations(client),
+    fetchAllPaginated(client, 'fifo_allocations', 'id, operation_id, source_lot_id, product_id, qty'),
     fetchAllPaginated(client, 'haccp_documents', 'operation_id, data', {
       filters: [{ type: 'eq', column: 'document_type', value: 'K03' }]
     })
@@ -228,11 +198,10 @@ async function loadFifoBaseData(client, options = {}) {
     if (qty <= 0) continue
     const product = productMap.get(item.product_id)
     const rawName = String(item.raw_product_name || product?.name || '').trim()
-    const key = saleLineKey(item.operation_id, item.product_id, rawName, item.id)
+    const key = saleLineKey(item.operation_id, item.product_id)
     const current = saleGroups.get(key) || {
       key,
       operation_id: item.operation_id,
-      operation_item_id: item.id || null,
       product_id: item.product_id,
       product_name: canonicalProductName(rawName || product?.name || ''),
       sale_group: resolveProductGroup(product, rawName),
@@ -251,9 +220,7 @@ async function loadFifoBaseData(client, options = {}) {
   const allocationsBySaleKey = new Map()
   for (const alloc of allocationsRaw || []) {
     if (!saleOpIds.has(alloc.operation_id)) continue
-    const key = alloc.operation_item_id
-      ? saleLineKey(alloc.operation_id, alloc.product_id, '', alloc.operation_item_id)
-      : saleLineKey(alloc.operation_id, alloc.product_id)
+    const key = saleLineKey(alloc.operation_id, alloc.product_id)
     if (!allocationsBySaleKey.has(key)) allocationsBySaleKey.set(key, [])
     allocationsBySaleKey.get(key).push(alloc)
   }
@@ -386,13 +353,12 @@ function buildK03WorkflowBySaleKey(k03Docs = []) {
     const k03Key = snap.data?.k03_key || snap.data?.form_id
     if (k03Key?.startsWith('K03-')) {
       map.set(k03Key.replace(/^K03-/, ''), wf || {})
+      continue
     }
     const opId = snap.data?.sale_operation_id || snap.operation_id
     const productId = snap.data?.product_id
-    const itemId = snap.data?.operation_item_id || null
     if (!opId || !productId) continue
-    map.set(saleLineKey(opId, productId, '', itemId), wf || {})
-    if (!itemId) map.set(saleLineKey(opId, productId), wf || {})
+    map.set(saleLineKey(opId, productId), wf || {})
   }
   return map
 }
@@ -453,15 +419,9 @@ function buildFrozenAllocationsBySaleKey(k03Docs, lotState, opMap) {
     if (snap?.data?.frozen !== true) continue
     const opId = snap.data?.sale_operation_id || snap.operation_id
     const productId = snap.data?.product_id
-    const itemId = snap.data?.operation_item_id || null
     if (!opId) continue
-    const key = saleLineKey(opId, productId, '', itemId)
-    const sale = {
-      operation_id: opId,
-      product_id: productId,
-      operation_item_id: itemId,
-      sale_qty: Number(snap.qty || snap.data?.saleQty || 0)
-    }
+    const key = saleLineKey(opId, productId)
+    const sale = { operation_id: opId, product_id: productId, sale_qty: Number(snap.qty || snap.data?.saleQty || 0) }
     const rows = snap.data?.rawRows || []
     const allocs = []
     for (const row of rows) {
@@ -473,7 +433,6 @@ function buildFrozenAllocationsBySaleKey(k03Docs, lotState, opMap) {
         operation_id: opId,
         source_lot_id: lotId,
         product_id: productId,
-        operation_item_id: itemId,
         qty
       })
     }
@@ -491,7 +450,6 @@ function toAllocationRows(sale, allocs) {
     operation_id: sale.operation_id,
     source_lot_id: a.source_lot_id,
     product_id: a.product_id ?? sale.product_id,
-    operation_item_id: a.operation_item_id ?? sale.operation_item_id ?? null,
     qty: a.qty
   }))
 }
@@ -600,7 +558,6 @@ async function allocateSale(client, sale, lotState, productMap, opMap, options =
       operation_id: sale.operation_id,
       source_lot_id: lot.id,
       product_id: sale.product_id,
-      operation_item_id: sale.operation_item_id || null,
       qty: take
     })
 
@@ -644,13 +601,7 @@ function simulateAllocation(sale, lotState, productMap, cutoffDate, opMap, match
 
     lot.remaining_qty = available - take
     lotState.set(lot.id, lot)
-    allocationRows.push({
-      operation_id: sale.operation_id,
-      source_lot_id: lot.id,
-      product_id: sale.product_id,
-      operation_item_id: sale.operation_item_id || null,
-      qty: take
-    })
+    allocationRows.push({ source_lot_id: lot.id, product_id: sale.product_id, qty: take })
     remaining -= take
     allocated += take
   }
@@ -681,9 +632,7 @@ export function simulateFifoSalesThroughDate(lotState, sortedSales, productMap, 
 function applyOtherSalesAllocations(base, lotState, excludeSaleKey, matchSpec, workflowBySaleKey = null) {
   const wfMap = workflowBySaleKey || base.workflowBySaleKey || new Map()
   for (const alloc of base.allocationsRaw || []) {
-    const saleKey = alloc.operation_item_id
-      ? saleLineKey(alloc.operation_id, alloc.product_id, '', alloc.operation_item_id)
-      : saleLineKey(alloc.operation_id, alloc.product_id)
+    const saleKey = saleLineKey(alloc.operation_id, alloc.product_id)
     if (saleKey === excludeSaleKey) continue
     const sale = base.saleByKey?.get(saleKey)
     if (!sale) continue
@@ -1189,7 +1138,7 @@ async function enrichAllocationRows(client, allocationRows) {
 export async function previewFifoForSale(client, operationId, productId, cutoffDate, options = {}) {
   const base = await loadFifoBaseData(client, { forceReload: true })
   const workflowBySaleKey = base.workflowBySaleKey || new Map()
-  const saleKey = saleKeyFromOptions(operationId, productId, options)
+  const saleKey = saleLineKey(operationId, productId)
   const sale = base.saleByKey?.get(saleKey) || base.sortedSales.find(s => s.key === saleKey)
   if (!sale) {
     return { ok: false, error: 'Nie znaleziono pozycji WZ w danych FIFO.', pzRows: [], allocated: 0, shortage: 0, saleQty: 0 }
@@ -1279,8 +1228,7 @@ export async function previewFifoForSale(client, operationId, productId, cutoffD
 
 /** Zapisuje rozliczenie FIFO dla jednej pozycji WZ z datą graniczną. */
 export async function persistFifoForSale(client, operationId, productId, cutoffDate, logEntry = {}) {
-  const saleKey = saleKeyFromOptions(operationId, productId, logEntry)
-  const operationItemId = logEntry.operation_item_id || logEntry.operationItemId || null
+  const saleKey = saleLineKey(operationId, productId)
   const fifoCache = logEntry.fifoCache || logEntry._fifoCache
   let base
   let matchSpec
@@ -1358,13 +1306,11 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
       })
     if (badRows.length) {
       const badAllocIds = []
-      let findQuery = client
+      const { data: newAllocs, error: findErr } = await client
         .from('fifo_allocations')
-        .select('id, qty, source_lot_id, operation_item_id')
+        .select('id, qty, source_lot_id')
         .eq('operation_id', operationId)
         .eq('product_id', productId)
-      if (operationItemId) findQuery = findQuery.eq('operation_item_id', operationItemId)
-      const { data: newAllocs, error: findErr } = await findQuery
       if (findErr) throw findErr
       for (const { i } of badRows) {
         const lotId = current.allocationRows[i]?.source_lot_id
@@ -1411,18 +1357,13 @@ export async function persistFifoForSale(client, operationId, productId, cutoffD
 
 /** Cofnięcie rozliczenia FIFO dla pozycji WZ (tylko gdy K03 nie zamrożony). Lekka ścieżka – bez loadFifoBaseData. */
 export async function revertFifoForSale(client, operationId, productId, logEntry = {}) {
-  const saleKey = saleKeyFromOptions(operationId, productId, logEntry)
-  const operationItemId = logEntry.operation_item_id || logEntry.operationItemId || null
+  const saleKey = saleLineKey(operationId, productId)
 
-  let allocQuery = client
+  const { data: existing, error: allocErr } = await client
     .from('fifo_allocations')
-    .select('id, source_lot_id, qty, product_id, operation_item_id')
+    .select('id, source_lot_id, qty, product_id')
     .eq('operation_id', operationId)
     .eq('product_id', productId)
-  if (operationItemId) {
-    allocQuery = allocQuery.eq('operation_item_id', operationItemId)
-  }
-  const { data: existing, error: allocErr } = await allocQuery
   if (allocErr) throw allocErr
   if (!existing?.length) {
     invalidateFifoBaseCache()
@@ -1458,9 +1399,7 @@ export async function revertFifoForSale(client, operationId, productId, logEntry
   let productName = ''
   const [{ data: op }, { data: item }] = await Promise.all([
     client.from('operations').select('document_no, operation_date').eq('id', operationId).maybeSingle(),
-    operationItemId
-      ? client.from('operation_items').select('raw_product_name, product_id').eq('id', operationItemId).maybeSingle()
-      : client.from('operation_items').select('raw_product_name, product_id').eq('operation_id', operationId).eq('product_id', productId).limit(1).maybeSingle()
+    client.from('operation_items').select('raw_product_name, product_id').eq('operation_id', operationId).eq('product_id', productId).limit(1).maybeSingle()
   ])
   wzNo = op?.document_no || ''
   wzDate = String(op?.operation_date || '').slice(0, 10)
