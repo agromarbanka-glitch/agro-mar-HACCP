@@ -10,7 +10,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -687,23 +687,34 @@ function App() {
   }, [haccpDocs, syntheticK06FromK03])
   const mergedK07Docs = useMemo(() => {
     const fromDb = (haccpDocs || []).filter(d =>
-      d.document_type === 'K07' && !k07HiddenKeys.has(k07RowHideKey(d))
+      d.document_type === 'K07' &&
+      isK07EligibleDoc(d) &&
+      !k07HiddenKeys.has(k07RowHideKey(d))
     )
-    const dbKeys = new Set(fromDb.map(k07DedupeKey))
-    const extraSynthetic = syntheticK07Docs.filter(d => !dbKeys.has(k07DedupeKey(d)))
-    const synthKeys = new Set([...dbKeys, ...extraSynthetic.map(k07DedupeKey)])
+    const extraSynthetic = syntheticK07Docs.filter(d => isK07EligibleDoc(d))
+    const byKey = new Map()
+    const prefer = (existing, candidate) => {
+      if (!existing) return candidate
+      const exDb = isPersistedHaccpDoc(existing)
+      const candDb = isPersistedHaccpDoc(candidate)
+      if (candDb && !exDb) return candidate
+      if (exDb && !candDb) return existing
+      if (existing.data?.k03_key && !candidate.data?.k03_key) return existing
+      if (candidate.data?.k03_key && !existing.data?.k03_key) return candidate
+      return existing
+    }
+    for (const d of [...fromDb, ...extraSynthetic]) {
+      const key = k07DedupeKey(d)
+      byKey.set(key, prefer(byKey.get(key), d))
+    }
     const extraManual = (k07ManualExtra || []).filter(d =>
       d.document_type === 'K07' &&
+      isK07EligibleDoc(d) &&
       !k07HiddenKeys.has(k07RowHideKey(d)) &&
-      !synthKeys.has(k07DedupeKey(d)) &&
-      !fromDb.some(x => x.id === d.id)
+      !byKey.has(k07DedupeKey(d))
     )
-    return [...fromDb, ...extraSynthetic, ...extraManual].sort((a, b) =>
-      String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
-      String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || '')) ||
-      String(a.product_name || '').localeCompare(String(b.product_name || '')) ||
-      String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
-    )
+    for (const d of extraManual) byKey.set(k07DedupeKey(d), d)
+    return Array.from(byKey.values()).sort(k07DocSort)
   }, [haccpDocs, syntheticK07Docs, k07ManualExtra, k07HiddenKeys])
 
   const dashboardSyntheticK02 = useMemo(() => buildSyntheticK02Docs(haccpDocs), [haccpDocs, k02Overrides])
@@ -3274,7 +3285,9 @@ function App() {
       map.get(key).docs.push(doc)
     }
     return Array.from(map.values()).map(g => {
-      const docs = g.docs.sort((a,b) => String(a.document_date || '').localeCompare(String(b.document_date || '')) || String(a.document_no || '').localeCompare(String(b.document_no || '')))
+      const docs = g.docs.sort((a, b) => g.type === 'K07'
+        ? k07DocSort(a, b)
+        : (String(a.document_date || '').localeCompare(String(b.document_date || '')) || String(a.document_no || '').localeCompare(String(b.document_no || ''))))
       const products = Array.from(new Set(docs.map(d => d.product_name || '').filter(Boolean)))
       return {
         ...g,
@@ -3283,7 +3296,7 @@ function App() {
           : g.type === 'K06'
             ? (products.length <= 1 ? (products[0] || 'Produkt gotowy') : `${products.length} asortymentów`)
           : g.type === 'K07'
-            ? `${Math.max(1, Math.ceil(docs.length / 2))} przerobów (przed/po)`
+            ? `Kontrola sita CCP1 – ${g.period || ''}`
           : g.type === 'K01'
             ? (products.length === 1 ? products[0] : 'według wpisów w tabeli')
             : g.product,
@@ -3963,6 +3976,16 @@ function App() {
         docs: (opened.docs || []).map(d => k03ById.get(d.id) || d)
       }
     }
+    if (opened.type === 'K07') {
+      const period = opened.period
+      const freshDocs = mergedK07Docs.filter(d => String(d.document_date || '').slice(0, 7) === period)
+      return {
+        ...(haccpMonthlyGroups.find(g => g.type === 'K07' && g.period === period) || opened),
+        ...opened,
+        period,
+        docs: freshDocs.length ? freshDocs.sort(k07DocSort) : (opened.docs || []).sort(k07DocSort)
+      }
+    }
     const freshById = new Map((haccpDocs || []).map(d => [d.id, d]))
     const mergedDocs = (opened.docs || []).map(d => freshById.get(d.id) || d)
     const freshMeta = haccpMonthlyGroups.find(g => g.key === opened.key)
@@ -4246,7 +4269,7 @@ function App() {
     if (group.type === 'K07') {
       const period = group.period
       const manualForPeriod = k07ManualExtra.filter(d => String(d.id).startsWith(`K07-manual-${period}-`))
-      const allDocs = [...docs, ...manualForPeriod.filter(m => !docs.some(d => d.id === m.id))]
+      const allDocs = [...docs, ...manualForPeriod.filter(m => !docs.some(d => d.id === m.id))].sort(k07DocSort)
       const maxRows = Math.max(11, allDocs.length + 2)
       return <div className="monthly-paper k02-original k07-original">
         <div className="no-print employee-signature-row k07-bulk-row" style={{marginBottom: '10px', flexWrap: 'wrap', gap: '10px'}}>
@@ -4403,7 +4426,7 @@ function App() {
             </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K07: 2 wpisy na każdy przerób (przed i po) – generowane z K03 (decyzja: przerób) i z magazynu. Kliknij pusty wiersz lub „Dodaj wiersz”, wpisz dane – zapis przy opuszczeniu pola. Usuwanie: Usuń → Potwierdź.</p>
+        <p className="hint no-print">K07: malina i porzeczka czarna (przerób z K03) – 2 wpisy na partię (przed/po, ten sam dzień). Osobna kartoteka na każdy miesiąc. Kliknij pusty wiersz lub „Dodaj wiersz”. Usuwanie: Usuń → Potwierdź.</p>
       </div>
     }
 
@@ -7768,27 +7791,6 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       const { data: outLot } = await supabase.from('lots').select('lot_no, storage_chamber_id').eq('id', outputLotId).single()
       const sourceProductName = sourceLot.products?.name || 'surowiec do przerobu'
-      for (const etap of K07_KONTROLA_ETAPY) {
-        await supabase.from('haccp_documents').insert(buildK07InsertPayload({
-          document_type: 'K07',
-          operation_id: op.id,
-          document_date: today,
-          product_name: sourceProductName,
-          lot_no: outLot?.lot_no || '',
-          document_no: `K07/${documentNo}/${etap.id}`,
-          status: 'P',
-          data: {
-            godzina: '',
-            surowiec: sourceProductName,
-            numer_partii: outLot?.lot_no || '',
-            stan_sita: 'P',
-            podpis_kontrolujacego: '',
-            operation_id: op.id,
-            kontrola_etap: etap.id,
-            kontrola_label: etap.label
-          }
-        }))
-      }
 
       const isPulpa = /pulpa/i.test(productionOutputName)
       const isDirectSale = isDirectToSaleProduct(productionOutputName)
@@ -10306,13 +10308,13 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         </>}
 
         {docsFilter === 'K01.1' && renderK011Section()}
-        {getDocFormCfg(docsFilter) && docsHubSection === 'kartoteki' && renderManualHaccpEntrySection()}
+        {getDocFormCfg(docsFilter) && docsHubSection === 'kartoteki' && docsFilter !== 'K07' && renderManualHaccpEntrySection()}
 
         {!['K01.1', 'K04.1', 'K05', 'K02'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – uzupełnij K03 (WZ) i odśwież magazyn, lub przypisz partie w CP3.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – utwórz K03 dla WZ (przerób / bez przerobu), potem odśwież kartoteki.</p>}
-          {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak K07 – po przerobie na pulpę pojawią się 2 wpisy (przed/po). Odśwież magazyn partii lub dodaj ręcznie poniżej.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak K07 – wpisy powstają z K03 (decyzja: przerób) dla maliny i porzeczki czarnej. Odśwież kartoteki lub uzupełnij w kartotece miesięcznej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – auto po produkcji lub ręczny wpis poniżej.</p>}
           {haccpMonthlyGroups.length === 0 && !['K03','K04','K06','K07'].includes(docsFilter) && <p className="hint">Brak kartotek dla filtrów.</p>}
 

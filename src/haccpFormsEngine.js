@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.7'
+export const HACCP_FORMS_VERSION = '1.8'
 
 function normalizeText(value) {
   return String(value || '')
@@ -182,6 +182,34 @@ export const K07_KONTROLA_ETAPY = [
   { id: 'po', label: 'Po przerobie' }
 ]
 
+/** K07 dotyczy wyłącznie przerobu maliny i porzeczki czarnej (decyzja w K03). */
+export const K07_ALLOWED_PRODUCT_GROUPS = new Set(['malina', 'porzeczka_czarna'])
+
+export function isK07AllowedProduct(productName = '', productGroup = '') {
+  const g = productGroup || productGroupForName(productName)
+  return K07_ALLOWED_PRODUCT_GROUPS.has(g)
+}
+
+export function isK07EligibleDoc(doc) {
+  if (!doc || doc.document_type !== 'K07') return false
+  const surowiec = doc.data?.surowiec || doc.product_name || ''
+  if (doc.data?.auto_source === 'manual') {
+    return !surowiec.trim() || isK07AllowedProduct(surowiec)
+  }
+  return isK07AllowedProduct(surowiec)
+}
+
+function k07PartiaGroupKey(doc) {
+  const partia = String(doc?.data?.numer_partii || doc?.lot_no || '').trim().toLowerCase()
+  const date = String(doc?.document_date || '').slice(0, 10)
+  if (partia && date) return `partia:${partia}|${date}`
+  const k03Key = doc?.data?.k03_key
+  if (k03Key) return `k03:${k03Key}`
+  const opId = doc?.data?.operation_id || doc?.operation_id
+  if (opId) return `op:${opId}`
+  return `id:${doc?.id || ''}`
+}
+
 function applyK07Override(doc, ov = {}) {
   const base = normalizeK07Data(doc.data || {}, doc)
   const merged = { ...base, ...ov }
@@ -212,9 +240,12 @@ export function k07SyntheticIdFromK03(k03Key, etap) {
   return `K07-K03-${base}-${etap}`
 }
 
-/** Klucz deduplikacji wpisu K07 (para przerób × etap). */
+/** Klucz deduplikacji wpisu K07 (partia × data × etap). */
 export function k07DedupeKey(doc) {
+  const partia = String(doc?.data?.numer_partii || doc?.lot_no || '').trim().toLowerCase()
+  const date = String(doc?.document_date || '').slice(0, 10)
   const etap = doc?.data?.kontrola_etap || 'przed'
+  if (partia && date) return `partia:${partia}|${date}|${etap}`
   const k03Key = doc?.data?.k03_key
   if (k03Key) return `k03:${k03Key}|${etap}`
   const opId = doc?.data?.operation_id || doc?.operation_id
@@ -230,6 +261,8 @@ export function shouldIncludeK03InK07(k03) {
   if (!k03?.product_name) return false
   const mode = k03.data?.k03_workflow?.mode
   if (mode !== 'przerob') return false
+  const group = k03.product_group || k03.data?.product_group || productGroupForName(k03.product_name)
+  if (!isK07AllowedProduct(k03.product_name, group)) return false
   const evalDate = k06EvaluationDateFromK03(k03)
   return Boolean(evalDate && evalDate !== '0000-01-01')
 }
@@ -253,10 +286,14 @@ function k07CoverageForOp(haccpDocs, opId) {
   }
 }
 
-function k07CoverageForK03(haccpDocs, k03Key) {
-  const entries = (haccpDocs || []).filter(d =>
-    d.document_type === 'K07' && d.data?.k03_key === k03Key
-  )
+function k07CoverageForPartia(haccpDocs, numerPartii, date) {
+  const partia = String(numerPartii || '').trim().toLowerCase()
+  const day = String(date || '').slice(0, 10)
+  const entries = (haccpDocs || []).filter(d => {
+    if (d.document_type !== 'K07') return false
+    const p = String(d.data?.numer_partii || d.lot_no || '').trim().toLowerCase()
+    return p === partia && String(d.document_date || '').slice(0, 10) === day
+  })
   const etaps = new Set(entries.map(d => d.data?.kontrola_etap || 'przed'))
   return {
     przed: etaps.has('przed'),
@@ -305,10 +342,8 @@ export function buildMissingK07PoPairs(haccpDocs = [], overrides = {}) {
   const seen = new Set()
   const groups = new Map()
 
-  for (const d of (haccpDocs || []).filter(x => x.document_type === 'K07')) {
-    const k03Key = d.data?.k03_key || ''
-    const opId = d.data?.operation_id || d.operation_id
-    const groupKey = k03Key ? `k03:${k03Key}` : (opId ? `op:${opId}` : `id:${d.id}`)
+  for (const d of (haccpDocs || []).filter(x => x.document_type === 'K07' && isK07EligibleDoc(x))) {
+    const groupKey = k07PartiaGroupKey(d)
     if (!groups.has(groupKey)) groups.set(groupKey, [])
     groups.get(groupKey).push(d)
   }
@@ -319,8 +354,9 @@ export function buildMissingK07PoPairs(haccpDocs = [], overrides = {}) {
     const przed = entries.find(e => (e.data?.kontrola_etap || 'przed') === 'przed') || entries[0]
     if (!przed) continue
     const po = buildK07PoFromTemplate(przed, overrides)
-    if (seen.has(po.id)) continue
-    seen.add(po.id)
+    const key = k07DedupeKey(po)
+    if (seen.has(key)) continue
+    seen.add(key)
     result.push(po)
   }
   return result
@@ -377,7 +413,9 @@ export function buildSyntheticK07DocsFromK03(k03Forms = [], haccpDocs = [], over
   for (const k03 of k03Forms || []) {
     if (!shouldIncludeK03InK07(k03)) continue
     const k03Key = k03.id
-    const coverage = k07CoverageForK03(haccpDocs, k03Key)
+    const date = k06EvaluationDateFromK03(k03)
+    const numerPartii = String(k03.lot_no || k03.data?.k03_workflow?.lot_no || '').trim()
+    const coverage = k07CoverageForPartia(haccpDocs, numerPartii, date)
 
     for (const etap of K07_KONTROLA_ETAPY) {
       if (coverage[etap.id]) continue
@@ -689,24 +727,25 @@ export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}, haccp
   )
 }
 
-/** Pełna lista syntetycznych K07: K03 przerób + magazyn produkcji + brakujące „po”. */
+/** Pełna lista syntetycznych K07: wyłącznie K03 (przerób malina / porzeczka czarna) + brakujące „po”. */
 export function buildAllSyntheticK07Docs(trace = {}, k03Forms = [], overrides = {}, haccpDocs = []) {
   const fromK03 = buildSyntheticK07DocsFromK03(k03Forms, haccpDocs, overrides)
-  const fromTrace = buildSyntheticK07DocsFromTrace(trace, overrides, haccpDocs)
-  const keys = new Set()
-  const merged = []
-  for (const doc of [...fromK03, ...fromTrace]) {
+  const keys = new Set(fromK03.map(k07DedupeKey))
+  const merged = [...fromK03]
+  for (const doc of buildMissingK07PoPairs(haccpDocs, overrides)) {
     const key = k07DedupeKey(doc)
     if (keys.has(key)) continue
     keys.add(key)
     merged.push(doc)
   }
-  return merged.sort((a, b) =>
-    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
-    String(a.data?.kontrola_etap || '').localeCompare(String(b.data?.kontrola_etap || '')) ||
-    String(a.product_name || '').localeCompare(String(b.product_name || '')) ||
-    String(a.lot_no || '').localeCompare(String(b.lot_no || ''))
-  )
+  return merged.sort(k07DocSort)
+}
+
+export function k07DocSort(a, b) {
+  return String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    String(a.data?.numer_partii || a.lot_no || '').localeCompare(String(b.data?.numer_partii || b.lot_no || '')) ||
+    (a.data?.kontrola_etap === 'po' ? 1 : 0) - (b.data?.kontrola_etap === 'po' ? 1 : 0) ||
+    String(a.product_name || '').localeCompare(String(b.product_name || ''))
 }
 
 export function buildSyntheticK07Docs(allDocs, overrides = {}) {
