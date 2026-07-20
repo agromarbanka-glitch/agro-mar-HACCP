@@ -431,7 +431,9 @@ export function buildRMonthlyPeriodGroups(code, docs) {
         : ''
       const displayLabel = code === 'R03'
         ? `${g.period} – ${vehicleRegNo || 'samochód'}${driver ? ` (${driver})` : ''}`
-        : g.period
+        : code === 'R11'
+          ? `Kontrola magnesów – ${g.period}`
+          : g.period
       return {
         ...g,
         docs: docsForGroup,

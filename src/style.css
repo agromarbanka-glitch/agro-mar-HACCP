@@ -1111,6 +1111,8 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
 .r09-legend-item i { width: 14px; height: 14px; display: inline-block; border: 1px solid #666; flex-shrink: 0; }
 .r11-paper .r11-table thead th { font-size: 10px; line-height: 1.25; }
 .r11-paper .r11-table { min-width: 900px; }
+.r11-paper tr.r11-przerob-row td { background: #f0f9ff; }
+.r11-paper tr.r11-przerob-row.r13-day-off td { background: #ffe8e8; }
 
 .r14-stock-value .r14-summary { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 12px 0 16px; }
 .r14-table th.num, .r14-table td.num { text-align: right; white-space: nowrap; }

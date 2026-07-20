@@ -46,6 +46,7 @@ import {
   partyToW06NewRow, W06_PARTY_LABELS
 } from './w06Engine'
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
+import { buildR11SyncPayloads } from './r11Engine'
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import {
@@ -7686,9 +7687,11 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         const k06Added = await syncAutoK06Documents()
         const { data: k07Existing } = await supabase.from('haccp_documents').select('id, document_type, operation_id, document_date, product_name, lot_no, data').eq('document_type', 'K07')
         const { data: k03ForK07 } = await supabase.from('haccp_documents').select('*').eq('document_type', 'K03')
+        const { data: r11Existing } = await supabase.from('haccp_documents').select('id, document_type, document_date, data').eq('document_type', 'R11')
         const k07Added = await syncAutoK07Documents(lotsData, traceOps, traceAllocations || [], k07Existing || [], k03ForK07 || [])
+        const r11Added = await syncAutoR11Documents(k03ForK07 || [], r11Existing || [])
         const k01Added = await syncAutoK01Documents(lotsData)
-        if (k06Added > 0 || k07Added > 0 || k01Added > 0) await loadHaccpDocs()
+        if (k06Added > 0 || k07Added > 0 || r11Added > 0 || k01Added > 0) await loadHaccpDocs()
       } catch {
         setFormsTrace({ allocations: [], operations: [] })
       }
@@ -9160,6 +9163,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     throw lastErr
   }
 
+  async function syncAutoR11Documents(k03Forms = [], currentDocs = []) {
+    if (!supabase) return 0
+    const r11Existing = (currentDocs || []).filter(d => d.document_type === 'R11')
+    const pending = buildR11SyncPayloads(k03Forms, r11Existing)
+    if (!pending.length) return 0
+    let inserted = 0
+    for (const doc of pending) {
+      const { error } = await supabase.from('haccp_documents').insert(doc)
+      if (!error) inserted += 1
+    }
+    return inserted
+  }
+
   async function syncAutoK07Documents(lotsData, operations, allocations, currentDocs, k03Forms = []) {
     if (!supabase) return 0
     const trace = { lots: lotsData, operations, allocations }
@@ -9226,7 +9242,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             }
           }
         }
-        const data = await fetchAllHaccpDocuments(supabase)
+        let data = await fetchAllHaccpDocuments(supabase)
+        if (generation !== haccpLoadGenerationRef.current) return data
+        if (options.syncK01) {
+          try {
+            const k03Forms = (data || []).filter(d => d.document_type === 'K03')
+            const r11Added = await syncAutoR11Documents(k03Forms, data)
+            if (r11Added > 0) {
+              data = await fetchAllHaccpDocuments(supabase)
+            }
+          } catch (syncErr) {
+            console.warn('syncAutoR11Documents', syncErr)
+          }
+        }
         if (generation !== haccpLoadGenerationRef.current) return data
         setHaccpDocs(data)
         if (data.length >= HACCP_DOCS_LOAD_MAX) {

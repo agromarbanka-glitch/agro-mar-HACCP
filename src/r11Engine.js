@@ -1,11 +1,11 @@
 /**
  * Raport R11 – kontrola magnesów (układ 1:1 ze wzorem Word/Excel).
- * Kartoteka miesięczna: wszystkie dni; niedziele jasnoczerwone; dni robocze: magnesy „–”, uwagi „P”.
+ * Kartoteka miesięczna: wpisy auto z K03 (przerób malina / porzeczka czarna) – „–” w magnesach, „P” w uwagach.
  */
-import { normalizePn } from './haccpFormsEngine'
+import { normalizePn, shouldIncludeK03InK07, k06EvaluationDateFromK03 } from './haccpFormsEngine'
 import { calendarDaysInMonth, isSundayDate, formatR13PlDate } from './r13Engine'
 
-export const R11_ENGINE_VERSION = '1.0'
+export const R11_ENGINE_VERSION = '1.1'
 export const R11_COLUMNS_STORAGE = 'agro-mar-r11-columns-v1'
 
 export const R11_HEADER = {
@@ -51,12 +51,74 @@ export function r11MakeColumn(label) {
   return { id: `${base}-${Date.now().toString(36).slice(-4)}`, label: trimmed }
 }
 
-export function defaultR11Magnets(columns, dayOff = false) {
+export function defaultR11Magnets(columns, dayOff = false, przerob = false) {
   const magnets = {}
   for (const col of columns || []) {
-    magnets[col.id] = dayOff ? '' : '-'
+    if (dayOff) magnets[col.id] = ''
+    else magnets[col.id] = przerob ? '-' : '-'
   }
   return magnets
+}
+
+/** Dni przerobu pulpy (malina / porzeczka czarna) z kart K03. */
+export function collectR11PrzerobDaysFromK03(k03Forms = []) {
+  const byDate = new Map()
+  for (const k03 of k03Forms || []) {
+    if (!shouldIncludeK03InK07(k03)) continue
+    const date = k06EvaluationDateFromK03(k03)
+    if (!date || date === '0000-01-01') continue
+    if (!byDate.has(date)) byDate.set(date, { k03Keys: [], products: [] })
+    const entry = byDate.get(date)
+    if (!entry.k03Keys.includes(k03.id)) entry.k03Keys.push(k03.id)
+    const name = String(k03.product_name || '').trim()
+    if (name && !entry.products.includes(name)) entry.products.push(name)
+  }
+  return byDate
+}
+
+export function buildR11PrzerobDayPayload(yearMonth, date, columns, meta = {}, signedBy = '') {
+  const cols = (columns || loadR11Columns()).map(c => ({ ...c }))
+  const sunday = isSundayDate(date)
+  const sortOrder = calendarDaysInMonth(yearMonth).findIndex(d => d.date === date) + 1
+  const magnets = defaultR11Magnets(cols, sunday, true)
+  return {
+    document_type: 'R11',
+    document_date: date,
+    document_no: `R11/${yearMonth}/${String(sortOrder || 99).padStart(2, '0')}`,
+    product_name: `${R11_HEADER.title} ${R11_HEADER.subtitle}`,
+    status: 'P',
+    data: {
+      month_key: yearMonth,
+      sort_order: sortOrder || 99,
+      is_day_off: sunday,
+      magnet_columns: cols,
+      magnets,
+      uwagi_pn: sunday ? '' : 'P',
+      auto_source: 'k03_przerob',
+      k03_keys: meta.k03Keys || [],
+      przerob_products: meta.products || []
+    },
+    signed_by_operator: sunday ? '' : (signedBy || ''),
+    qty: 0,
+    updated_at: new Date().toISOString()
+  }
+}
+
+/** Payloady R11 do insertu – jeden wiersz na dzień przerobu z K03 (malina / porzeczka czarna). */
+export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], columns = loadR11Columns()) {
+  const przerobDays = collectR11PrzerobDaysFromK03(k03Forms)
+  const existingByDate = new Map(
+    (existingR11Docs || [])
+      .filter(d => d.document_type === 'R11')
+      .map(d => [String(d.document_date || '').slice(0, 10), d])
+  )
+  const toInsert = []
+  for (const [date, meta] of przerobDays) {
+    if (existingByDate.has(date)) continue
+    const yearMonth = date.slice(0, 7)
+    toInsert.push(buildR11PrzerobDayPayload(yearMonth, date, columns, meta))
+  }
+  return toInsert
 }
 
 export function r11ColumnsFromDocs(docs, fallback = loadR11Columns()) {

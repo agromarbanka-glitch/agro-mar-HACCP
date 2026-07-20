@@ -158,7 +158,7 @@ export const R_MONTHLY_CONFIGS = {
     ],
     columnLabel: 'Miejsca kontroli magnesów',
     addColumnLabel: 'Dodaj miejsce magnesu',
-    createHint: 'Cały miesiąc – dni robocze: w kolumnach magnesów „–”, uwagi „P”; niedziele jasnoczerwone (puste). Można dodać kolejne miejsca kontroli.',
+    createHint: 'Wpisy powstają automatycznie w dni przerobu pulpy (malina, porzeczka czarna – decyzja w K03): w magnesach „–”, uwagi „P”. Osobna kartoteka na każdy miesiąc. Pozostałe dni dodaj ręcznie.',
     signLabel: 'Podpis'
   }
 }
