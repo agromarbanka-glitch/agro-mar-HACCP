@@ -246,6 +246,14 @@ export function r11ColumnsFromDocs(docs, fallback = null) {
   return fb.map(c => ({ ...c }))
 }
 
+export function normalizeR11MagnetInput(value) {
+  const v = String(value ?? '').trim()
+  if (v === '') return ''
+  if (v === '+' || v === '＋') return '+'
+  if (v === '-' || v === '–' || v === '−' || v === '—') return '-'
+  return v.slice(0, 2)
+}
+
 export function r11MagnetsForDoc(doc, columns) {
   const raw = { ...(doc?.data?.magnets || {}) }
   const magnets = {}

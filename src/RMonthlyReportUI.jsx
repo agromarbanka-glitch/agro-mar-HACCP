@@ -34,7 +34,7 @@ import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
 import {
   buildR11CalendarRows, r11MagnetsForDoc, r11UwagiForDoc,
   r11MakeColumn, R11_HEADER, resolveR11Columns, buildR11SparseDisplayRows,
-  buildR11ManualRowPayload
+  buildR11ManualRowPayload, normalizeR11MagnetInput
 } from './r11Engine'
 import { confirmDelete } from './authEngine'
 import { batchInsertHaccpDocuments } from './haccpLoadHelpers'
@@ -51,6 +51,51 @@ function defaultNewRow(cfg) {
     else row[f.key] = ''
   }
   return row
+}
+
+function R11MagnetCell({ value, onChange, printValue }) {
+  const display = value === '+' || value === '-' ? value : (value || '')
+  return (
+    <>
+      <div className="r11-cell-pick no-print">
+        <button type="button" className={`r11-quick-btn${display === '+' ? ' is-on' : ''}`} title="Ustaw +" onClick={() => onChange('+')}>+</button>
+        <button type="button" className={`r11-quick-btn${display === '-' ? ' is-on' : ''}`} title="Ustaw −" onClick={() => onChange('-')}>−</button>
+        <input
+          className="cell-input r11-symbol-input"
+          maxLength={2}
+          value={display}
+          onChange={e => onChange(normalizeR11MagnetInput(e.target.value))}
+          placeholder="+"
+          title="Wpisz + lub −"
+        />
+      </div>
+      <span className="print-only">{printValue ?? display}</span>
+    </>
+  )
+}
+
+function R11UwagiCell({ value, onChange, dayOff = false, printValue }) {
+  const display = dayOff ? (value || '') : (value === '' || value === undefined || value === null ? 'P' : formNormalizePn(value))
+  return (
+    <>
+      <div className="r11-cell-pick no-print">
+        <button type="button" className={`r11-quick-btn pn-p${display === 'P' ? ' is-on' : ''}`} title="Ustaw P" onClick={() => onChange('P')}>P</button>
+        <button type="button" className={`r11-quick-btn pn-n${display === 'N' ? ' is-on' : ''}`} title="Ustaw N" onClick={() => onChange('N')}>N</button>
+        <input
+          className="cell-input r11-symbol-input"
+          maxLength={1}
+          value={display}
+          onChange={e => {
+            const v = e.target.value.toUpperCase()
+            if (v === '' || v === 'P' || v === 'N') onChange(v)
+          }}
+          placeholder="P"
+          title="Wpisz P lub N"
+        />
+      </div>
+      <span className="print-only">{printValue ?? display}</span>
+    </>
+  )
 }
 
 async function deleteRMonthlyMonthGroup({
@@ -467,6 +512,7 @@ export function RMonthlyReportPreview({
   const [newColumnLabel, setNewColumnLabel] = useState('')
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
   const [r00PickEmployee, setR00PickEmployee] = useState('')
+  const [r11BlankDrafts, setR11BlankDrafts] = useState({})
 
   useEffect(() => {
     if (cfg?.layout !== 'single-month' || !singleDoc) return
@@ -1279,9 +1325,66 @@ export function RMonthlyReportPreview({
     }
 
     function saveMagnet(doc, colId, value) {
-      const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [colId]: value }
+      const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [colId]: normalizeR11MagnetInput(value) }
       const patch = { magnets, auto_source: doc.data?.auto_source === 'k03_przerob' ? 'k03_przerob_edited' : doc.data?.auto_source }
       saveDoc(supabase, doc, patch, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
+    }
+
+    function defaultR11BlankDraft() {
+      const magnets = {}
+      for (const col of magnetCols) magnets[col.id] = ''
+      return {
+        document_date: '',
+        magnets,
+        uwagi_pn: 'P',
+        signed_by: defaultEmployee || ''
+      }
+    }
+
+    async function commitR11BlankDraft(draftKey, draft) {
+      if (!supabase || !draft) return
+      const date = String(draft.document_date || '').slice(0, 10)
+      if (!date) return
+      if (date.slice(0, 7) !== period) {
+        setMessage(`R11: data ${formatRMonthlyPlDate(date)} nie należy do kartoteki ${period}.`)
+        return
+      }
+      const magnets = {}
+      for (const col of magnetCols) {
+        const v = normalizeR11MagnetInput(draft.magnets?.[col.id])
+        magnets[col.id] = v || '+'
+      }
+      const payload = buildR11ManualRowPayload(
+        period,
+        date,
+        magnetCols,
+        { magnets, uwagi_pn: draft.uwagi_pn === 'N' ? 'N' : (draft.uwagi_pn || 'P') },
+        draft.signed_by || ''
+      )
+      try {
+        const { error } = await supabase.from('haccp_documents').insert(payload)
+        if (error) throw error
+        setR11BlankDrafts(prev => {
+          const next = { ...prev }
+          delete next[draftKey]
+          return next
+        })
+        await loadHaccpDocs()
+        setMessage('R11: zapisano wiersz.')
+      } catch (err) {
+        setMessage(`R11: ${err.message}`)
+      }
+    }
+
+    function patchR11BlankDraft(draftKey, updater, autoSave = false) {
+      setR11BlankDrafts(prev => {
+        const base = prev[draftKey] || defaultR11BlankDraft()
+        const next = typeof updater === 'function' ? updater(base) : { ...base, ...updater }
+        if (autoSave && next.document_date) {
+          queueMicrotask(() => commitR11BlankDraft(draftKey, next))
+        }
+        return { ...prev, [draftKey]: next }
+      })
     }
 
     function saveUwagi(doc, value) {
@@ -1365,13 +1468,57 @@ export function RMonthlyReportPreview({
       </thead><tbody>
         {displayRows.map(row => {
           if (row.blank) {
+            const draftKey = `${period}|${row.key}`
+            const draft = r11BlankDrafts[draftKey] || defaultR11BlankDraft()
             return <tr key={row.key} className="blank-row editable-blank">
               <td>{row.lp}</td>
               <td>
-                <input type="date" className="cell-input no-print" defaultValue="" onBlur={e => { if (e.target.value) void addR11ManualRow(e.target.value) }} />
+                <input
+                  type="date"
+                  className="cell-input no-print"
+                  value={draft.document_date}
+                  onChange={e => patchR11BlankDraft(draftKey, { document_date: e.target.value })}
+                  onBlur={() => void commitR11BlankDraft(draftKey, r11BlankDrafts[draftKey] || draft)}
+                />
               </td>
-              {magnetCols.map(col => <td key={col.id}></td>)}
-              <td></td><td></td><td className="no-print"></td>
+              {magnetCols.map(col => (
+                <td key={col.id}>
+                  <R11MagnetCell
+                    value={draft.magnets[col.id] || ''}
+                    onChange={v => patchR11BlankDraft(draftKey, base => ({
+                      ...base,
+                      magnets: { ...base.magnets, [col.id]: v }
+                    }), true)}
+                  />
+                </td>
+              ))}
+              <td>
+                <select
+                  className="mini-select no-print"
+                  value={draft.signed_by}
+                  onChange={e => patchR11BlankDraft(draftKey, { signed_by: e.target.value }, true)}
+                >
+                  <option value="">Wybierz</option>
+                  {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                </select>
+              </td>
+              <td>
+                <R11UwagiCell
+                  value={draft.uwagi_pn}
+                  dayOff={false}
+                  onChange={v => patchR11BlankDraft(draftKey, { uwagi_pn: v }, true)}
+                />
+              </td>
+              <td className="no-print col-actions">
+                <button
+                  type="button"
+                  className="mini secondary"
+                  disabled={!draft.document_date}
+                  onClick={() => void commitR11BlankDraft(draftKey, r11BlankDrafts[draftKey] || draft)}
+                >
+                  Zapisz
+                </button>
+              </td>
             </tr>
           }
           const doc = row.doc
@@ -1391,9 +1538,11 @@ export function RMonthlyReportPreview({
             {magnetCols.map(col => {
               const val = magnets[col.id] ?? (isOff ? '' : '+')
               return <td key={col.id}>
-                <input className="cell-input no-print mini" list={`r11-mag-${col.id}`} value={val} onChange={e => saveMagnet(doc, col.id, e.target.value)} />
-                <datalist id={`r11-mag-${col.id}`}><option value="+"/><option value="-"/></datalist>
-                <span className="print-only">{val || ''}</span>
+                <R11MagnetCell
+                  value={val}
+                  printValue={val || ''}
+                  onChange={v => saveMagnet(doc, col.id, v)}
+                />
               </td>
             })}
             <td>
@@ -1403,10 +1552,12 @@ export function RMonthlyReportPreview({
               <span className="print-only">{doc.signed_by_operator || ''}</span>
             </td>
             <td>
-              <select className="mini-select no-print" value={isOff ? (doc.data?.uwagi_pn || '') : (doc.data?.uwagi_pn ?? 'P')} onChange={e => saveUwagi(doc, e.target.value)}>
-                <option value="">—</option><option value="P">P</option><option value="N">N</option>
-              </select>
-              <span className="print-only">{uwagi || ''}</span>
+              <R11UwagiCell
+                value={isOff ? (doc.data?.uwagi_pn || '') : (doc.data?.uwagi_pn ?? 'P')}
+                dayOff={isOff}
+                printValue={uwagi || ''}
+                onChange={v => saveUwagi(doc, v)}
+              />
             </td>
             <td className="no-print col-actions">
               {allowDelete && <button type="button" className="mini danger" onClick={() => void deleteR11Row(doc)}>Usuń</button>}
@@ -1418,7 +1569,7 @@ export function RMonthlyReportPreview({
         Wpisy powstają automatycznie w dni przerobu pulpy (malina, porzeczka czarna – K03): w obu miejscach magnesów „+”, uwagi „P”.<br/>
         * <b>+</b> – kontrola / brak zastrzeżeń w miejscu kontroli; <b>–</b> – brak wykrycia metalu (wg wzoru).<br/>
         ** <b>P</b> – prawidłowo (magnesy czyste, skuteczne); <b>N</b> – nieprawidłowo.<br/>
-        Każda kolumna jest edytowalna ręcznie. Puste wiersze u dołu – wpisz datę, aby dodać wpis.
+        Kliknij przycisk <b>+</b>, <b>−</b>, <b>P</b> lub <b>N</b> albo wpisz wartość w polu. Puste wiersze u dołu – uzupełnij datę i kolumny, potem „Zapisz”.
       </div>
     </div>
   }
