@@ -1379,23 +1379,18 @@ export async function revertFifoForSale(client, operationId, productId, logEntry
   const lots = lotIds.length
     ? await fetchInChunks(client, 'lots', 'id, remaining_qty, status', 'id', lotIds)
     : []
-  const lotMap = new Map((lots || []).map(l => [l.id, { ...l }]))
+  const lotState = new Map((lots || []).map(l => [l.id, { ...l }]))
 
   for (const alloc of existing) {
-    const lot = lotMap.get(alloc.source_lot_id)
+    const lot = lotState.get(alloc.source_lot_id)
     if (!lot) continue
     const remaining = Number(lot.remaining_qty || 0) + Number(alloc.qty || 0)
     lot.remaining_qty = Math.round(remaining * 1000) / 1000
     lot.status = lot.remaining_qty > 0.0005 ? 'aktywna' : lot.status
-    lotMap.set(lot.id, lot)
+    lotState.set(lot.id, lot)
   }
 
-  await Promise.all([...lotMap.values()].map(lot =>
-    client.from('lots').update({
-      remaining_qty: Number(lot.remaining_qty || 0),
-      status: Number(lot.remaining_qty || 0) <= 0.0005 ? 'zuzyta' : 'aktywna'
-    }).eq('id', lot.id)
-  ))
+  if (lotState.size) await persistLotsBatch(client, lotState, [...lotState.keys()])
 
   await deleteAllocations(client, existing.map(a => a.id))
 

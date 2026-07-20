@@ -1250,38 +1250,15 @@ function App() {
     }
 
     if (dialog.kind === 'revert') {
-      const { line, frozen } = dialog
-      let workLine = line
+      const { line } = dialog
       const revertReason = String(dialog.revertReason || dialog.reason || 'Cofnięcie decyzji K03/WZ').trim() || 'Cofnięcie decyzji K03/WZ'
 
-      if (frozen) {
-        const unfreezeReason = String(dialog.reason || '').trim()
-        if (!unfreezeReason) {
-          setK03ActionDialog(d => ({ ...d, error: 'Podaj powód odmrożenia przed cofnięciem.' }))
-          return
-        }
-        const doc = line.k03Form
-        if (!doc?.id) {
-          setK03ActionDialog(d => ({ ...d, error: 'Brak dokumentu K03 do odmrożenia.' }))
-          return
-        }
-        setStep('Odmrażanie kartoteki…')
-        try {
-          await unfreezeK03Workflow(supabase, doc, unfreezeReason, userRole)
-          workLine = k03LineAfterUnfreeze(line)
-        } catch (err) {
-          setK03ActionDialog(d => ({ ...d, busy: false, step: '', error: `Błąd odmrożenia: ${err?.message || String(err)}` }))
-          return
-        }
-      } else {
-        setK03ActionDialog(d => ({ ...d, busy: true, step: '', error: '' }))
-      }
-
+      setStep('Cofanie decyzji K03…')
       try {
-        await revertK03Workflow(supabase, workLine, {
+        await revertK03Workflow(supabase, line, {
           reason: revertReason,
           changedBy: userRole,
-          alreadyUnfrozen: frozen,
+          allowFrozen: true,
           onProgress: (msg) => setStep(msg)
         })
         setStep('Odświeżanie listy WZ…')
@@ -1889,11 +1866,11 @@ function App() {
             <b>{productName}</b>{wzNo ? ` · WZ ${wzNo}` : ''}
           </p>
           {isUnfreeze && <p className="hint k03-wz-modal-note">Po odmrożeniu FIFO może ponownie zmienić rozliczenie tej kartoteki.</p>}
-          {!isUnfreeze && frozen && <p className="hint k03-wz-modal-note">Kartoteka jest zamrożona – najpierw zostanie odmrożona, potem decyzja wróci do kolejki WZ.</p>}
+          {!isUnfreeze && frozen && <p className="hint k03-wz-modal-note">Kartoteka jest zamrożona – cofnięcie usunie ją i zwróci surowiec do puli FIFO (bez osobnego odmrażania).</p>}
           {!isUnfreeze && !frozen && <p className="hint k03-wz-modal-note">Pozycja wróci do kolejki WZ – możesz ponownie wybrać przerób lub brak przerobu.</p>}
         </div>
         <div className="k03-wz-modal-body">
-          {(isUnfreeze || frozen) && <label className="k03-wz-field full-width">
+          {isUnfreeze && <label className="k03-wz-field full-width">
             Powód odmrożenia (wymagane)
             <textarea
               rows={3}

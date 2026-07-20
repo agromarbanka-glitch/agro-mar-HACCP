@@ -8,6 +8,7 @@ import {
   buildK03FormDoc,
   saveK03Snapshot,
   applyK03DocEdits,
+  unfreezeK03Snapshot,
   inferProductCode,
   inferK03LotCode,
   k03LotReferenceYear,
@@ -736,11 +737,12 @@ export function k03LineAfterUnfreeze(line) {
   }
 }
 
-/** Cofnięcie decyzji K03 (tylko gdy nie zamrożony). */
+/** Cofnięcie decyzji K03 – usuwa kartotekę i cofa FIFO (działa też na zamrożonych). */
 export async function revertK03Workflow(client, line, options = {}) {
   const k03Key = line.formId || `K03-${line.key}`
   const changedBy = options.changedBy || 'operator'
   const onProgress = options.onProgress
+  const allowFrozen = options.allowFrozen === true || options.alreadyUnfrozen === true
 
   onProgress?.('Szukanie kartoteki K03…')
   let snap = null
@@ -776,7 +778,7 @@ export async function revertK03Workflow(client, line, options = {}) {
     snap = (byOp || []).find(s => s.data?.k03_key === k03Key || s.data?.form_id === k03Key) || null
   }
 
-  if (snap?.data?.frozen && !options.alreadyUnfrozen) {
+  if (snap?.data?.frozen && !allowFrozen) {
     throw new Error('K03 jest zamrożony – najpierw odmroź kartotekę.')
   }
 
@@ -813,18 +815,7 @@ export async function unfreezeK03Workflow(client, doc, reason, changedBy = 'oper
   if (!doc?.id) throw new Error('Brak dokumentu K03.')
   if (!doc.frozen && doc.data?.frozen !== true) return { ok: true, already: true }
 
-  const nextDoc = {
-    ...doc,
-    frozen: false,
-    data: {
-      ...(doc.data || {}),
-      frozen: false,
-      unfreeze_reason: reason,
-      unfrozen_at: new Date().toISOString()
-    }
-  }
-
-  await saveK03Snapshot(client, nextDoc, { unfreeze: true, userRole: changedBy })
+  await unfreezeK03Snapshot(client, doc, reason, changedBy)
 
   await logK03Workflow(client, {
     wz_no: doc.document_no,

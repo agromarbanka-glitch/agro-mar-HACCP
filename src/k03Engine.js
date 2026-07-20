@@ -1661,3 +1661,44 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
   if (error) throw error
   return data?.id
 }
+
+/** Szybkie odmrożenie – tylko flaga frozen (bez pełnego zapisu całej kartoteki). */
+export async function unfreezeK03Snapshot(client, doc, reason, userRole = 'operator') {
+  if (!client || !doc?.id) throw new Error('Brak dokumentu K03.')
+
+  let haccpId = doc.haccp_doc_id || null
+  if (!haccpId) {
+    const { data: found, error: findErr } = await client
+      .from('haccp_documents')
+      .select('id')
+      .eq('document_type', 'K03')
+      .filter('data->>k03_key', 'eq', doc.id)
+      .limit(1)
+      .maybeSingle()
+    if (findErr) throw findErr
+    haccpId = found?.id || null
+  }
+  if (!haccpId) throw new Error('Nie znaleziono zapisanej kartoteki K03.')
+
+  const { data: row, error: fetchErr } = await client
+    .from('haccp_documents')
+    .select('id, data')
+    .eq('id', haccpId)
+    .single()
+  if (fetchErr) throw fetchErr
+  if (row?.data?.frozen !== true) return haccpId
+
+  const nextData = {
+    ...row.data,
+    frozen: false,
+    frozen_at: null,
+    unfrozen_at: new Date().toISOString(),
+    unfreeze_reason: String(reason || '').trim()
+  }
+  const { error: updErr } = await client
+    .from('haccp_documents')
+    .update({ data: nextData, updated_at: new Date().toISOString() })
+    .eq('id', haccpId)
+  if (updErr) throw updErr
+  return haccpId
+}
