@@ -3466,12 +3466,11 @@ function App() {
   const haccpMonthlyGroups = useMemo(() => {
     // Kartoteki zbiorcze korzystają z tych samych dokumentów co filtr okresu,
     // ale grupują je do kartotek miesięcznych/asortymentowych.
-    // K07: zawsze scalone (bez duplikatów partii).
+    // K07: scalone (bez duplikatów partii) – tylko w zakładce K07.
     const k07ForGroups = mergedK07Docs.filter(d => matchesDocsDateRange(d.document_date))
-    const source = [
-      ...haccpListDocs.filter(d => d.document_type !== 'K07'),
-      ...k07ForGroups
-    ]
+    const source = docsFilter === 'K07'
+      ? k07ForGroups
+      : haccpListDocs
 
     const map = new Map()
     for (const doc of source) {
@@ -3512,7 +3511,7 @@ function App() {
         docs: g.type === 'K04' ? dedupeK04Docs(docs) : g.type === 'K07' ? dedupeK07Docs(docs) : docs
       }
     })
-  }, [haccpListDocs, mergedK07Docs, mergedK04Docs, docsDateFrom, docsDateTo])
+  }, [haccpListDocs, mergedK07Docs, docsFilter, docsDateFrom, docsDateTo])
 
   const docsFilterStats = useMemo(() => {
     const filtersActive = Boolean(
@@ -6194,6 +6193,7 @@ function App() {
   }
 
   function renderK04Section() {
+    const k04Groups = haccpMonthlyGroups.filter(g => g.type === 'K04')
     return <>
       <div className="card inner-card no-print r13-add-panel">
         <h3>Utwórz kartotekę K04 za miesiąc</h3>
@@ -6219,12 +6219,12 @@ function App() {
         </div>
         <p className="hint">Silnik formularzy: {HACCP_FORMS_VERSION}. Otwórz kartotekę miesiąca – każda kolumna edytowalna, „+ Dodaj wiersz”, Usuń wiersz.</p>
       </div>
-      {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek K04 w filtrze – utwórz miesiąc powyżej lub poczekaj na K03 w CP3.</p>}
-      {haccpMonthlyGroups.length > 0 && <>
+      {k04Groups.length === 0 && <p className="hint">Brak kartotek K04 w filtrze – utwórz miesiąc powyżej lub poczekaj na K03 w CP3.</p>}
+      {k04Groups.length > 0 && <>
         <h3>Lista kartotek K04</h3>
         <div className="table-wrap docs-table-wrap"><table className="docs-table">
           <thead><tr><th>Okres</th><th>Wpisy</th><th>Typ</th><th>N</th><th>Akcje</th></tr></thead>
-          <tbody>{haccpMonthlyGroups.map(g => (
+          <tbody>{k04Groups.map(g => (
             <tr key={g.key}>
               <td><b>{periodLabel(g)}</b><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} onToggle={toggleKartotekaPrintStatus} /></td>
               <td>{g.docs.length}</td>
@@ -10793,7 +10793,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         {docsFilter === 'K01.1' && renderK011Section()}
         {getDocFormCfg(docsFilter) && docsHubSection === 'kartoteki' && docsFilter !== 'K07' && renderManualHaccpEntrySection()}
 
-        {!['K01.1', 'K04.1', 'K05', 'K02'].includes(docsFilter) && <>
+        {!['K01.1', 'K04.1', 'K05', 'K02', 'K04'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – utwórz kartotekę miesiąca powyżej lub uzupełnij K03 (magazyn CP3).</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – utwórz K03 dla WZ (przerób / bez przerobu), potem odśwież kartoteki.</p>}
