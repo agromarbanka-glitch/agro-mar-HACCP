@@ -20,7 +20,7 @@ import {
   canonicalProductName,
   K03_ENGINE_VERSION
 } from './k03Engine'
-import { previewFifoForSale, persistFifoForSale, revertFifoForSale } from './fifoEngine'
+import { allocateK03LotNoRpc, getK03PrefixRules } from './appSettingsEngine'
 import { operationImportKey, diffImportGroupAgainstStored, loadStoredImportOperations } from './importSaveEngine'
 
 export const K03_WZ_ENGINE_VERSION = '1.6'
@@ -225,27 +225,47 @@ export function wzStatusLabel(status) {
 function suggestLotNo(existingForms, productName, productId, productMap, referenceDate, options = {}) {
   const year = k03LotReferenceYear(referenceDate)
   const product = productMap?.get?.(productId)
-  const code = inferK03LotCode(productName, product, options)
-  const sameProduct = (existingForms || []).filter(f =>
-    (f.data?.product_id === productId || normalizeKey(f.product_name) === normalizeKey(productName)) &&
-    String(f.lot_no || '').includes(`/${year}`)
-  )
-  const seq = nextK03LotSequence(sameProduct, productId, productName, code, year)
+  const prefixRules = options.prefixRules || getK03PrefixRules()
+  const code = inferK03LotCode(productName, product, { ...options, prefixRules })
+  const sameCode = (existingForms || []).filter(f => {
+    const lot = String(f.lot_no || f.data?.k03_workflow?.lot_no || '').trim()
+    const m = lot.match(/^([A-Za-z]{1,8})\/(\d{1,5})\/(\d{2,4})$/)
+    if (!m) return false
+    if (m[1].toLowerCase() !== String(code).toLowerCase()) return false
+    const lotYear = m[3].length === 2 ? `20${m[3]}` : m[3]
+    return lotYear === String(year)
+  })
+  const seq = nextK03LotSequence(sameCode, code, year)
   return formatK03LotNo(code, seq, year)
 }
 
-async function loadK03LotSuggestForms(client, productId, productName, year) {
+async function allocateK03LotNo(client, productName, productId, productMap, referenceDate, options = {}) {
+  const year = Number(k03LotReferenceYear(referenceDate))
+  const product = productMap?.get?.(productId)
+  const prefixRules = getK03PrefixRules()
+  const code = inferK03LotCode(productName, product, { ...options, prefixRules })
+  if (client) {
+    try {
+      const allocated = await allocateK03LotNoRpc(client, code, year)
+      if (allocated) return allocated
+    } catch {
+      // migracja v49 nie wdrożona – fallback JS
+    }
+  }
+  const forms = client
+    ? await loadK03LotSuggestForms(client, code, year)
+    : []
+  return suggestLotNo(forms, productName, productId, productMap, referenceDate, { ...options, prefixRules })
+}
+
+async function loadK03LotSuggestForms(client, code, year) {
   const { data, error } = await client
     .from('haccp_documents')
     .select('lot_no, product_name, data')
     .eq('document_type', 'K03')
-    .ilike('lot_no', `%/${year}`)
+    .ilike('lot_no', `${String(code).toUpperCase()}/%/${year}`)
   if (error) throw error
-  const nameKey = normalizeKey(productName)
-  return (data || []).filter(d =>
-    (d.data?.product_id === productId || normalizeKey(d.product_name) === nameKey) &&
-    String(d.lot_no || '').includes(`/${year}`)
-  )
+  return data || []
 }
 
 /** Proponowany numer partii wyrobu gotowego dla K03 (przerób). */
@@ -484,7 +504,7 @@ export async function generateK03Workflow(client, line, options = {}) {
   const lotYear = String(lotRefDate || '').slice(0, 4) || String(new Date().getFullYear())
   const manualLotNo = String(options.lotNo || '').trim()
 
-  const [fifoResult, lotSuggestForms] = await Promise.all([
+  const [fifoResult, lotNo] = await Promise.all([
     persistFifoForSale(client, line.operation_id, line.product_id, cutoffDate, {
       k03_key: k03Key,
       change_type: mode === 'przerob' ? 'k03_created_przerob' : 'k03_created_bez_przerobu',
@@ -494,13 +514,10 @@ export async function generateK03Workflow(client, line, options = {}) {
       ...fifoOpts
     }),
     manualLotNo
-      ? Promise.resolve([])
-      : loadK03LotSuggestForms(client, line.product_id, line.product_name, lotYear)
+      ? Promise.resolve(manualLotNo)
+      : allocateK03LotNo(client, line.product_name, line.product_id, productMap, lotRefDate, { mode })
   ])
   onProgress?.('k03_save')
-
-  const lotNo = manualLotNo ||
-    suggestLotNo(lotSuggestForms, line.product_name, line.product_id, productMap, lotRefDate, { mode })
 
   const fifoSourceKeys = options.fifoSourceKeys || options.fifo_source_keys || null
   const workflow = {

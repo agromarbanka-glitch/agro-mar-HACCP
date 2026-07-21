@@ -3,6 +3,7 @@
  */
 import { createClient } from '@supabase/supabase-js'
 import { supabase as mainSupabase, isSupabaseConfigured } from './supabaseClient'
+import { getAppSettings } from './appSettingsEngine'
 
 export const AUTH_ENGINE_VERSION = '1.0'
 export const AUTH_SESSION_KEY = 'agro-mar-auth-profile-v1'
@@ -41,7 +42,10 @@ export function canSeeHistory(profile) {
 
 export function canSeeTab(profile, tabKey) {
   if (isAdmin(profile)) return true
-  if (isMagazynier(profile)) return tabKey === 'kartoteki' || tabKey === 'archiwum-pdf'
+  if (isMagazynier(profile)) {
+    const tabs = getAppSettings().magazynier_visible_tabs
+    return (tabs?.length ? tabs : ['kartoteki', 'archiwum-pdf']).includes(tabKey)
+  }
   return false
 }
 

@@ -6,7 +6,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03DuplicateLotNumbers } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
@@ -59,6 +59,8 @@ import { LoginScreen } from './LoginScreen'
 import { HistorySection } from './HistorySection'
 import { PdfDocumentsSection } from './PdfDocumentsSection'
 import { UsersAdminSection } from './UsersAdminSection'
+import { AppSettingsSection } from './AppSettingsSection'
+import { loadAppSettings } from './appSettingsEngine'
 import {
   getCurrentSession, loadAppProfile, signOut, isAdmin, isMagazynier, canDelete, confirmDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
 } from './authEngine'
@@ -6826,6 +6828,7 @@ function App() {
       loadHaccpDocs({ syncK01: true })
       loadEmployees()
       loadAuxMaterials()
+      loadAppSettings(supabase)
     })()
   }, [authReady, authProfile?.auth_user_id, skipAuth])
 
@@ -8769,6 +8772,45 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  async function updateEmployee(employee, patch = {}) {
+    if (!supabase || !employee?.id) return
+    const payload = {}
+    if (patch.full_name != null) payload.full_name = String(patch.full_name).trim()
+    if (patch.role_name != null) payload.role_name = String(patch.role_name).trim() || 'przyjmujący'
+    if (!Object.keys(payload).length) return
+    try {
+      const { error } = await supabase.from('haccp_employees').update(payload).eq('id', employee.id)
+      if (error) throw error
+      await loadEmployees()
+      loadAuxMaterials()
+      setMessage(`Zaktualizowano pracownika: ${payload.full_name || employee.full_name}.`)
+    } catch (err) {
+      setMessage(`Błąd edycji pracownika: ${err.message}`)
+    }
+  }
+
+  async function repairK03LotDuplicatesFromSettings() {
+    if (!supabase) {
+      setMessage('Brak konfiguracji Supabase.')
+      return
+    }
+    try {
+      const result = await repairK03DuplicateLotNumbers(supabase, {
+        onProgress: msg => setMessage(String(msg))
+      })
+      await loadK03SnapshotsOnly()
+      await loadK03TraceData()
+      loadHaccpDocs({ syncK01: false })
+      if (!result.changed) {
+        setMessage('Partie K03: brak duplikatów do renumeracji (sekwencje zsynchronizowane).')
+      } else {
+        setMessage(`Renumerowano ${result.changed} kart K03 – jeden numer partii na WZ, kolejność wg daty WZ.`)
+      }
+    } catch (err) {
+      setMessage(`Naprawa partii K03: ${err.message}`)
+    }
+  }
+
   async function logAuditSoftDeleteEmployee(employee) {
     await logAudit(supabase, {
       entity_type: 'haccp_employee',
@@ -10573,19 +10615,19 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         onLogout={handleLogout}
       />
     )}
-    <section className="two">
-      <div className="card"><h2>Produkty i kody partii</h2><div className="chips">{PRODUCTS.map(([n,c]) => <span key={c}>{n} <b>{c}/001/2026</b></span>)}</div></div>
-      <div className="card"><h2>Zakładki dokumentów</h2>{DOCS.map(d => <div className="doc" key={d[0]}><b>{d[0]}</b><span>{d[1]}</span><small>{d[2]}</small></div>)}</div>
-    </section>
-    <section className="card">
-      <div className="section-title"><ShieldCheck/><div><h2>Pracownicy do podpisów</h2><p>Lista osób dostępnych w polu „Podpis przyjmującego” w kartotekach HACCP.</p></div></div>
-      <div className="form-grid compact">
-        <label>Imię i nazwisko pracownika<input value={newEmployeeName} onChange={e => setNewEmployeeName(e.target.value)} placeholder="np. Jan Kowalski" /></label>
-        <div className="actions employee-actions"><button className="secondary" onClick={addEmployee}>Dodaj pracownika</button></div>
-      </div>
-      {employees.length === 0 && <p className="hint">Brak pracowników. Dodaj pierwszą osobę, żeby można było wybierać podpis w K01.</p>}
-      {employees.length > 0 && <div className="table-wrap small"><table><thead><tr><th>Pracownik</th><th>Rola</th>{isAdmin(authProfile) && <th>Akcje</th>}</tr></thead><tbody>{employees.map(emp => <tr key={emp.id}><td><b>{emp.full_name}</b></td><td>{emp.role_name || 'przyjmujący'}</td>{isAdmin(authProfile) && <td><button className="mini danger" onClick={() => deleteEmployee(emp)}><Trash2 size={14}/> Usuń</button></td>}</tr>)}</tbody></table></div>}
-    </section>
+    <AppSettingsSection
+      supabase={supabase}
+      employees={employees}
+      addEmployee={addEmployee}
+      deleteEmployee={deleteEmployee}
+      updateEmployee={updateEmployee}
+      newEmployeeName={newEmployeeName}
+      setNewEmployeeName={setNewEmployeeName}
+      setMessage={setMessage}
+      authProfile={authProfile}
+      onRepairK03Lots={repairK03LotDuplicatesFromSettings}
+      docsCatalog={DOCS}
+    />
     </>}
   </div>
 }
