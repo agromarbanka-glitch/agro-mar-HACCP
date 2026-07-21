@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.9'
+export const HACCP_FORMS_VERSION = '2.0'
 
 function normalizeText(value) {
   return String(value || '')
@@ -215,18 +215,30 @@ export function normalizeK07Partia(value) {
 }
 
 /**
- * Stabilny klucz K07: jedna partia × jeden etap = max 1 wiersz (data może się różnić w duplikatach).
- * Priorytet: k03_key → numer partii → operation_id.
+ * Stabilny klucz K07: jedna partia × jeden etap = max 1 wiersz w kartotece.
+ * Partia ma pierwszeństwo (ta sama Pcz/006 z różnych K03 = jeden wiersz).
  */
 export function k07StableKey(doc) {
   const etap = doc?.data?.kontrola_etap || 'przed'
-  const k03Key = doc?.data?.k03_key
-  if (k03Key) return `k03:${k03Key}|${etap}`
   const partia = normalizeK07Partia(doc?.data?.numer_partii || doc?.lot_no)
   if (partia) return `partia:${partia}|${etap}`
+  const k03Key = doc?.data?.k03_key
+  if (k03Key) return `k03:${k03Key}|${etap}`
   const opId = doc?.data?.operation_id || doc?.operation_id
   if (opId) return `op:${opId}|${etap}`
   return `id:${doc?.id || ''}|${etap}`
+}
+
+/** Scala duplikaty K07 (ta sama partia+etap) – zostaje najpełniejszy wpis. */
+export function dedupeK07Docs(docs = []) {
+  const byKey = new Map()
+  for (const d of docs || []) {
+    if (d?.document_type !== 'K07') continue
+    const key = k07StableKey(d)
+    const existing = byKey.get(key)
+    if (!existing || scoreK07Doc(d) > scoreK07Doc(existing)) byKey.set(key, d)
+  }
+  return Array.from(byKey.values()).sort(k07DocSort)
 }
 
 export function k07CoverageForK03Key(haccpDocs, k03Key) {
@@ -331,7 +343,7 @@ export function k07AlreadyInDb(haccpDocs, doc) {
 }
 
 export function k07RowHideKey(doc) {
-  return k07DedupeKey(doc) || String(doc?.id || '').trim()
+  return k07StableKey(doc) || String(doc?.id || '').trim()
 }
 
 export function shouldIncludeK03InK07(k03) {

@@ -10,7 +10,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, scoreK07Doc, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, scoreK07Doc, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -380,6 +380,7 @@ function App() {
   const [k07Overrides, setK07Overrides] = useState({})
   const [k07ManualExtra, setK07ManualExtra] = useState([])
   const [k07BlankDrafts, setK07BlankDrafts] = useState({})
+  const [k07BlankSlots, setK07BlankSlots] = useState({})
   const [k07DeletePending, setK07DeletePending] = useState(null)
   const [k07BulkGodzina, setK07BulkGodzina] = useState('')
   const [k07BulkStanSita, setK07BulkStanSita] = useState('P')
@@ -2091,9 +2092,8 @@ function App() {
 
   function addK07ManualRow(group) {
     const period = group?.period || haccpMonth || ''
-    const startIndex = Math.max(group?.docs?.length || 0, k07ManualExtra.filter(d => String(d.id).startsWith(`K07-manual-${period}-`)).length)
-    ensureK07ManualRow(group, startIndex)
-    setMessage('K07: dodano pusty wiersz – kliknij komórkę i wpisz dane.')
+    setK07BlankSlots(prev => ({ ...prev, [period]: (prev[period] || 0) + 1 }))
+    setMessage('K07: dodano pusty wiersz na dole tabeli – wpisz dane i kliknij Zapisz.')
   }
 
   function hideK07Row(doc) {
@@ -3287,8 +3287,12 @@ function App() {
   const haccpMonthlyGroups = useMemo(() => {
     // Kartoteki zbiorcze korzystają z tych samych dokumentów co filtr okresu,
     // ale grupują je do kartotek miesięcznych/asortymentowych.
-    // Na stronie głównej NIE pokazujemy pojedynczych dostaw jako osobnych kartotek.
-    const source = haccpListDocs
+    // K07: zawsze scalone (bez duplikatów partii).
+    const k07ForGroups = mergedK07Docs.filter(d => matchesDocsDateRange(d.document_date))
+    const source = [
+      ...haccpListDocs.filter(d => d.document_type !== 'K07'),
+      ...k07ForGroups
+    ]
 
     const map = new Map()
     for (const doc of source) {
@@ -3326,10 +3330,10 @@ function App() {
           : g.type === 'K01'
             ? (products.length === 1 ? products[0] : 'według wpisów w tabeli')
             : g.product,
-        docs
+        docs: g.type === 'K07' ? dedupeK07Docs(docs) : docs
       }
     })
-  }, [haccpListDocs])
+  }, [haccpListDocs, mergedK07Docs, docsDateFrom, docsDateTo])
 
   const docsFilterStats = useMemo(() => {
     const filtersActive = Boolean(
@@ -4004,12 +4008,14 @@ function App() {
     }
     if (opened.type === 'K07') {
       const period = opened.period
-      const freshDocs = mergedK07Docs.filter(d => String(d.document_date || '').slice(0, 7) === period)
+      const freshDocs = dedupeK07Docs(
+        mergedK07Docs.filter(d => String(d.document_date || '').slice(0, 7) === period)
+      )
       return {
         ...(haccpMonthlyGroups.find(g => g.type === 'K07' && g.period === period) || opened),
         ...opened,
         period,
-        docs: freshDocs.length ? freshDocs.sort(k07DocSort) : (opened.docs || []).sort(k07DocSort)
+        docs: freshDocs
       }
     }
     const freshById = new Map((haccpDocs || []).map(d => [d.id, d]))
@@ -4294,13 +4300,80 @@ function App() {
 
     if (group.type === 'K07') {
       const period = group.period
-      const manualForPeriod = k07ManualExtra.filter(d => String(d.id).startsWith(`K07-manual-${period}-`))
-      const allDocs = [...docs, ...manualForPeriod.filter(m => !docs.some(d => d.id === m.id))].sort(k07DocSort)
-      const maxRows = Math.max(11, allDocs.length + 2)
+      const periodDocs = dedupeK07Docs([...docs].sort(k07DocSort))
+      const blankCount = 3 + (k07BlankSlots[period] || 0)
+
+      function renderK07BlankRow(bi) {
+        const draftKey = `${period}|blank|${bi}`
+        const defaultDraft = {
+          document_date: `${period}-01`,
+          kontrola_etap: 'przed',
+          godzina: '',
+          surowiec: '',
+          numer_partii: '',
+          stan_sita: 'P',
+          podpis_kontrolujacego: ''
+        }
+        const draft = k07BlankDrafts[draftKey] || defaultDraft
+        const patchDraft = (updates) => setK07BlankDrafts(prev => ({
+          ...prev,
+          [draftKey]: { ...(prev[draftKey] || defaultDraft), ...updates }
+        }))
+        const saveBlankRow = async () => {
+          const nextDraft = { ...(k07BlankDrafts[draftKey] || draft) }
+          if (!nextDraft.numer_partii?.trim() && !nextDraft.surowiec?.trim()) {
+            setMessage('K07: wpisz numer partii (np. Pcz/002/2026) lub surowiec, potem Zapisz.')
+            return
+          }
+          const manualId = `K07-manual-${period}-${Date.now()}-${bi}`
+          const rowDoc = buildManualK07BlankDoc(period, manualId, nextDraft)
+          const saved = await saveK07DocumentField(rowDoc, nextDraft)
+          if (saved) {
+            setK07BlankDrafts(prev => {
+              const next = { ...prev }
+              delete next[draftKey]
+              return next
+            })
+            setK07BlankSlots(prev => ({ ...prev, [period]: Math.max(0, (prev[period] || 0) - 1) }))
+            setMessage('K07: zapisano wiersz.')
+          }
+        }
+        return (
+          <tr className="blank-row editable-blank" key={draftKey}>
+            <td className="col-date">
+              <input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} />
+            </td>
+            <td className="col-etap">
+              <select className="mini-select no-print" value={draft.kontrola_etap} onChange={e => patchDraft({ kontrola_etap: e.target.value })}>
+                {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
+              </select>
+            </td>
+            <td className="col-time">
+              <input className="cell-input no-print" type="time" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="--:--" />
+            </td>
+            <td className="col-product left">
+              <input className="cell-input no-print wide" type="text" value={draft.surowiec} onChange={e => patchDraft({ surowiec: e.target.value })} placeholder="np. porzeczka czarna" />
+            </td>
+            <td className="col-lot">
+              <input className="cell-input no-print wide" type="text" value={draft.numer_partii} onChange={e => patchDraft({ numer_partii: e.target.value })} placeholder="np. Pcz/002/2026" />
+            </td>
+            <td className={`col-pn${draft.stan_sita === 'N' ? ' pn-n' : ''}`}>
+              <select className="mini-select no-print" value={draft.stan_sita} onChange={e => patchDraft({ stan_sita: e.target.value })}><option value="P">P</option><option value="N">N</option></select>
+            </td>
+            <td className="col-sign">
+              <select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+            </td>
+            <td className="col-actions no-print">
+              <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
+            </td>
+          </tr>
+        )
+      }
+
       return <div className="monthly-paper k02-original k07-original">
         <div className="no-print employee-signature-row k07-bulk-row" style={{marginBottom: '10px', flexWrap: 'wrap', gap: '10px'}}>
           <button type="button" className="mini secondary" onClick={() => addK07ManualRow(group)}>+ Dodaj wiersz</button>
-          {isAdmin(authProfile) && <button type="button" className="mini secondary" onClick={() => void clickRepairK07Duplicates()}>Napraw duplikaty K07</button>}
+          <button type="button" className="mini secondary" onClick={() => void clickRepairK07Duplicates()}>Napraw i uzupełnij K07</button>
           <label>Podpis (cała kolumna)
             <select value={defaultK07Employee} onChange={e => setDefaultK07Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
@@ -4333,90 +4406,26 @@ function App() {
         <table className="k07-table"><thead><tr>
           <th className="col-date">Data</th><th className="col-etap">Etap</th><th className="col-time">Godzina</th><th className="col-product">Rodzaj przerabianego surowca</th><th className="col-lot">Produkowany numer partii</th><th className="col-pn">Stan sita<br/>(P/N)*</th><th className="col-sign">Podpis kontrolującego</th><th className="col-actions no-print">Akcje</th>
         </tr></thead><tbody>
-          {Array.from({length: maxRows}).map((_,i) => {
-            const manualId = k07BlankRowId(period, i)
-            const baseDoc = allDocs[i] || k07ManualExtra.find(d => d.id === manualId) || null
-            if (!baseDoc) {
-              const draftKey = `${period}|${i}`
-              const defaultDraft = {
-                document_date: `${period}-01`,
-                kontrola_etap: 'przed',
-                godzina: '',
-                surowiec: '',
-                numer_partii: '',
-                stan_sita: 'P',
-                podpis_kontrolujacego: ''
-              }
-              const draft = k07BlankDrafts[draftKey] || defaultDraft
-              const patchDraft = (updates) => setK07BlankDrafts(prev => ({
-                ...prev,
-                [draftKey]: { ...(prev[draftKey] || defaultDraft), ...updates }
-              }))
-              const saveBlankRow = async () => {
-                const nextDraft = { ...(k07BlankDrafts[draftKey] || draft) }
-                if (!nextDraft.numer_partii?.trim() && !nextDraft.surowiec?.trim()) {
-                  setMessage('K07: wpisz numer partii lub surowiec, potem Zapisz wiersz.')
-                  return
-                }
-                const doc = buildManualK07BlankDoc(period, manualId, nextDraft)
-                const saved = await saveK07DocumentField(doc, nextDraft)
-                if (saved) {
-                  setK07BlankDrafts(prev => {
-                    const next = { ...prev }
-                    delete next[draftKey]
-                    return next
-                  })
-                  setMessage('K07: zapisano wiersz.')
-                }
-              }
-              return <tr className="blank-row editable-blank" key={`k07-blank-${i}`}>
-                <td className="col-date">
-                  <input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} />
-                </td>
-                <td className="col-etap">
-                  <select className="mini-select no-print" value={draft.kontrola_etap} onChange={e => patchDraft({ kontrola_etap: e.target.value })}>
-                    {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
-                  </select>
-                </td>
-                <td className="col-time">
-                  <input className="cell-input no-print" type="time" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="--:--" />
-                </td>
-                <td className="col-product left">
-                  <input className="cell-input no-print wide" type="text" value={draft.surowiec} onChange={e => patchDraft({ surowiec: e.target.value })} placeholder="np. porzeczka czarna" />
-                </td>
-                <td className="col-lot">
-                  <input className="cell-input no-print wide" type="text" value={draft.numer_partii} onChange={e => patchDraft({ numer_partii: e.target.value })} placeholder="np. Pcz/002/2026" />
-                </td>
-                <td className={`col-pn${draft.stan_sita === 'N' ? ' pn-n' : ''}`}>
-                  <select className="mini-select no-print" value={draft.stan_sita} onChange={e => patchDraft({ stan_sita: e.target.value })}><option value="P">P</option><option value="N">N</option></select>
-                </td>
-                <td className="col-sign">
-                  <select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
-                </td>
-                <td className="col-actions no-print">
-                  <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
-                </td>
-              </tr>
-            }
-            const doc = getLiveK07Doc(baseDoc, k07Overrides)
-            const d = normalizeK07Data(doc.data || {}, doc)
-            const docDate = doc.document_date || `${period}-01`
+          {periodDocs.map(doc => {
+            const liveDoc = getLiveK07Doc(doc, k07Overrides)
+            const d = normalizeK07Data(liveDoc.data || {}, liveDoc)
+            const docDate = liveDoc.document_date || `${period}-01`
             const godzina = d.godzina || ''
-            const surowiec = d.surowiec || doc.product_name || ''
-            const numerPartii = d.numer_partii || doc.lot_no || ''
+            const surowiec = d.surowiec || liveDoc.product_name || ''
+            const numerPartii = d.numer_partii || liveDoc.lot_no || ''
             const stan = formNormalizePn(d.stan_sita || 'P')
-            const signed = doc.signed_by_operator || d.podpis_kontrolujacego || ''
+            const signed = liveDoc.signed_by_operator || d.podpis_kontrolujacego || ''
             const etap = d.kontrola_etap || 'przed'
             const etapLabel = d.kontrola_label || (etap === 'przed' ? 'Przed przerobem' : etap === 'po' ? 'Po przerobie' : '')
             const onEtapChange = (value) => {
               const meta = K07_KONTROLA_ETAPY.find(e => e.id === value) || K07_KONTROLA_ETAPY[0]
-              setK07Override(doc, 'kontrola_etap', value)
-              setK07Override(doc, 'kontrola_label', meta.label)
-              void saveK07DocumentField(doc, { kontrola_etap: value, kontrola_label: meta.label })
+              setK07Override(liveDoc, 'kontrola_etap', value)
+              setK07Override(liveDoc, 'kontrola_label', meta.label)
+              void saveK07DocumentField(liveDoc, { kontrola_etap: value, kontrola_label: meta.label })
             }
-            return <tr key={doc.id}>
+            return <tr key={liveDoc.id}>
               <td className="col-date">
-                <input className="cell-input no-print" type="date" value={docDate} onChange={e => setK07Override(doc, 'document_date', e.target.value)} onBlur={e => void saveK07DocumentField(doc, { document_date: e.target.value })} />
+                <input className="cell-input no-print" type="date" value={docDate} onChange={e => setK07Override(liveDoc, 'document_date', e.target.value)} onBlur={e => void saveK07DocumentField(liveDoc, { document_date: e.target.value })} />
                 <span className="print-only">{docDate}</span>
               </td>
               <td className="col-etap">
@@ -4426,39 +4435,40 @@ function App() {
                 <span className="print-only">{etapLabel || '—'}</span>
               </td>
               <td className="col-time">
-                <input className="cell-input no-print" type="time" value={godzina} onChange={e => setK07Override(doc, 'godzina', e.target.value)} onBlur={e => void commitK07Override(doc, 'godzina', e.target.value)} placeholder="--:--" />
+                <input className="cell-input no-print" type="time" value={godzina} onChange={e => setK07Override(liveDoc, 'godzina', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'godzina', e.target.value)} placeholder="--:--" />
                 <span className="print-only">{godzina || '—'}</span>
               </td>
               <td className="col-product left">
-                <input className="cell-input no-print wide" type="text" value={surowiec} onChange={e => setK07Override(doc, 'surowiec', e.target.value)} onBlur={e => void commitK07Override(doc, 'surowiec', e.target.value)} placeholder="np. malina" />
+                <input className="cell-input no-print wide" type="text" value={surowiec} onChange={e => setK07Override(liveDoc, 'surowiec', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'surowiec', e.target.value)} placeholder="np. malina" />
                 <span className="print-only">{surowiec}</span>
               </td>
               <td className="col-lot">
-                <input className="cell-input no-print wide" type="text" value={numerPartii} onChange={e => setK07Override(doc, 'numer_partii', e.target.value)} onBlur={e => void commitK07Override(doc, 'numer_partii', e.target.value)} placeholder="nr partii" />
+                <input className="cell-input no-print wide" type="text" value={numerPartii} onChange={e => setK07Override(liveDoc, 'numer_partii', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'numer_partii', e.target.value)} placeholder="nr partii" />
                 <span className="print-only">{numerPartii}</span>
               </td>
               <td className={`col-pn${stan === 'N' ? ' pn-n' : ''}`}>
-                <select className="mini-select no-print" value={stan} onChange={e => void commitK07Override(doc, 'stan_sita', e.target.value)}><option value="P">P</option><option value="N">N</option></select>
+                <select className="mini-select no-print" value={stan} onChange={e => void commitK07Override(liveDoc, 'stan_sita', e.target.value)}><option value="P">P</option><option value="N">N</option></select>
                 <span className="print-only">{stan}</span>
               </td>
               <td className="col-sign">
-                <select className="mini-select no-print" value={signed} onChange={e => void commitK07Override(doc, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                <select className="mini-select no-print" value={signed} onChange={e => void commitK07Override(liveDoc, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
                 <span className="print-only">{signed}</span>
               </td>
               <td className="col-actions no-print k07-actions">
-                {k07DeletePending === doc.id ? (
+                {k07DeletePending === liveDoc.id ? (
                   <span className="k07-delete-confirm">
-                    <button type="button" className="mini danger" onClick={() => void deleteK07Row(doc)}>Potwierdź usunięcie</button>
+                    <button type="button" className="mini danger" onClick={() => void deleteK07Row(liveDoc)}>Potwierdź usunięcie</button>
                     <button type="button" className="mini secondary" onClick={() => setK07DeletePending(null)}>Anuluj</button>
                   </span>
                 ) : (
-                  <button type="button" className="mini danger" onClick={() => setK07DeletePending(doc.id)} title="Usuń wiersz (wymaga potwierdzenia)">Usuń</button>
+                  <button type="button" className="mini danger" onClick={() => setK07DeletePending(liveDoc.id)} title="Usuń wiersz (wymaga potwierdzenia)">Usuń</button>
                 )}
               </td>
             </tr>
           })}
+          {Array.from({ length: blankCount }).map((_, bi) => renderK07BlankRow(bi))}
         </tbody></table>
-        <p className="hint no-print">K07: 2 wpisy na partię (przed/po). Jedna partia = max 1 wiersz na etap. Brakujące wpisy powstają z K03 (decyzja: przerób malina/porzeczka). Pusty wiersz: wpisz partię → „Zapisz”. Kolumny formularza są stałe (norma HACCP). Duplikaty: „Napraw duplikaty K07” lub Odśwież kartoteki.</p>
+        <p className="hint no-print">K07: 2 wpisy na partię (przed + po). Ta sama partia (np. Pcz/006/2026) = max 1 wiersz na etap. Brakujące wpisy z K03 (przerób malina/porzeczka). „+ Dodaj wiersz” = nowy pusty wiersz na dole. „Napraw i uzupełnij K07” usuwa duplikaty z bazy i dokleja brakujące z K03. Sprawdź też kartotekę poprzedniego miesiąca (np. Pcz/002 może być w czerwcu).</p>
       </div>
     }
 
@@ -9250,16 +9260,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
   async function clickRepairK07Duplicates() {
     if (!supabase) return
-    setMessage('K07: szukam duplikatów…')
+    setMessage('K07: naprawiam duplikaty i uzupełniam brakujące wpisy…')
     try {
-      const data = haccpDocs?.length ? haccpDocs : await fetchAllHaccpDocuments(supabase)
+      let data = await fetchAllHaccpDocuments(supabase)
       const removed = await repairK07DuplicateDocuments(data)
+      if (removed > 0) data = await fetchAllHaccpDocuments(supabase)
       const k03Forms = (data || []).filter(d => d.document_type === 'K03')
       const added = await syncAutoK07Documents(k03Forms, data)
       await loadHaccpDocs({ force: true, syncK01: false })
       setMessage(removed || added
         ? `K07: usunięto ${removed} duplikatów, dodano ${added} brakujących wpisów z K03.`
-        : 'K07: brak duplikatów do usunięcia.')
+        : 'K07: brak duplikatów. Jeśli brakuje partii – sprawdź K03 (decyzja: przerób) lub dodaj wiersz ręcznie.')
     } catch (err) {
       setMessage(`K07: ${err.message}`)
     }
