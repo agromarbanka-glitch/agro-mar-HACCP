@@ -2153,6 +2153,7 @@ function App() {
     const docs = dedupeK04Docs([...(group?.docs || [])].sort(k04DocSort))
     const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
     insertKartotekaRowAt(group, idx, k04DefaultDraft(period))
+    setMessage('K04: dodano pusty wiersz – uzupełnij kolumny i kliknij Zapisz.')
   }
 
   function addK07ManualRow(group, afterIndex = null) {
@@ -2168,6 +2169,7 @@ function App() {
     const docs = [...(group?.docs || [])].sort((a, b) => String(a.document_date || '').localeCompare(String(b.document_date || '')))
     const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
     insertKartotekaRowAt(group, idx, k02DefaultDraft(period))
+    setMessage('K02: dodano pusty wiersz – uzupełnij kolumny i kliknij Zapisz.')
   }
 
   function addK06ManualRow(group, afterIndex = null) {
@@ -2179,6 +2181,7 @@ function App() {
       product_name: '',
       lot_no: ''
     })
+    setMessage('K06: dodano pusty wiersz – uzupełnij kolumny i kliknij Zapisz.')
   }
 
   function shiftK04NewMonth(delta) {
@@ -4538,7 +4541,7 @@ function App() {
             }
           })}
         </tbody></table>
-        <p className="hint no-print">K02: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć.</p>
+        <p className="hint no-print">K02: najedź na dolną krawędź wiersza – pojawi się mały „+” (jak w Wordzie). Kliknij, aby wstawić pusty wiersz. Usuń w kolumnie Akcje.</p>
       </div>
     }
 
@@ -4637,7 +4640,7 @@ function App() {
           })}
         </tbody></table>
         {periodDocs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: w tym dniu magazynowano różne asortymenty – sprawdź wpisy.</div>}
-        <p className="hint no-print">K04: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć (Akcje → Usuń).</p>
+        <p className="hint no-print">K04: najedź na dolną krawędź wiersza – mały „+” wstawia pusty wiersz. Usuń w kolumnie Akcje.</p>
       </div>
     }
 

@@ -52,11 +52,38 @@ export function kartotekaEndAfterIndex(docs) {
   return docs.length > 0 ? docs.length - 1 : -1
 }
 
-export function KartotekaInsertGap({ colSpan, onInsert, title = 'Dodaj wiersz tutaj' }) {
+function cloneRowWithClass(row, extraClass) {
+  if (!React.isValidElement(row)) return row
+  const prev = row.props.className || ''
+  const classes = `${prev} ${extraClass}`.trim()
+  return React.cloneElement(row, { className: classes })
+}
+
+/** Delikatny „+” na krawędzi między wierszami – bez rozszerzania tabeli. */
+export function KartotekaInsertRail({ colSpan, afterIndex, onInsertAt, placement = 'between' }) {
+  const handleInsert = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    onInsertAt(afterIndex)
+  }
   return (
-    <tr className="kartoteka-insert-gap no-print" aria-hidden="true">
-      <td colSpan={colSpan}>
-        <button type="button" className="kartoteka-insert-btn" onClick={onInsert} title={title} aria-label={title}>+</button>
+    <tr
+      className={`kartoteka-insert-rail no-print${placement === 'lead' ? ' kartoteka-insert-rail--lead' : ''}`}
+      aria-hidden="true"
+    >
+      <td colSpan={colSpan} className="kartoteka-insert-rail-cell">
+        <div className="kartoteka-insert-hit">
+          <button
+            type="button"
+            className="kartoteka-insert-btn"
+            onClick={handleInsert}
+            onMouseDown={e => e.stopPropagation()}
+            title="Dodaj wiersz tutaj"
+            aria-label="Dodaj wiersz tutaj"
+          >
+            +
+          </button>
+        </div>
       </td>
     </tr>
   )
@@ -75,7 +102,7 @@ export function KartotekaRowDeleteButton({ active, onRequest, onConfirm, onCance
 }
 
 /**
- * Wiersze kartoteki z „plusikami” między liniami (najedź na wiersz lub przerwę).
+ * Wiersze kartoteki z „+” na krawędzi linii (Word-style).
  */
 export function renderKartotekaTableBody({
   docs,
@@ -88,24 +115,40 @@ export function renderKartotekaTableBody({
 }) {
   const interleaved = buildInterleavedKartotekaRows(docs, groupKey, pendingRows)
   const elements = []
+
   elements.push(
-    <KartotekaInsertGap key="gap-lead" colSpan={colSpan} onInsert={() => onInsertAt(-1)} />
+    <KartotekaInsertRail
+      key="rail-lead"
+      colSpan={colSpan}
+      afterIndex={-1}
+      onInsertAt={onInsertAt}
+      placement="lead"
+    />
   )
-  let lastDocIndex = -1
+
   for (const item of interleaved) {
     if (item.kind === 'doc') {
-      elements.push(renderDocRow(item.doc, item.index))
-      lastDocIndex = item.index
+      elements.push(cloneRowWithClass(renderDocRow(item.doc, item.index), 'kartoteka-editable-row'))
+      elements.push(
+        <KartotekaInsertRail
+          key={`rail-after-doc-${item.index}`}
+          colSpan={colSpan}
+          afterIndex={item.index}
+          onInsertAt={onInsertAt}
+        />
+      )
     } else {
-      elements.push(renderPendingRow(item.pending))
+      elements.push(cloneRowWithClass(renderPendingRow(item.pending), 'kartoteka-editable-row kartoteka-pending-row'))
+      elements.push(
+        <KartotekaInsertRail
+          key={`rail-after-pending-${item.pending.id}`}
+          colSpan={colSpan}
+          afterIndex={item.pending.afterIndex}
+          onInsertAt={onInsertAt}
+        />
+      )
     }
-    elements.push(
-      <KartotekaInsertGap
-        key={`gap-after-${item.kind === 'doc' ? `doc-${item.index}` : `pending-${item.pending.id}`}`}
-        colSpan={colSpan}
-        onInsert={() => onInsertAt(lastDocIndex)}
-      />
-    )
   }
+
   return elements
 }
