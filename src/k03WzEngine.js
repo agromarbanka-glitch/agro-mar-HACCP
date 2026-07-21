@@ -244,6 +244,8 @@ async function allocateK03LotNo(client, productName, productId, productMap, refe
   const product = productMap?.get?.(productId)
   const prefixRules = getK03PrefixRules()
   const code = inferK03LotCode(productName, product, { ...options, prefixRules })
+  // Numer partii dopiero przy zapisie przerobu (nie wcześniej dla WZ w kolejce).
+  // Kolejność = kolejność przerobów: kto pierwszy zapisze K03, dostaje niższy numer.
   if (client) {
     try {
       const allocated = await allocateK03LotNoRpc(client, code, year)

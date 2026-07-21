@@ -8804,7 +8804,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       if (!result.changed) {
         setMessage('Partie K03: brak duplikatów do renumeracji (sekwencje zsynchronizowane).')
       } else {
-        setMessage(`Renumerowano ${result.changed} kart K03 – jeden numer partii na WZ, kolejność wg daty WZ.`)
+        setMessage(`Renumerowano ${result.changed} zduplikowanych kart K03 – numer wg kolejności przerobu, nie daty WZ.`)
       }
     } catch (err) {
       setMessage(`Naprawa partii K03: ${err.message}`)

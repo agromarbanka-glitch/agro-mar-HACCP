@@ -97,7 +97,7 @@ export function AppSettingsSection({
   async function repairLots() {
     if (!onRepairK03Lots) return
     if (!window.confirm(
-      'Renumerować partie K03 wg daty WZ?\n\nJeden numer partii = jedna WZ. Duplikaty (np. kilka kart z Pcz/006/2026) dostaną kolejne numery w obrębie kodu i roku.\n\nKontynuować?'
+      'Renumerować tylko zduplikowane numery partii K03?\n\nTa sama partia na 2+ kartach: starszy przerób zostaje, pozostałe dostaną kolejny wolny numer.\n\nKontynuować?'
     )) return
     setRepairing(true)
     try {
@@ -122,7 +122,7 @@ export function AppSettingsSection({
           <ShieldCheck />
           <div>
             <h2>Numeracja partii K03 (wyroby gotowe)</h2>
-            <p>Jeden numer partii = jedna WZ. Kolejność wg daty WZ. Porzeczka bez przerobu: Pcz/001/2026, z przerobem: Pczp/001/2026. Nowy rok startuje od /001/ automatycznie.</p>
+            <p>Jeden numer partii = jedna zapisana K03. Numer nadaje się dopiero przy przerobie (nie wcześniej dla WZ w kolejce). Kto pierwszy przerabia w roku, dostaje /001/, kolejny przerób /002/ itd. – niezależnie od daty WZ.</p>
           </div>
         </div>
         <div className="form-grid compact">

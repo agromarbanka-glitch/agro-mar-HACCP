@@ -3,7 +3,7 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-import { getK03PrefixRules, syncK03LotSequences } from './appSettingsEngine'
+import { getK03PrefixRules, syncK03LotSequences, allocateK03LotNoRpc } from './appSettingsEngine'
 
 export const K03_ENGINE_VERSION = '4.0'
 
@@ -266,56 +266,16 @@ export function formatK03Receiver(value) {
   return text.replace(/agro[-\s]*mar[^/]*/gi, '').replace(/\s+/g, ' ').trim()
 }
 
-function assignFinishedLotNumbers(forms, productMap, prefixRules = null) {
-  const sorted = [...(forms || [])].sort((a, b) =>
-    String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
-    String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
-    String(a.id || '').localeCompare(String(b.id || ''))
-  )
-  const lotById = new Map()
-  const assignedInRun = []
-  const usedLotNos = new Set()
-  for (const form of sorted) {
-    if (preservedK03LotNo(form)) {
-      usedLotNos.add(preservedK03LotNo(form).toLowerCase())
-      continue
-    }
-    const product = productMap?.get?.(form.data?.product_id)
-    const wf = form.data?.k03_workflow || {}
-    const mode = wf.mode || 'bez_przerobu'
-    const year = k03LotReferenceYear(mode === 'przerob' ? (wf.przerob_date || form.document_date) : form.document_date)
-    const code = inferK03LotCode(form.product_name, product, { mode, prefixRules })
-    let seq = nextK03LotSequence([...(forms || []), ...assignedInRun], code, year)
-    let lotNo = formatK03LotNo(code, seq, year)
-    while (usedLotNos.has(lotNo.toLowerCase())) {
-      seq += 1
-      lotNo = formatK03LotNo(code, seq, year)
-    }
-    usedLotNos.add(lotNo.toLowerCase())
-    lotById.set(form.id, lotNo)
-    assignedInRun.push({ ...form, lot_no: lotNo })
-  }
-  return (forms || []).map(form => {
-    const preserved = preservedK03LotNo(form)
-    if (preserved) return form
-    return lotById.has(form.id) ? { ...form, lot_no: lotById.get(form.id) } : form
-  })
-}
 
 function finalizeK03LotNumbers(forms, productMap, outputLotByKey = new Map()) {
-  const toAssign = []
-  const withDbLot = (forms || []).map(form => {
+  return (forms || []).map(form => {
     if (preservedK03LotNo(form)) return form
     const dbKey = `${form.data?.sale_operation_id}|${form.data?.product_id || 'null'}`
     const fromDb = outputLotByKey.get(dbKey)
     if (fromDb) return { ...form, lot_no: fromDb }
-    toAssign.push(form)
+    // Bez numeru partii do momentu przerobu – numer nadaje się dopiero przy zapisie K03.
     return form
   })
-  if (!toAssign.length) return withDbLot
-  const assigned = assignFinishedLotNumbers(toAssign, productMap, getK03PrefixRules())
-  const assignedMap = new Map(assigned.map(f => [f.id, f.lot_no]))
-  return withDbLot.map(form => assignedMap.has(form.id) ? { ...form, lot_no: assignedMap.get(form.id) } : form)
 }
 
 export function buildK03PaperData(doc) {
@@ -1737,41 +1697,46 @@ export function parseK03LotNo(lotNo) {
   return { code: m[1], seq: Number(m[2]) || 0, year }
 }
 
+/** Kolejność przerobu K03 (nie data WZ) – do ustalania, która karta była pierwsza. */
+export function k03ProcessingOrderKey(doc) {
+  const wf = doc?.data?.k03_workflow || {}
+  return String(
+    wf.created_at ||
+    wf.updated_at ||
+    doc?.updated_at ||
+    doc?.created_at ||
+    wf.przerob_date ||
+    doc?.document_date ||
+    ''
+  )
+}
+
 /**
- * Renumeruje partie K03 w obrębie kodu+rok wg daty WZ (1 WZ = 1 numer, bez duplikatów).
- * Aktualizuje haccp_documents (k03_workflow.lot_no).
+ * Usuwa duplikaty numerów partii (ten sam lot_no na 2+ kartach).
+ * Pierwsza karta wg momentu przerobu zostaje; pozostałe dostają kolejny wolny numer.
  */
 export async function repairK03DuplicateLotNumbers(client, { onProgress } = {}) {
   if (!client) throw new Error('Brak połączenia z bazą')
 
   const { data: docs, error } = await client
     .from('haccp_documents')
-    .select('id, document_no, document_date, product_name, lot_no, data')
+    .select('id, document_no, document_date, product_name, lot_no, data, created_at, updated_at')
     .eq('document_type', 'K03')
-    .order('document_date', { ascending: true })
   if (error) throw error
 
   const withLot = (docs || []).filter(d => parseK03LotNo(d.lot_no))
-  const buckets = new Map()
+  const byLot = new Map()
   for (const doc of withLot) {
-    const p = parseK03LotNo(doc.lot_no)
-    const key = `${p.code.toUpperCase()}|${p.year}`
-    if (!buckets.has(key)) buckets.set(key, [])
-    buckets.get(key).push(doc)
+    const k = String(doc.lot_no || '').trim().toLowerCase()
+    if (!byLot.has(k)) byLot.set(k, [])
+    byLot.get(k).push(doc)
   }
 
   const updates = []
-  for (const group of buckets.values()) {
-    group.sort((a, b) =>
-      String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
-      String(a.document_no || '').localeCompare(String(b.document_no || '')) ||
-      String(a.id).localeCompare(String(b.id))
-    )
-    const parsed = parseK03LotNo(group[0].lot_no)
-    group.forEach((doc, idx) => {
-      const newLot = formatK03LotNo(parsed.code, idx + 1, parsed.year)
-      if (newLot !== doc.lot_no) updates.push({ doc, newLot })
-    })
+  for (const group of byLot.values()) {
+    if (group.length <= 1) continue
+    group.sort((a, b) => k03ProcessingOrderKey(a).localeCompare(k03ProcessingOrderKey(b)))
+    for (let i = 1; i < group.length; i++) updates.push(group[i])
   }
 
   if (!updates.length) {
@@ -1779,26 +1744,25 @@ export async function repairK03DuplicateLotNumbers(client, { onProgress } = {}) 
     return { changed: 0, duplicatesBefore: 0 }
   }
 
-  const lotCounts = new Map()
-  for (const d of withLot) {
-    const k = String(d.lot_no || '').toLowerCase()
-    lotCounts.set(k, (lotCounts.get(k) || 0) + 1)
-  }
-  const duplicatesBefore = [...lotCounts.values()].filter(n => n > 1).length
-
   let changed = 0
   for (let i = 0; i < updates.length; i++) {
-    const { doc, newLot } = updates[i]
-    onProgress?.(`Renumeracja K03 ${i + 1}/${updates.length}: ${doc.lot_no} → ${newLot}`)
+    const doc = updates[i]
+    const parsed = parseK03LotNo(doc.lot_no)
+    onProgress?.(`Nowy numer dla duplikatu ${i + 1}/${updates.length}: ${doc.lot_no}`)
+    let newLot = null
+    try {
+      newLot = await allocateK03LotNoRpc(client, parsed.code, Number(parsed.year))
+    } catch { /* v49 */ }
+    if (!newLot) {
+      const seq = nextK03LotSequence(withLot, parsed.code, parsed.year)
+      newLot = formatK03LotNo(parsed.code, seq, parsed.year)
+    }
     const nextData = {
       ...(doc.data || {}),
       k03_workflow: doc.data?.k03_workflow
         ? { ...doc.data.k03_workflow, lot_no: newLot }
         : doc.data?.k03_workflow,
-      k03_edits: {
-        ...(doc.data?.k03_edits || {}),
-        lot_no: newLot
-      }
+      k03_edits: { ...(doc.data?.k03_edits || {}), lot_no: newLot }
     }
     const { error: updErr } = await client
       .from('haccp_documents')
@@ -1809,5 +1773,5 @@ export async function repairK03DuplicateLotNumbers(client, { onProgress } = {}) 
   }
 
   await syncK03LotSequences(client).catch(() => {})
-  return { changed, duplicatesBefore, updates: updates.map(u => ({ id: u.doc.id, from: u.doc.lot_no, to: u.newLot })) }
+  return { changed, duplicatesBefore: updates.length }
 }
