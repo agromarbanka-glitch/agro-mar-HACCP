@@ -1288,6 +1288,56 @@ button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); 
   box-shadow: 0 0 0 2px rgba(156, 163, 175, 0.35);
 }
 .kartoteka-print-badge:hover { opacity: 0.82; }
+
+/* Wstawianie wierszy między liniami kartoteki (plusik po najechaniu) */
+.kartoteka-insert-gap td {
+  height: 0;
+  padding: 0 !important;
+  border: none !important;
+  line-height: 0;
+  position: relative;
+  background: transparent !important;
+}
+.kartoteka-insert-gap .kartoteka-insert-btn {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #94a3b8;
+  background: #fff;
+  color: #2563eb;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+  z-index: 2;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+.k02-table tbody tr:hover + tr.kartoteka-insert-gap .kartoteka-insert-btn,
+.k06-table tbody tr:hover + tr.kartoteka-insert-gap .kartoteka-insert-btn,
+.k07-table tbody tr:hover + tr.kartoteka-insert-gap .kartoteka-insert-btn,
+.k01-table tbody tr:hover + tr.kartoteka-insert-gap .kartoteka-insert-btn,
+.k011-table tbody tr:hover + tr.kartoteka-insert-gap .kartoteka-insert-btn,
+.kartoteka-insert-gap:hover .kartoteka-insert-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.kartoteka-insert-gap .kartoteka-insert-btn:hover {
+  background: #eff6ff;
+  border-color: #2563eb;
+}
+.kartoteka-delete-confirm { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+@media print {
+  .kartoteka-insert-gap { display: none !important; }
+}
+
 @media (max-width: 960px) {
   .pdf-archive-layout { grid-template-columns: 1fr; }
   .pdf-upload-form { grid-template-columns: 1fr; }

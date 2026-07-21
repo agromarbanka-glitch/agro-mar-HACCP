@@ -161,3 +161,60 @@ export function mergeK02DisplayDocs(haccpDocs, k01Docs, overrides = {}) {
 export function k02GroupHasManualMonth(docs = []) {
   return docs.some(d => d.data?.manual_month || d.data?.month_key)
 }
+
+export function isSyntheticK02Doc(doc) {
+  if (!doc || doc.document_type !== 'K02') return false
+  if (doc.synthetic) return true
+  const id = String(doc.id || '')
+  if (id.startsWith('K02-manual-')) return true
+  return id.startsWith('K02-') && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+}
+
+export function buildManualK02BlankDoc(period, manualId, seed = {}) {
+  const date = String(seed.document_date || `${period}-01`).slice(0, 10)
+  const id = manualId || `K02-manual-${period}-${Date.now()}`
+  return {
+    id,
+    synthetic: true,
+    document_type: 'K02',
+    document_date: date,
+    product_name: 'CP2 – magazyn surowca',
+    lot_no: '',
+    document_no: `K02/reczny/${date}`,
+    chamber_code: 'CP2',
+    qty: 0,
+    status: 'P',
+    data: normalizeK02Data({
+      godzina: seed.godzina || '',
+      temperatura_chlodnia_1: seed.temperatura_chlodnia_1 ?? '',
+      temperatura_chlodnia_2: seed.temperatura_chlodnia_2 ?? '',
+      podpis_kontrolujacego: seed.podpis_kontrolujacego || '',
+      uwagi: seed.uwagi || 'P',
+      month_key: period,
+      auto_source: 'manual'
+    }),
+    signed_by_operator: seed.podpis_kontrolujacego || '',
+    document_version: 'I/2024',
+    created_at: date
+  }
+}
+
+export function buildK02InsertPayload(doc) {
+  const d = normalizeK02Data(doc.data || {}, doc.signed_by_operator)
+  if (!d.month_key && doc.document_date) d.month_key = String(doc.document_date).slice(0, 7)
+  return {
+    document_type: 'K02',
+    lot_id: null,
+    operation_id: null,
+    document_date: doc.document_date,
+    product_name: doc.product_name || 'CP2 – magazyn surowca',
+    lot_no: null,
+    document_no: doc.document_no || `K02/${doc.document_date || 'brak'}`,
+    chamber_code: doc.chamber_code || 'CP2',
+    qty: doc.qty || 0,
+    status: doc.status || (normalizePn(d.uwagi) === 'N' ? 'N' : 'P'),
+    data: d,
+    signed_by_operator: doc.signed_by_operator || d.podpis_kontrolujacego || null,
+    document_version: 'I/2024'
+  }
+}

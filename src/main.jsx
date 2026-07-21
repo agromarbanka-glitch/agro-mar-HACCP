@@ -13,8 +13,13 @@ import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFro
 import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
-  K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
+  K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth,
+  buildManualK02BlankDoc, buildK02InsertPayload, isSyntheticK02Doc
 } from './k02Engine'
+import {
+  kartotekaGroupRowKey, addKartotekaPendingRow, patchKartotekaPendingRow, removeKartotekaPendingRow,
+  renderKartotekaTableBody, KartotekaRowDeleteButton, kartotekaEndAfterIndex
+} from './kartotekaRowUi'
 import { computeDashboardCompliance, complianceStatusLabel, complianceStatusClass } from './dashboardComplianceEngine'
 import { WYKAZY_CARDS, WYKAZY_ENGINE_VERSION } from './wykazyEngine'
 import { RAPORTY_CARDS, RAPORTY_ENGINE_VERSION } from './raportyEngine'
@@ -366,8 +371,7 @@ function App() {
   const [k02Overrides, setK02Overrides] = useState({})
   const [k04Overrides, setK04Overrides] = useState({})
   const [k04ManualExtra, setK04ManualExtra] = useState([])
-  const [k04BlankSlots, setK04BlankSlots] = useState({})
-  const [k04BlankDrafts, setK04BlankDrafts] = useState({})
+  const [kartotekaPendingRows, setKartotekaPendingRows] = useState({})
   const [k04DeletePending, setK04DeletePending] = useState(null)
   const [k04HiddenKeys, setK04HiddenKeys] = useState(() => new Set())
   const [k04NewMonth, setK04NewMonth] = useState(new Date().toISOString().slice(0, 7))
@@ -387,9 +391,8 @@ function App() {
   })
   const [k07Overrides, setK07Overrides] = useState({})
   const [k07ManualExtra, setK07ManualExtra] = useState([])
-  const [k07BlankDrafts, setK07BlankDrafts] = useState({})
-  const [k07BlankSlots, setK07BlankSlots] = useState({})
   const [k07DeletePending, setK07DeletePending] = useState(null)
+  const [k02DeletePending, setK02DeletePending] = useState(null)
   const [k07BulkGodzina, setK07BulkGodzina] = useState('')
   const [k07BulkStanSita, setK07BulkStanSita] = useState('P')
   const [defaultK07Employee, setDefaultK07Employee] = useState('')
@@ -2107,9 +2110,75 @@ function App() {
     setK04DeletePending(null)
   }
 
-  function addK04ManualRow(group) {
+  function k04DefaultDraft(period) {
+    return {
+      document_date: `${period}-01`,
+      godzina: '',
+      temperatura_chlodnia_1: '',
+      temperatura_chlodnia_2: '',
+      podpis_kontrolujacego: '',
+      uwagi: 'P'
+    }
+  }
+
+  function k07DefaultDraft(period) {
+    return {
+      document_date: `${period}-01`,
+      kontrola_etap: 'przed',
+      godzina: '',
+      surowiec: '',
+      numer_partii: '',
+      stan_sita: 'P',
+      podpis_kontrolujacego: ''
+    }
+  }
+
+  function k02DefaultDraft(period) {
+    return {
+      document_date: `${period}-01`,
+      godzina: '',
+      temperatura_chlodnia_1: '',
+      temperatura_chlodnia_2: '',
+      podpis_kontrolujacego: '',
+      uwagi: 'P'
+    }
+  }
+
+  function insertKartotekaRowAt(group, afterIndex, draft) {
+    addKartotekaPendingRow(setKartotekaPendingRows, kartotekaGroupRowKey(group), afterIndex, draft)
+  }
+
+  function addK04ManualRow(group, afterIndex = null) {
     const period = group?.period || haccpMonth
-    setK04BlankSlots(prev => ({ ...prev, [period]: (prev[period] || 0) + 1 }))
+    const docs = dedupeK04Docs([...(group?.docs || [])].sort(k04DocSort))
+    const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
+    insertKartotekaRowAt(group, idx, k04DefaultDraft(period))
+  }
+
+  function addK07ManualRow(group, afterIndex = null) {
+    const period = group?.period || haccpMonth || ''
+    const docs = dedupeK07Docs([...(group?.docs || [])].sort(k07DocSort))
+    const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
+    insertKartotekaRowAt(group, idx, k07DefaultDraft(period))
+    setMessage('K07: dodano pusty wiersz – wpisz dane i kliknij Zapisz.')
+  }
+
+  function addK02ManualRow(group, afterIndex = null) {
+    const period = group?.period || haccpMonth
+    const docs = [...(group?.docs || [])].sort((a, b) => String(a.document_date || '').localeCompare(String(b.document_date || '')))
+    const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
+    insertKartotekaRowAt(group, idx, k02DefaultDraft(period))
+  }
+
+  function addK06ManualRow(group, afterIndex = null) {
+    const period = group?.period || haccpMonth
+    const docs = [...(group?.docs || [])].sort((a, b) => String(a.document_date || '').localeCompare(String(b.document_date || '')))
+    const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
+    insertKartotekaRowAt(group, idx, {
+      document_date: `${period}-01`,
+      product_name: '',
+      lot_no: ''
+    })
   }
 
   function shiftK04NewMonth(delta) {
@@ -2269,12 +2338,6 @@ function App() {
     const blank = buildManualK07BlankDoc(period, id, { document_date: `${period}-01` })
     setK07ManualExtra(prev => [...prev, blank])
     return id
-  }
-
-  function addK07ManualRow(group) {
-    const period = group?.period || haccpMonth || ''
-    setK07BlankSlots(prev => ({ ...prev, [period]: (prev[period] || 0) + 1 }))
-    setMessage('K07: dodano pusty wiersz na dole tabeli – wpisz dane i kliknij Zapisz.')
   }
 
   function hideK07Row(doc) {
@@ -3338,7 +3401,93 @@ function App() {
         }
       }
     })
-    if (isPersistedHaccpDoc(doc)) saveK02FieldToDb(doc, field, value)
+    void saveK02DocumentField(doc, { [field]: value })
+  }
+
+  async function saveK02DocumentField(doc, patch = {}) {
+    if (!supabase || !doc) {
+      setMessage('Brak bazy – zapis K02 wymaga Supabase.')
+      return null
+    }
+    try {
+      const live = getLiveK02Doc({
+        ...doc,
+        data: { ...(doc.data || {}), ...(k02Overrides[doc.id] || {}), ...patch },
+        ...(patch.document_date !== undefined ? { document_date: patch.document_date } : {})
+      })
+
+      if (isPersistedHaccpDoc(doc)) {
+        const nextData = { ...(doc.data || {}), ...(k02Overrides[doc.id] || {}), ...patch }
+        if (patch.uwagi !== undefined) nextData.uwagi = normalizePN(patch.uwagi)
+        const payload = {
+          data: nextData,
+          updated_at: new Date().toISOString()
+        }
+        if (patch.podpis_kontrolujacego !== undefined) payload.signed_by_operator = patch.podpis_kontrolujacego || null
+        if (patch.uwagi !== undefined) payload.status = normalizePN(patch.uwagi)
+        if (patch.document_date !== undefined) payload.document_date = String(patch.document_date).slice(0, 10)
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+        if (error) throw error
+        setK02Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        mergeHaccpDoc(doc.id, payload)
+        return { ...doc, ...payload }
+      }
+
+      if (isSyntheticK02Doc(doc)) {
+        const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK02InsertPayload(live)).select('*').single()
+        if (error) throw error
+        setK02Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        mergeHaccpDoc(inserted.id, inserted)
+        return inserted
+      }
+      return live
+    } catch (err) {
+      setMessage(`K02: błąd zapisu – ${err.message}`)
+      return null
+    }
+  }
+
+  async function deleteK02Row(doc) {
+    if (!doc) return
+    if (isPersistedHaccpDoc(doc)) {
+      if (!ensureCanDelete()) return
+      if (!confirmDelete(`Wiersz K02 z dnia ${doc.document_date || '—'}.`)) return
+      try {
+        await auditDeleteHaccpDocument(supabase, doc, getAuditActor())
+        setK02Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        if (selectedHaccpDoc?.groupPreview) {
+          setSelectedHaccpDoc(prev => prev ? {
+            ...prev,
+            group: { ...prev.group, docs: (prev.group.docs || []).filter(d => d.id !== doc.id) }
+          } : prev)
+        }
+        await loadHaccpDocs()
+        setMessage('K02: usunięto wiersz.')
+      } catch (err) {
+        setMessage(`K02: błąd usuwania – ${err.message}`)
+      }
+      setK02DeletePending(null)
+      return
+    }
+    setK02Overrides(prev => {
+      const next = { ...prev }
+      delete next[doc.id]
+      return next
+    })
+    setMessage('K02: ukryto wiersz (auto).')
+    setK02DeletePending(null)
   }
 
   async function saveK02FieldToDb(doc, field, value) {
@@ -4298,10 +4447,13 @@ function App() {
         </tbody></table><div className="k01-foot">* P – prawidłowo, N – nieprawidłowo. Podpis wybierany jest w ostatniej kolumnie dla każdej operacji.</div></div>
     }
     if (group.type === 'K02') {
-      const manualMonth = k02GroupHasManualMonth(docs)
-      const maxRows = manualMonth ? docs.length : Math.max(16, docs.length)
+      const period = group.period
+      const periodDocs = [...docs].sort((a, b) => String(a.document_date || '').localeCompare(String(b.document_date || '')))
+      const groupKey = kartotekaGroupRowKey(group)
+      const k02ColSpan = 7
       return <div className="monthly-paper k02-original">
         <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <button type="button" className="mini secondary" onClick={() => addK02ManualRow(group)}>+ Dodaj wiersz na końcu</button>
           <label>Podpis kontrolujący (zbiorczo)
             <select value={defaultK02Employee} onChange={e => {
               const v = e.target.value
@@ -4326,86 +4478,80 @@ function App() {
             <td className="k02-version">Wersja I/2024</td>
           </tr>
         </tbody></table>
-        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
-          {Array.from({length: maxRows}).map((_,i) => {
-            const baseDoc = docs[i]
-            if (!baseDoc) return <tr className="blank-row" key={`k02-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            const doc = getLiveK02Doc(baseDoc)
-            const godzina = k02FieldValue(doc, 'godzina', '09:15')
-            const temp1 = k02FieldValue(doc, 'temperatura_chlodnia_1', '')
-            const temp2 = k02FieldValue(doc, 'temperatura_chlodnia_2', '')
-            const signed = k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || ''
-            const uwagi = normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
-            return <tr key={doc.id}>
-              <td>{doc.document_date}</td>
-              <td><input className="cell-input no-print" value={godzina} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
-              <td><input className="cell-input no-print" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
-              <td><input className="cell-input no-print" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
-              <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
-            </tr>
+        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni<br/>surowca<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th><th className="no-print">Akcje</th></tr></thead><tbody>
+          {renderKartotekaTableBody({
+            docs: periodDocs,
+            groupKey,
+            pendingRows: kartotekaPendingRows,
+            colSpan: k02ColSpan,
+            onInsertAt: (afterIndex) => addK02ManualRow(group, afterIndex),
+            renderDocRow: (baseDoc) => {
+              const doc = getLiveK02Doc(baseDoc)
+              const godzina = k02FieldValue(doc, 'godzina', '09:15')
+              const temp1 = k02FieldValue(doc, 'temperatura_chlodnia_1', '')
+              const temp2 = k02FieldValue(doc, 'temperatura_chlodnia_2', '')
+              const signed = k02FieldValue(doc, 'podpis_kontrolujacego', '') || doc.signed_by_operator || ''
+              const uwagi = normalizePN(k02FieldValue(doc, 'uwagi', doc.status || 'P'))
+              return (
+                <tr key={doc.id}>
+                  <td><input className="cell-input no-print" type="date" value={doc.document_date || ''} onChange={e => setK02Override(doc, 'document_date', e.target.value)} /><span className="print-only">{doc.document_date}</span></td>
+                  <td><input className="cell-input no-print" value={godzina} onChange={e=>setK02Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
+                  <td><input className="cell-input no-print" value={temp1} onChange={e=>setK02Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
+                  <td><input className="cell-input no-print" value={temp2} onChange={e=>setK02Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
+                  <td><select className="mini-select no-print" value={signed} onChange={e=>setK02Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
+                  <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK02Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+                  <td className="col-actions no-print">
+                    <KartotekaRowDeleteButton active={k02DeletePending === doc.id} onRequest={() => setK02DeletePending(doc.id)} onConfirm={() => void deleteK02Row(doc)} onCancel={() => setK02DeletePending(null)} />
+                  </td>
+                </tr>
+              )
+            },
+            renderPendingRow: (pending) => {
+              const draft = { ...k02DefaultDraft(period), ...(pending.draft || {}) }
+              const patchDraft = (updates) => patchKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id, updates)
+              const saveBlankRow = async () => {
+                if (!draft.document_date?.trim()) {
+                  setMessage('K02: wpisz datę wiersza, potem Zapisz.')
+                  return
+                }
+                const rowDoc = buildManualK02BlankDoc(period, `K02-manual-${period}-${Date.now()}-${pending.id}`, draft)
+                const saved = await saveK02DocumentField(rowDoc, draft)
+                if (saved) {
+                  removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)
+                  setMessage('K02: zapisano wiersz.')
+                }
+              }
+              return (
+                <tr className="blank-row editable-blank" key={pending.id}>
+                  <td><input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} /></td>
+                  <td><input className="cell-input no-print" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="09:15" /></td>
+                  <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_1} onChange={e => patchDraft({ temperatura_chlodnia_1: e.target.value })} placeholder="°C" /></td>
+                  <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_2} onChange={e => patchDraft({ temperatura_chlodnia_2: e.target.value })} placeholder="°C" /></td>
+                  <td><select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
+                  <td className={draft.uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={draft.uwagi} onChange={e => patchDraft({ uwagi: e.target.value })}><option value="P">P</option><option value="N">N</option></select></td>
+                  <td className="col-actions no-print">
+                    <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
+                    <button type="button" className="mini secondary" onClick={() => removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)}>Anuluj</button>
+                  </td>
+                </tr>
+              )
+            }
           })}
         </tbody></table>
-        <p className="hint no-print">K02: wpisy z dni przyjęć (K01) uzupełniają się automatycznie. Możesz też utworzyć pełną kartotekę miesiąca ręcznie – zapis dotyczy tylko dokumentacji HACCP, bez wpływu na FIFO. Podpis wybierasz ręcznie. Temp.: jabłka/truskawki/wiśnie/porzeczki/aronie 2°C; maliny 1°C.</p>
+        <p className="hint no-print">K02: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć.</p>
       </div>
     }
 
     if (group.type === 'K04') {
       const period = group.period
       const periodDocs = dedupeK04Docs([...docs].sort(k04DocSort))
-      const blankCount = 3 + (k04BlankSlots[period] || 0)
       const chamber = group.chamber || 'CP3'
-
-      function renderK04BlankRow(bi) {
-        const draftKey = `${period}|blank|${bi}`
-        const defaultDraft = {
-          document_date: `${period}-01`,
-          godzina: '',
-          temperatura_chlodnia_1: '',
-          temperatura_chlodnia_2: '',
-          podpis_kontrolujacego: '',
-          uwagi: 'P'
-        }
-        const draft = k04BlankDrafts[draftKey] || defaultDraft
-        const patchDraft = (updates) => setK04BlankDrafts(prev => ({
-          ...prev,
-          [draftKey]: { ...(prev[draftKey] || defaultDraft), ...updates }
-        }))
-        const saveBlankRow = async () => {
-          const nextDraft = { ...(k04BlankDrafts[draftKey] || draft) }
-          if (!nextDraft.document_date?.trim()) {
-            setMessage('K04: wpisz datę wiersza, potem Zapisz.')
-            return
-          }
-          const manualId = `K04-manual-${period}-${Date.now()}-${bi}`
-          const rowDoc = buildManualK04BlankDoc(period, manualId, nextDraft)
-          const saved = await saveK04DocumentField(rowDoc, nextDraft)
-          if (saved) {
-            setK04BlankDrafts(prev => {
-              const next = { ...prev }
-              delete next[draftKey]
-              return next
-            })
-            setK04BlankSlots(prev => ({ ...prev, [period]: Math.max(0, (prev[period] || 0) - 1) }))
-            setMessage('K04: zapisano wiersz.')
-          }
-        }
-        return (
-          <tr className="blank-row editable-blank" key={draftKey}>
-            <td><input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} /></td>
-            <td><input className="cell-input no-print" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="09:15" /></td>
-            <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_1} onChange={e => patchDraft({ temperatura_chlodnia_1: e.target.value })} placeholder="°C" /></td>
-            <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_2} onChange={e => patchDraft({ temperatura_chlodnia_2: e.target.value })} placeholder="°C" /></td>
-            <td><select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
-            <td className={draft.uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={draft.uwagi} onChange={e => patchDraft({ uwagi: e.target.value })}><option value="P">P</option><option value="N">N</option></select></td>
-            <td className="col-actions no-print"><button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button></td>
-          </tr>
-        )
-      }
+      const groupKey = kartotekaGroupRowKey(group)
+      const k04ColSpan = 7
 
       return <div className="monthly-paper k02-original k04-original">
         <div className="no-print employee-signature-row" style={{ marginBottom: '10px', flexWrap: 'wrap', gap: '10px' }}>
-          <button type="button" className="mini secondary" onClick={() => addK04ManualRow(group)}>+ Dodaj wiersz</button>
+          <button type="button" className="mini secondary" onClick={() => addK04ManualRow(group)}>+ Dodaj wiersz na końcu</button>
           <label>Podpis kontrolującego (zbiorczo)
             <select value={defaultK04Employee} onChange={e => setDefaultK04Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
@@ -4427,47 +4573,82 @@ function App() {
           </tr>
         </tbody></table>
         <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>nr 1 [°C]</th><th>Temperatura<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th><th className="no-print">Akcje</th></tr></thead><tbody>
-          {periodDocs.map(doc => {
-            const live = getLiveK04Doc(doc, k04Overrides)
-            const godzina = live.data?.godzina ?? ''
-            const temp1 = live.data?.temperatura_chlodnia_1 ?? ''
-            const temp2 = live.data?.temperatura_chlodnia_2 ?? ''
-            const signed = live.data?.podpis_kontrolujacego || live.signed_by_operator || ''
-            const uwagi = formNormalizePn(live.data?.uwagi || 'P')
-            const produktyHint = live.data?.produkty ? ` · ${live.data.produkty}` : ''
-            return <tr key={live.id}>
-              <td>
-                <input className="cell-input no-print" type="date" value={live.document_date || ''} onChange={e => setK04Override(live, 'document_date', e.target.value)} />
-                <span className="print-only">{live.document_date}{produktyHint ? <small>{produktyHint}</small> : null}</span>
-              </td>
-              <td><input className="cell-input no-print" value={godzina} onChange={e => setK04Override(live, 'godzina', e.target.value)} placeholder="09:15" /><span className="print-only">{godzina}</span></td>
-              <td><input className="cell-input no-print" value={temp1} onChange={e => setK04Override(live, 'temperatura_chlodnia_1', e.target.value)} placeholder="°C" /><span className="print-only">{temp1}</span></td>
-              <td><input className="cell-input no-print" value={temp2} onChange={e => setK04Override(live, 'temperatura_chlodnia_2', e.target.value)} placeholder="°C" /><span className="print-only">{temp2}</span></td>
-              <td><select className="mini-select no-print" value={signed} onChange={e => setK04Override(live, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-              <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(live, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
-              <td className="col-actions no-print">
-                {k04DeletePending === live.id ? (
-                  <span className="k06-delete-confirm">
-                    <button type="button" className="mini danger" onClick={() => void deleteK04Row(live)}>Potwierdź</button>
-                    <button type="button" className="mini secondary" onClick={() => setK04DeletePending(null)}>Anuluj</button>
-                  </span>
-                ) : (
-                  <button type="button" className="mini danger" onClick={() => setK04DeletePending(live.id)}>Usuń</button>
-                )}
-              </td>
-            </tr>
+          {renderKartotekaTableBody({
+            docs: periodDocs,
+            groupKey,
+            pendingRows: kartotekaPendingRows,
+            colSpan: k04ColSpan,
+            onInsertAt: (afterIndex) => addK04ManualRow(group, afterIndex),
+            renderDocRow: (doc) => {
+              const live = getLiveK04Doc(doc, k04Overrides)
+              const godzina = live.data?.godzina ?? ''
+              const temp1 = live.data?.temperatura_chlodnia_1 ?? ''
+              const temp2 = live.data?.temperatura_chlodnia_2 ?? ''
+              const signed = live.data?.podpis_kontrolujacego || live.signed_by_operator || ''
+              const uwagi = formNormalizePn(live.data?.uwagi || 'P')
+              const produktyHint = live.data?.produkty ? ` · ${live.data.produkty}` : ''
+              return (
+                <tr key={live.id}>
+                  <td>
+                    <input className="cell-input no-print" type="date" value={live.document_date || ''} onChange={e => setK04Override(live, 'document_date', e.target.value)} />
+                    <span className="print-only">{live.document_date}{produktyHint ? <small>{produktyHint}</small> : null}</span>
+                  </td>
+                  <td><input className="cell-input no-print" value={godzina} onChange={e => setK04Override(live, 'godzina', e.target.value)} placeholder="09:15" /><span className="print-only">{godzina}</span></td>
+                  <td><input className="cell-input no-print" value={temp1} onChange={e => setK04Override(live, 'temperatura_chlodnia_1', e.target.value)} placeholder="°C" /><span className="print-only">{temp1}</span></td>
+                  <td><input className="cell-input no-print" value={temp2} onChange={e => setK04Override(live, 'temperatura_chlodnia_2', e.target.value)} placeholder="°C" /><span className="print-only">{temp2}</span></td>
+                  <td><select className="mini-select no-print" value={signed} onChange={e => setK04Override(live, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
+                  <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(live, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+                  <td className="col-actions no-print">
+                    <KartotekaRowDeleteButton active={k04DeletePending === live.id} onRequest={() => setK04DeletePending(live.id)} onConfirm={() => void deleteK04Row(live)} onCancel={() => setK04DeletePending(null)} />
+                  </td>
+                </tr>
+              )
+            },
+            renderPendingRow: (pending) => {
+              const draft = { ...k04DefaultDraft(period), ...(pending.draft || {}) }
+              const patchDraft = (updates) => patchKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id, updates)
+              const saveBlankRow = async () => {
+                if (!draft.document_date?.trim()) {
+                  setMessage('K04: wpisz datę wiersza, potem Zapisz.')
+                  return
+                }
+                const rowDoc = buildManualK04BlankDoc(period, `K04-manual-${period}-${Date.now()}-${pending.id}`, draft)
+                const saved = await saveK04DocumentField(rowDoc, draft)
+                if (saved) {
+                  removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)
+                  setMessage('K04: zapisano wiersz.')
+                }
+              }
+              return (
+                <tr className="blank-row editable-blank" key={pending.id}>
+                  <td><input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} /></td>
+                  <td><input className="cell-input no-print" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="09:15" /></td>
+                  <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_1} onChange={e => patchDraft({ temperatura_chlodnia_1: e.target.value })} placeholder="°C" /></td>
+                  <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_2} onChange={e => patchDraft({ temperatura_chlodnia_2: e.target.value })} placeholder="°C" /></td>
+                  <td><select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
+                  <td className={draft.uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={draft.uwagi} onChange={e => patchDraft({ uwagi: e.target.value })}><option value="P">P</option><option value="N">N</option></select></td>
+                  <td className="col-actions no-print">
+                    <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
+                    <button type="button" className="mini secondary" onClick={() => removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)}>Anuluj</button>
+                  </td>
+                </tr>
+              )
+            }
           })}
-          {Array.from({ length: blankCount }).map((_, bi) => renderK04BlankRow(bi))}
         </tbody></table>
         {periodDocs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: w tym dniu magazynowano różne asortymenty – sprawdź wpisy.</div>}
-        <p className="hint no-print">K04: jedna kartoteka na miesiąc (wszystkie produkty CP3). Wpisy auto z K03 uzupełniają dni przerobu–WZ. Każdą kolumnę edytujesz ręcznie; „+ Dodaj wiersz” lub „Utwórz kartotekę miesiąca” na liście K04.</p>
+        <p className="hint no-print">K04: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć (Akcje → Usuń).</p>
       </div>
     }
 
     if (group.type === 'K06') {
-      const maxRows = Math.max(11, docs.length)
+      const period = group.period
+      const periodDocs = [...docs].sort((a, b) => String(a.document_date || '').localeCompare(String(b.document_date || '')))
+      const groupKey = kartotekaGroupRowKey(group)
+      const k06ColSpan = 9
       return <div className="monthly-paper k02-original k06-original">
         <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+          <button type="button" className="mini secondary" onClick={() => addK06ManualRow(group)}>+ Dodaj wiersz na końcu</button>
           <label>Podpis kontrolującego (zbiorczo)
             <select value={defaultK06Employee} onChange={e => setDefaultK06Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
@@ -4488,131 +4669,105 @@ function App() {
         <table className="k06-table"><thead><tr>
           <th className="col-date">Data</th><th className="col-product">Nazwa towaru</th><th className="col-lot">Numer partii</th><th className="col-pn">Barwa<br/>(P/N)*</th><th className="col-pn">Zapach<br/>(P/N)*</th><th className="col-pn">Twardość (jabłko)<br/>(P/N)*</th><th className="col-pn">Brak oznak pleśni<br/>(P/N)*</th><th className="col-sign">Podpis kontrolującego</th><th className="col-actions no-print">Akcje</th>
         </tr></thead><tbody>
-          {Array.from({length: maxRows}).map((_,i) => {
-            const baseDoc = docs[i]
-            if (!baseDoc) return <tr className="blank-row" key={`k06-blank-${i}`}><td className="col-date"></td><td className="col-product"></td><td className="col-lot"></td><td className="col-pn"></td><td className="col-pn"></td><td className="col-pn"></td><td className="col-pn"></td><td className="col-sign"></td><td className="col-actions no-print"></td></tr>
-            const doc = getLiveK06Doc(baseDoc, k06Overrides)
-            const d = normalizeK06Data(doc.data || {})
-            const pnCell = (field, label) => {
-              const val = formNormalizePn(d[field] || 'P')
-              return <td className={`col-pn${val==='N'?' pn-n':''}`} key={field}>
-                <select className="mini-select no-print" value={val} onChange={e => editHaccpRowField(doc, field, label, val, { directValue: e.target.value, pn: true })}><option value="P">P</option><option value="N">N</option></select>
-                <span className="print-only">{val}</span>
-              </td>
+          {renderKartotekaTableBody({
+            docs: periodDocs,
+            groupKey,
+            pendingRows: kartotekaPendingRows,
+            colSpan: k06ColSpan,
+            onInsertAt: (afterIndex) => addK06ManualRow(group, afterIndex),
+            renderDocRow: (baseDoc) => {
+              const doc = getLiveK06Doc(baseDoc, k06Overrides)
+              const d = normalizeK06Data(doc.data || {})
+              const pnCell = (field, label) => {
+                const val = formNormalizePn(d[field] || 'P')
+                return <td className={`col-pn${val==='N'?' pn-n':''}`} key={field}>
+                  <select className="mini-select no-print" value={val} onChange={e => editHaccpRowField(doc, field, label, val, { directValue: e.target.value, pn: true })}><option value="P">P</option><option value="N">N</option></select>
+                  <span className="print-only">{val}</span>
+                </td>
+              }
+              const signed = doc.signed_by_operator || d.podpis || ''
+              const modeHint = d.tryb_label ? ` · ${d.tryb_label}` : ''
+              const wzHint = d.wz_no ? ` · WZ ${d.wz_no}${modeHint}` : modeHint
+              return (
+                <tr key={doc.id}>
+                  <td className="col-date">
+                    <input className="cell-input no-print" type="date" defaultValue={doc.document_date} key={`k06-date-${doc.id}-${doc.document_date}`} onBlur={e => { if (e.target.value && e.target.value !== doc.document_date) void commitK06Override(doc, 'przerob_date', e.target.value) }} />
+                    <span className="print-only">{doc.document_date}</span>
+                  </td>
+                  <td className="col-product left">{doc.product_name}{wzHint ? <small className="hint no-print">{wzHint}</small> : null}</td>
+                  <td className="col-lot">
+                    <input className="cell-input no-print" type="text" defaultValue={doc.lot_no || ''} key={`k06-lot-${doc.id}-${doc.lot_no}`} onBlur={e => { if (e.target.value !== (doc.lot_no || '')) void commitK06Override(doc, 'lot_no', e.target.value.trim()) }} />
+                    <span className="print-only">{doc.lot_no}</span>
+                  </td>
+                  {pnCell('barwa', 'Barwa')}
+                  {pnCell('zapach', 'Zapach')}
+                  {pnCell('twardosc_jablko', 'Twardość (jabłko)')}
+                  {pnCell('brak_plesni', 'Brak oznak pleśni')}
+                  <td className="col-sign">
+                    <select className="mini-select no-print" value={signed} onChange={e => void setK06DocumentEmployee(doc, e.target.value)}><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                    <span className="print-only">{signed}</span>
+                  </td>
+                  <td className="col-actions no-print k06-actions">
+                    <KartotekaRowDeleteButton active={k06DeletePending === doc.id} onRequest={() => setK06DeletePending(doc.id)} onConfirm={() => void deleteK06Row(doc)} onCancel={() => setK06DeletePending(null)} label="Usuń" />
+                  </td>
+                </tr>
+              )
+            },
+            renderPendingRow: (pending) => {
+              const draft = { document_date: `${period}-01`, product_name: '', lot_no: '', ...(pending.draft || {}) }
+              const patchDraft = (updates) => patchKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id, updates)
+              const saveBlankRow = async () => {
+                if (!draft.product_name?.trim() && !draft.lot_no?.trim()) {
+                  setMessage('K06: wpisz nazwę towaru lub numer partii, potem Zapisz.')
+                  return
+                }
+                const rowDoc = {
+                  id: `K06-manual-${period}-${pending.id}`,
+                  synthetic: true,
+                  document_type: 'K06',
+                  document_date: draft.document_date,
+                  product_name: draft.product_name || 'Produkt gotowy',
+                  lot_no: draft.lot_no || '',
+                  chamber_code: 'CP3',
+                  qty: 0,
+                  status: 'P',
+                  data: normalizeK06Data({ auto_source: 'manual', barwa: 'P', zapach: 'P', twardosc_jablko: 'P', brak_plesni: 'P' })
+                }
+                const saved = await saveK06DocumentField(rowDoc, { product_name: rowDoc.product_name, lot_no: rowDoc.lot_no, document_date: draft.document_date })
+                if (saved) {
+                  removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)
+                  setMessage('K06: zapisano wiersz.')
+                }
+              }
+              return (
+                <tr className="blank-row editable-blank" key={pending.id}>
+                  <td className="col-date"><input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} /></td>
+                  <td className="col-product left"><input className="cell-input no-print wide" value={draft.product_name} onChange={e => patchDraft({ product_name: e.target.value })} placeholder="nazwa towaru" /></td>
+                  <td className="col-lot"><input className="cell-input no-print" value={draft.lot_no} onChange={e => patchDraft({ lot_no: e.target.value })} placeholder="nr partii" /></td>
+                  <td className="col-pn">P</td><td className="col-pn">P</td><td className="col-pn">P</td><td className="col-pn">P</td>
+                  <td className="col-sign"></td>
+                  <td className="col-actions no-print">
+                    <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
+                    <button type="button" className="mini secondary" onClick={() => removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)}>Anuluj</button>
+                  </td>
+                </tr>
+              )
             }
-            const signed = doc.signed_by_operator || d.podpis || ''
-            const modeHint = d.tryb_label ? ` · ${d.tryb_label}` : ''
-            const wzHint = d.wz_no ? ` · WZ ${d.wz_no}${modeHint}` : modeHint
-            return <tr key={doc.id}>
-              <td className="col-date">
-                <input className="cell-input no-print" type="date" defaultValue={doc.document_date} key={`k06-date-${doc.id}-${doc.document_date}`} title="Data oceny (przerób lub WZ bez przerobu)" onBlur={e => { if (e.target.value && e.target.value !== doc.document_date) void commitK06Override(doc, 'przerob_date', e.target.value) }} />
-                <span className="print-only">{doc.document_date}</span>
-              </td>
-              <td className="col-product left">{doc.product_name}{wzHint ? <small className="hint no-print">{wzHint}</small> : null}</td>
-              <td className="col-lot">
-                <input className="cell-input no-print" type="text" defaultValue={doc.lot_no || ''} key={`k06-lot-${doc.id}-${doc.lot_no}`} onBlur={e => { if (e.target.value !== (doc.lot_no || '')) void commitK06Override(doc, 'lot_no', e.target.value.trim()) }} />
-                <span className="print-only">{doc.lot_no}</span>
-              </td>
-              {pnCell('barwa', 'Barwa')}
-              {pnCell('zapach', 'Zapach')}
-              {pnCell('twardosc_jablko', 'Twardość (jabłko)')}
-              {pnCell('brak_plesni', 'Brak oznak pleśni')}
-              <td className="col-sign">
-                <select className="mini-select no-print" value={signed} onChange={e => void setK06DocumentEmployee(doc, e.target.value)} title="Podpis kontrolującego"><option value="">Wybierz pracownika</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
-                <span className="print-only">{signed}</span>
-              </td>
-              <td className="col-actions no-print k06-actions">
-                {k06DeletePending === doc.id ? (
-                  <span className="k06-delete-confirm">
-                    <button type="button" className="mini danger" onClick={() => void deleteK06Row(doc)}>Potwierdź usunięcie</button>
-                    <button type="button" className="mini secondary" onClick={() => setK06DeletePending(null)}>Anuluj</button>
-                  </span>
-                ) : (
-                  <button type="button" className="mini danger" onClick={() => setK06DeletePending(doc.id)} title="Usuń wiersz (wymaga potwierdzenia)">Usuń</button>
-                )}
-              </td>
-            </tr>
           })}
         </tbody></table>
-        <p className="hint no-print">K06: jedna kartoteka miesięczna – wpisy z K03 (WZ), nazwa towaru = produkt gotowy z faktury. U góry: podpis zbiorczy dla wszystkich wierszy. Usuwanie wiersza wymaga dwóch kliknięć (Usuń → Potwierdź).</p>
+        <p className="hint no-print">K06: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć.</p>
       </div>
     }
 
     if (group.type === 'K07') {
       const period = group.period
       const periodDocs = dedupeK07Docs([...docs].sort(k07DocSort))
-      const blankCount = 3 + (k07BlankSlots[period] || 0)
-
-      function renderK07BlankRow(bi) {
-        const draftKey = `${period}|blank|${bi}`
-        const defaultDraft = {
-          document_date: `${period}-01`,
-          kontrola_etap: 'przed',
-          godzina: '',
-          surowiec: '',
-          numer_partii: '',
-          stan_sita: 'P',
-          podpis_kontrolujacego: ''
-        }
-        const draft = k07BlankDrafts[draftKey] || defaultDraft
-        const patchDraft = (updates) => setK07BlankDrafts(prev => ({
-          ...prev,
-          [draftKey]: { ...(prev[draftKey] || defaultDraft), ...updates }
-        }))
-        const saveBlankRow = async () => {
-          const nextDraft = { ...(k07BlankDrafts[draftKey] || draft) }
-          if (!nextDraft.numer_partii?.trim() && !nextDraft.surowiec?.trim()) {
-            setMessage('K07: wpisz numer partii (np. Pcz/002/2026) lub surowiec, potem Zapisz.')
-            return
-          }
-          const manualId = `K07-manual-${period}-${Date.now()}-${bi}`
-          const rowDoc = buildManualK07BlankDoc(period, manualId, nextDraft)
-          const saved = await saveK07DocumentField(rowDoc, nextDraft)
-          if (saved) {
-            setK07BlankDrafts(prev => {
-              const next = { ...prev }
-              delete next[draftKey]
-              return next
-            })
-            setK07BlankSlots(prev => ({ ...prev, [period]: Math.max(0, (prev[period] || 0) - 1) }))
-            setMessage('K07: zapisano wiersz.')
-          }
-        }
-        return (
-          <tr className="blank-row editable-blank" key={draftKey}>
-            <td className="col-date">
-              <input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} />
-            </td>
-            <td className="col-etap">
-              <select className="mini-select no-print" value={draft.kontrola_etap} onChange={e => patchDraft({ kontrola_etap: e.target.value })}>
-                {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
-              </select>
-            </td>
-            <td className="col-time">
-              <input className="cell-input no-print" type="time" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="--:--" />
-            </td>
-            <td className="col-product left">
-              <input className="cell-input no-print wide" type="text" value={draft.surowiec} onChange={e => patchDraft({ surowiec: e.target.value })} placeholder="np. porzeczka czarna" />
-            </td>
-            <td className="col-lot">
-              <input className="cell-input no-print wide" type="text" value={draft.numer_partii} onChange={e => patchDraft({ numer_partii: e.target.value })} placeholder="np. Pcz/002/2026" />
-            </td>
-            <td className={`col-pn${draft.stan_sita === 'N' ? ' pn-n' : ''}`}>
-              <select className="mini-select no-print" value={draft.stan_sita} onChange={e => patchDraft({ stan_sita: e.target.value })}><option value="P">P</option><option value="N">N</option></select>
-            </td>
-            <td className="col-sign">
-              <select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
-            </td>
-            <td className="col-actions no-print">
-              <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
-            </td>
-          </tr>
-        )
-      }
+      const groupKey = kartotekaGroupRowKey(group)
+      const k07ColSpan = 8
 
       return <div className="monthly-paper k02-original k07-original">
         <div className="no-print employee-signature-row k07-bulk-row" style={{marginBottom: '10px', flexWrap: 'wrap', gap: '10px'}}>
-          <button type="button" className="mini secondary" onClick={() => addK07ManualRow(group)}>+ Dodaj wiersz</button>
+          <button type="button" className="mini secondary" onClick={() => addK07ManualRow(group)}>+ Dodaj wiersz na końcu</button>
           <button type="button" className="mini secondary" onClick={() => void clickRepairK07Duplicates()}>Napraw i uzupełnij K07</button>
           <label>Podpis (cała kolumna)
             <select value={defaultK07Employee} onChange={e => setDefaultK07Employee(e.target.value)}>
@@ -4646,69 +4801,101 @@ function App() {
         <table className="k07-table"><thead><tr>
           <th className="col-date">Data</th><th className="col-etap">Etap</th><th className="col-time">Godzina</th><th className="col-product">Rodzaj przerabianego surowca</th><th className="col-lot">Produkowany numer partii</th><th className="col-pn">Stan sita<br/>(P/N)*</th><th className="col-sign">Podpis kontrolującego</th><th className="col-actions no-print">Akcje</th>
         </tr></thead><tbody>
-          {periodDocs.map(doc => {
-            const liveDoc = getLiveK07Doc(doc, k07Overrides)
-            const d = normalizeK07Data(liveDoc.data || {}, liveDoc)
-            const docDate = liveDoc.document_date || `${period}-01`
-            const godzina = d.godzina || ''
-            const surowiec = d.surowiec || liveDoc.product_name || ''
-            const numerPartii = d.numer_partii || liveDoc.lot_no || ''
-            const stan = formNormalizePn(d.stan_sita || 'P')
-            const signed = liveDoc.signed_by_operator || d.podpis_kontrolujacego || ''
-            const etap = d.kontrola_etap || 'przed'
-            const etapLabel = d.kontrola_label || (etap === 'przed' ? 'Przed przerobem' : etap === 'po' ? 'Po przerobie' : '')
-            const onEtapChange = (value) => {
-              const meta = K07_KONTROLA_ETAPY.find(e => e.id === value) || K07_KONTROLA_ETAPY[0]
-              setK07Override(liveDoc, 'kontrola_etap', value)
-              setK07Override(liveDoc, 'kontrola_label', meta.label)
-              void saveK07DocumentField(liveDoc, { kontrola_etap: value, kontrola_label: meta.label })
+          {renderKartotekaTableBody({
+            docs: periodDocs,
+            groupKey,
+            pendingRows: kartotekaPendingRows,
+            colSpan: k07ColSpan,
+            onInsertAt: (afterIndex) => addK07ManualRow(group, afterIndex),
+            renderDocRow: (doc) => {
+              const liveDoc = getLiveK07Doc(doc, k07Overrides)
+              const d = normalizeK07Data(liveDoc.data || {}, liveDoc)
+              const docDate = liveDoc.document_date || `${period}-01`
+              const godzina = d.godzina || ''
+              const surowiec = d.surowiec || liveDoc.product_name || ''
+              const numerPartii = d.numer_partii || liveDoc.lot_no || ''
+              const stan = formNormalizePn(d.stan_sita || 'P')
+              const signed = liveDoc.signed_by_operator || d.podpis_kontrolujacego || ''
+              const etap = d.kontrola_etap || 'przed'
+              const etapLabel = d.kontrola_label || (etap === 'przed' ? 'Przed przerobem' : etap === 'po' ? 'Po przerobie' : '')
+              const onEtapChange = (value) => {
+                const meta = K07_KONTROLA_ETAPY.find(e => e.id === value) || K07_KONTROLA_ETAPY[0]
+                setK07Override(liveDoc, 'kontrola_etap', value)
+                setK07Override(liveDoc, 'kontrola_label', meta.label)
+                void saveK07DocumentField(liveDoc, { kontrola_etap: value, kontrola_label: meta.label })
+              }
+              return (
+                <tr key={liveDoc.id}>
+                  <td className="col-date">
+                    <input className="cell-input no-print" type="date" value={docDate} onChange={e => setK07Override(liveDoc, 'document_date', e.target.value)} onBlur={e => void saveK07DocumentField(liveDoc, { document_date: e.target.value })} />
+                    <span className="print-only">{docDate}</span>
+                  </td>
+                  <td className="col-etap">
+                    <select className="mini-select no-print" value={etap} onChange={e => onEtapChange(e.target.value)}>
+                      {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
+                    </select>
+                    <span className="print-only">{etapLabel || '—'}</span>
+                  </td>
+                  <td className="col-time">
+                    <input className="cell-input no-print" type="time" value={godzina} onChange={e => setK07Override(liveDoc, 'godzina', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'godzina', e.target.value)} placeholder="--:--" />
+                    <span className="print-only">{godzina || '—'}</span>
+                  </td>
+                  <td className="col-product left">
+                    <input className="cell-input no-print wide" type="text" value={surowiec} onChange={e => setK07Override(liveDoc, 'surowiec', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'surowiec', e.target.value)} placeholder="np. malina" />
+                    <span className="print-only">{surowiec}</span>
+                  </td>
+                  <td className="col-lot">
+                    <input className="cell-input no-print wide" type="text" value={numerPartii} onChange={e => setK07Override(liveDoc, 'numer_partii', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'numer_partii', e.target.value)} placeholder="nr partii" />
+                    <span className="print-only">{numerPartii}</span>
+                  </td>
+                  <td className={`col-pn${stan === 'N' ? ' pn-n' : ''}`}>
+                    <select className="mini-select no-print" value={stan} onChange={e => void commitK07Override(liveDoc, 'stan_sita', e.target.value)}><option value="P">P</option><option value="N">N</option></select>
+                    <span className="print-only">{stan}</span>
+                  </td>
+                  <td className="col-sign">
+                    <select className="mini-select no-print" value={signed} onChange={e => void commitK07Override(liveDoc, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
+                    <span className="print-only">{signed}</span>
+                  </td>
+                  <td className="col-actions no-print k07-actions">
+                    <KartotekaRowDeleteButton active={k07DeletePending === liveDoc.id} onRequest={() => setK07DeletePending(liveDoc.id)} onConfirm={() => void deleteK07Row(liveDoc)} onCancel={() => setK07DeletePending(null)} />
+                  </td>
+                </tr>
+              )
+            },
+            renderPendingRow: (pending) => {
+              const draft = { ...k07DefaultDraft(period), ...(pending.draft || {}) }
+              const patchDraft = (updates) => patchKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id, updates)
+              const saveBlankRow = async () => {
+                if (!draft.numer_partii?.trim() && !draft.surowiec?.trim()) {
+                  setMessage('K07: wpisz numer partii lub surowiec, potem Zapisz.')
+                  return
+                }
+                const rowDoc = buildManualK07BlankDoc(period, `K07-manual-${period}-${Date.now()}-${pending.id}`, draft)
+                const saved = await saveK07DocumentField(rowDoc, draft)
+                if (saved) {
+                  removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)
+                  setMessage('K07: zapisano wiersz.')
+                }
+              }
+              return (
+                <tr className="blank-row editable-blank" key={pending.id}>
+                  <td className="col-date"><input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} /></td>
+                  <td className="col-etap"><select className="mini-select no-print" value={draft.kontrola_etap} onChange={e => patchDraft({ kontrola_etap: e.target.value })}>{K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}</select></td>
+                  <td className="col-time"><input className="cell-input no-print" type="time" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} /></td>
+                  <td className="col-product left"><input className="cell-input no-print wide" type="text" value={draft.surowiec} onChange={e => patchDraft({ surowiec: e.target.value })} placeholder="surowiec" /></td>
+                  <td className="col-lot"><input className="cell-input no-print wide" type="text" value={draft.numer_partii} onChange={e => patchDraft({ numer_partii: e.target.value })} placeholder="nr partii" /></td>
+                  <td className={`col-pn${draft.stan_sita === 'N' ? ' pn-n' : ''}`}><select className="mini-select no-print" value={draft.stan_sita} onChange={e => patchDraft({ stan_sita: e.target.value })}><option value="P">P</option><option value="N">N</option></select></td>
+                  <td className="col-sign"><select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
+                  <td className="col-actions no-print">
+                    <button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button>
+                    <button type="button" className="mini secondary" onClick={() => removeKartotekaPendingRow(setKartotekaPendingRows, groupKey, pending.id)}>Anuluj</button>
+                  </td>
+                </tr>
+              )
             }
-            return <tr key={liveDoc.id}>
-              <td className="col-date">
-                <input className="cell-input no-print" type="date" value={docDate} onChange={e => setK07Override(liveDoc, 'document_date', e.target.value)} onBlur={e => void saveK07DocumentField(liveDoc, { document_date: e.target.value })} />
-                <span className="print-only">{docDate}</span>
-              </td>
-              <td className="col-etap">
-                <select className="mini-select no-print" value={etap} onChange={e => onEtapChange(e.target.value)}>
-                  {K07_KONTROLA_ETAPY.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}
-                </select>
-                <span className="print-only">{etapLabel || '—'}</span>
-              </td>
-              <td className="col-time">
-                <input className="cell-input no-print" type="time" value={godzina} onChange={e => setK07Override(liveDoc, 'godzina', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'godzina', e.target.value)} placeholder="--:--" />
-                <span className="print-only">{godzina || '—'}</span>
-              </td>
-              <td className="col-product left">
-                <input className="cell-input no-print wide" type="text" value={surowiec} onChange={e => setK07Override(liveDoc, 'surowiec', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'surowiec', e.target.value)} placeholder="np. malina" />
-                <span className="print-only">{surowiec}</span>
-              </td>
-              <td className="col-lot">
-                <input className="cell-input no-print wide" type="text" value={numerPartii} onChange={e => setK07Override(liveDoc, 'numer_partii', e.target.value)} onBlur={e => void commitK07Override(liveDoc, 'numer_partii', e.target.value)} placeholder="nr partii" />
-                <span className="print-only">{numerPartii}</span>
-              </td>
-              <td className={`col-pn${stan === 'N' ? ' pn-n' : ''}`}>
-                <select className="mini-select no-print" value={stan} onChange={e => void commitK07Override(liveDoc, 'stan_sita', e.target.value)}><option value="P">P</option><option value="N">N</option></select>
-                <span className="print-only">{stan}</span>
-              </td>
-              <td className="col-sign">
-                <select className="mini-select no-print" value={signed} onChange={e => void commitK07Override(liveDoc, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select>
-                <span className="print-only">{signed}</span>
-              </td>
-              <td className="col-actions no-print k07-actions">
-                {k07DeletePending === liveDoc.id ? (
-                  <span className="k07-delete-confirm">
-                    <button type="button" className="mini danger" onClick={() => void deleteK07Row(liveDoc)}>Potwierdź usunięcie</button>
-                    <button type="button" className="mini secondary" onClick={() => setK07DeletePending(null)}>Anuluj</button>
-                  </span>
-                ) : (
-                  <button type="button" className="mini danger" onClick={() => setK07DeletePending(liveDoc.id)} title="Usuń wiersz (wymaga potwierdzenia)">Usuń</button>
-                )}
-              </td>
-            </tr>
           })}
-          {Array.from({ length: blankCount }).map((_, bi) => renderK07BlankRow(bi))}
         </tbody></table>
-        <p className="hint no-print">K07: 2 wpisy na partię (przed + po). Ta sama partia (np. Pcz/006/2026) = max 1 wiersz na etap. Brakujące wpisy z K03 (przerób malina/porzeczka). „+ Dodaj wiersz” = nowy pusty wiersz na dole. „Napraw i uzupełnij K07” usuwa duplikaty z bazy i dokleja brakujące z K03. Sprawdź też kartotekę poprzedniego miesiąca (np. Pcz/002 może być w czerwcu).</p>
+        <p className="hint no-print">K07: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć.</p>
       </div>
     }
 
@@ -6217,7 +6404,7 @@ function App() {
           </label>
           <button onClick={createK04MonthKartoteka} disabled={haccpBusy}>{haccpBusy ? 'Tworzenie…' : 'Utwórz kartotekę miesiąca'}</button>
         </div>
-        <p className="hint">Silnik formularzy: {HACCP_FORMS_VERSION}. Otwórz kartotekę miesiąca – każda kolumna edytowalna, „+ Dodaj wiersz”, Usuń wiersz.</p>
+        <p className="hint">Silnik formularzy: {HACCP_FORMS_VERSION}. Najedź między wiersze – plusik „+” wstawia pusty wiersz. Usuń w kolumnie Akcje.</p>
       </div>
       {k04Groups.length === 0 && <p className="hint">Brak kartotek K04 w filtrze – utwórz miesiąc powyżej lub poczekaj na K03 w CP3.</p>}
       {k04Groups.length > 0 && <>
