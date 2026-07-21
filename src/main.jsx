@@ -10,7 +10,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, scoreK07Doc, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -365,6 +365,12 @@ function App() {
   })
   const [k02Overrides, setK02Overrides] = useState({})
   const [k04Overrides, setK04Overrides] = useState({})
+  const [k04ManualExtra, setK04ManualExtra] = useState([])
+  const [k04BlankSlots, setK04BlankSlots] = useState({})
+  const [k04BlankDrafts, setK04BlankDrafts] = useState({})
+  const [k04DeletePending, setK04DeletePending] = useState(null)
+  const [k04HiddenKeys, setK04HiddenKeys] = useState(() => new Set())
+  const [k04NewMonth, setK04NewMonth] = useState(new Date().toISOString().slice(0, 7))
   const [k06Overrides, setK06Overrides] = useState({})
   const [k06DeletePending, setK06DeletePending] = useState(null)
   const K06_HIDDEN_STORAGE_KEY = 'agro-mar-k06-hidden-v1'
@@ -662,6 +668,32 @@ function App() {
     () => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides, syntheticK03Docs),
     [formsTraceContext, k04Overrides, syntheticK03Docs]
   )
+  const mergedK04Docs = useMemo(() => {
+    const isK04Db = (doc) => doc?.id && !doc.synthetic && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(doc.id))
+    const fromDb = (haccpDocs || []).filter(d =>
+      d.document_type === 'K04' && !k04HiddenKeys.has(k04StableKey(d))
+    )
+    const synthetic = (syntheticK04Docs || []).filter(d => !k04HiddenKeys.has(k04StableKey(d)))
+    const byKey = new Map()
+    const prefer = (existing, candidate) => {
+      if (!existing) return candidate
+      const exDb = isK04Db(existing)
+      const candDb = isK04Db(candidate)
+      if (candDb && !exDb) return candidate
+      if (exDb && !candDb) return existing
+      return scoreK04Doc(candidate) >= scoreK04Doc(existing) ? candidate : existing
+    }
+    for (const d of [...fromDb, ...synthetic]) {
+      const live = getLiveK04Doc(d, k04Overrides)
+      byKey.set(k04StableKey(live), prefer(byKey.get(k04StableKey(live)), live))
+    }
+    for (const d of k04ManualExtra) {
+      if (!k04HiddenKeys.has(k04StableKey(d))) {
+        byKey.set(k04StableKey(d), getLiveK04Doc(d, k04Overrides))
+      }
+    }
+    return dedupeK04Docs(Array.from(byKey.values()))
+  }, [haccpDocs, syntheticK04Docs, k04ManualExtra, k04HiddenKeys, k04Overrides])
   const syntheticK07Docs = useMemo(
     () => buildAllSyntheticK07Docs(formsTraceContext, syntheticK03Docs, k07Overrides, haccpDocs)
       .filter(d => !k07HiddenKeys.has(k07RowHideKey(d))),
@@ -728,7 +760,8 @@ function App() {
       haccpDocs,
       haccpDocsK01: haccpDocs.filter(d => d.document_type === 'K01'),
       syntheticK02Docs: dashboardSyntheticK02,
-      syntheticK04Docs,
+      syntheticK04Docs: mergedK04Docs,
+      mergedK04Docs,
       mergedK06Docs,
       mergedK07Docs,
       syntheticK03Docs,
@@ -737,7 +770,7 @@ function App() {
       operations: formsTrace.operations || [],
       auxCount: auxRows.filter(r => String(r.delivery_date || '').slice(0, 4) === year).length
     })
-  }, [dashboardMonth, haccpDocs, dashboardSyntheticK02, syntheticK04Docs, mergedK06Docs, mergedK07Docs, syntheticK03Docs, wzQueueLines, stockRows, formsTrace, auxRows])
+  }, [dashboardMonth, haccpDocs, dashboardSyntheticK02, mergedK04Docs, mergedK06Docs, mergedK07Docs, syntheticK03Docs, wzQueueLines, stockRows, formsTrace, auxRows])
 
   function matchesDocsDateRange(dateStr, from = docsDateFrom, to = docsDateTo) {
     const date = String(dateStr || '').slice(0, 10)
@@ -1977,6 +2010,152 @@ function App() {
         uwagi: field === 'uwagi' ? formNormalizePn(value) : (prev[doc.id]?.uwagi ?? doc.data?.uwagi ?? 'P')
       }
     }))
+    void saveK04DocumentField(doc, { [field]: value })
+  }
+
+  async function saveK04DocumentField(doc, patch = {}) {
+    if (!supabase || !doc) {
+      setMessage('Brak bazy – zapis K04 wymaga Supabase.')
+      return null
+    }
+    try {
+      const live = getLiveK04Doc(doc, { [doc.id]: { ...(k04Overrides[doc.id] || {}), ...patch } })
+
+      if (isPersistedHaccpDoc(doc)) {
+        const nextData = normalizeK04Data({ ...(doc.data || {}), ...(k04Overrides[doc.id] || {}), ...patch }, live.signed_by_operator)
+        const status = formNormalizePn(nextData.uwagi) === 'N' ? 'N' : 'P'
+        const signed = patch.podpis_kontrolujacego !== undefined
+          ? patch.podpis_kontrolujacego
+          : (live.signed_by_operator || nextData.podpis_kontrolujacego || doc.signed_by_operator || '')
+        const payload = {
+          data: nextData,
+          status,
+          document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : (live.document_date || doc.document_date),
+          signed_by_operator: signed || null,
+          updated_at: new Date().toISOString()
+        }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+        if (error) throw error
+        const workingDoc = { ...doc, ...payload }
+        setK04Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id))
+        mergeHaccpDoc(doc.id, workingDoc)
+        return workingDoc
+      }
+
+      if (isSyntheticK04Doc(doc)) {
+        const stableKey = k04StableKey(live)
+        const existing = (haccpDocs || []).find(d =>
+          d.document_type === 'K04' && isPersistedHaccpDoc(d) && k04StableKey(d) === stableKey
+        )
+        if (existing) return saveK04DocumentField(existing, { ...(k04Overrides[doc.id] || {}), ...patch })
+        const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK04InsertPayload(live)).select('*').single()
+        if (error) throw error
+        setK04Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id))
+        setK04HiddenKeys(prev => {
+          const next = new Set(prev)
+          next.delete(k04StableKey(live))
+          return next
+        })
+        mergeHaccpDoc(inserted.id, inserted)
+        return inserted
+      }
+      return live
+    } catch (err) {
+      setMessage(`K04: błąd zapisu – ${err.message}`)
+      return null
+    }
+  }
+
+  async function deleteK04Row(doc) {
+    if (!doc) return
+    if (isPersistedHaccpDoc(doc)) {
+      if (!ensureCanDelete()) return
+      if (!confirmDelete(`Wiersz K04 z dnia ${doc.document_date || '—'}.`)) return
+      try {
+        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        if (error) throw error
+        mergeHaccpDocsBatch([], [doc.id])
+        setK04Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        setMessage('K04: usunięto wiersz.')
+      } catch (err) {
+        setMessage(`K04: błąd usuwania – ${err.message}`)
+      }
+    } else {
+      setK04HiddenKeys(prev => new Set([...prev, k04StableKey(doc)]))
+      setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id))
+      setK04Overrides(prev => {
+        const next = { ...prev }
+        delete next[doc.id]
+        return next
+      })
+      setMessage('K04: ukryto wiersz (auto).')
+    }
+    setK04DeletePending(null)
+  }
+
+  function addK04ManualRow(group) {
+    const period = group?.period || haccpMonth
+    setK04BlankSlots(prev => ({ ...prev, [period]: (prev[period] || 0) + 1 }))
+  }
+
+  function shiftK04NewMonth(delta) {
+    const [y, m] = k04NewMonth.split('-').map(Number)
+    const d = new Date(y, m - 1 + delta, 1)
+    setK04NewMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`)
+  }
+
+  async function createK04MonthKartoteka() {
+    if (haccpBusy) return
+    if (!supabase) {
+      setMessage('K04: brak połączenia z bazą (Supabase).')
+      return
+    }
+    const yearMonth = k04NewMonth
+    if (!yearMonth) {
+      setMessage('K04: wybierz rok i miesiąc.')
+      return
+    }
+    const existingMonth = (haccpDocs || []).filter(d =>
+      d.document_type === 'K04' && (d.data?.month_key === yearMonth || String(d.document_date || '').slice(0, 7) === yearMonth)
+    )
+    if (existingMonth.length && !window.confirm(
+      `Kartoteka K04 za ${yearMonth} ma już ${existingMonth.length} wpisów w bazie.\n\nDodać brakujące dni?`
+    )) return
+    const payloads = buildK04MonthPayloads(yearMonth, { signedBy: defaultK04Employee || '' })
+    const existingDates = new Set(existingMonth.map(d => String(d.document_date).slice(0, 10)))
+    const toInsert = payloads.filter(p => !existingDates.has(String(p.document_date).slice(0, 10)))
+    if (!toInsert.length) {
+      setMessage(`K04: wszystkie dni ${yearMonth} są już w kartotece.`)
+      return
+    }
+    setHaccpBusy(true)
+    try {
+      const { rows } = await batchInsertHaccpDocuments(supabase, toInsert)
+      mergeHaccpDocsBatch(rows)
+      setMessage(
+        `K04: utworzono kartotekę za ${yearMonth} – ${rows.length} dni` +
+        (defaultK04Employee ? `, podpis: ${defaultK04Employee}` : '') +
+        '. Jedna kartoteka na miesiąc – edytuj dowolną kolumnę ręcznie.'
+      )
+    } catch (err) {
+      setMessage(`K04: błąd tworzenia – ${err.message}`)
+    } finally {
+      setHaccpBusy(false)
+    }
   }
 
   function setK07Override(doc, field, value) {
@@ -2192,15 +2371,13 @@ function App() {
     setMessage('K07: ukryto wiersz w kartotece.')
   }
 
-  function setEmployeeForVisibleK04Group(group, employeeName, onlyEmpty = false) {
+  async function setEmployeeForVisibleK04Group(group, employeeName, onlyEmpty = false) {
     if (!group || !employeeName) return
     const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_kontrolujacego))
     if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K04.' : 'Brak wpisów K04.'); return }
-    setK04Overrides(prev => {
-      const next = { ...prev }
-      for (const doc of docs) next[doc.id] = { ...(next[doc.id] || {}), podpis_kontrolujacego: employeeName }
-      return next
-    })
+    for (const doc of docs) {
+      await saveK04DocumentField(doc, { podpis_kontrolujacego: employeeName })
+    }
     setMessage(`Ustawiono podpis K04 dla ${docs.length} wpisów.`)
   }
 
@@ -3211,7 +3388,7 @@ function App() {
     const q = normalizeText(haccpSearch)
     const sourceDocs = docsFilter === 'K02' ? buildSyntheticK02Docs(haccpDocs)
       : docsFilter === 'K03' ? syntheticK03Docs
-      : docsFilter === 'K04' ? syntheticK04Docs
+      : docsFilter === 'K04' ? mergedK04Docs
       : docsFilter === 'K06' ? mergedK06Docs
       : docsFilter === 'K07' ? mergedK07Docs
       : haccpDocs
@@ -3237,7 +3414,7 @@ function App() {
         if (!q) return true
         return normalizeText(`${d.lot_no || ''} ${d.product_name || ''} ${d.supplier_name || ''} ${d.document_no || ''} ${d.chamber_code || ''}`).includes(q)
       })
-  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, syntheticK04Docs, syntheticK07Docs, mergedK06Docs, mergedK07Docs, k03AssortmentFilter, docsDateFrom, docsDateTo, docsWorkflowFilter])
+  }, [haccpDocs, docsFilter, haccpSearch, haccpStatusFilter, k02Overrides, syntheticK03Docs, mergedK04Docs, syntheticK07Docs, mergedK06Docs, mergedK07Docs, k03AssortmentFilter, docsDateFrom, docsDateTo, docsWorkflowFilter])
 
 
   function docInSelectedPeriod(doc) {
@@ -3311,7 +3488,7 @@ function App() {
             : doc.document_type === 'K02'
               ? `${doc.document_type}|${period}`
               : doc.document_type === 'K04'
-                ? `${doc.document_type}|${period}|${chamber}|${productGroup}`
+                ? `${doc.document_type}|${period}`
                 : `${doc.document_type}|${period}|${product}|${chamber}`
       if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K04' ? productGroup : (doc.document_type === 'K06' ? 'Produkt gotowy' : doc.document_type === 'K07' ? 'Kontrola sita CCP1' : product), chamber, docs: [] })
       map.get(key).docs.push(doc)
@@ -3324,7 +3501,7 @@ function App() {
       return {
         ...g,
         product: g.type === 'K04'
-          ? (products.length === 1 ? products[0] : (docs[0]?.data?.produkty || g.product))
+          ? `Magazyn CP3 – ${g.period || ''}`
           : g.type === 'K06'
             ? (products.length <= 1 ? (products[0] || 'Produkt gotowy') : `${products.length} asortymentów`)
           : g.type === 'K07'
@@ -3332,10 +3509,10 @@ function App() {
           : g.type === 'K01'
             ? (products.length === 1 ? products[0] : 'według wpisów w tabeli')
             : g.product,
-        docs: g.type === 'K07' ? dedupeK07Docs(docs) : docs
+        docs: g.type === 'K04' ? dedupeK04Docs(docs) : g.type === 'K07' ? dedupeK07Docs(docs) : docs
       }
     })
-  }, [haccpListDocs, mergedK07Docs, docsDateFrom, docsDateTo])
+  }, [haccpListDocs, mergedK07Docs, mergedK04Docs, docsDateFrom, docsDateTo])
 
   const docsFilterStats = useMemo(() => {
     const filtersActive = Boolean(
@@ -3351,7 +3528,7 @@ function App() {
       totalWz: wzQueueLines.length,
       filtersActive
     }
-  }, [haccpDocsForFilter, haccpMonthlyGroups, filteredWzQueueLines, wzQueueLines, docsFilter, docsDateFrom, docsDateTo, docsWorkflowFilter, haccpSearch, haccpStatusFilter, k03AssortmentFilter, syntheticK03Docs, syntheticK04Docs, mergedK07Docs, mergedK06Docs, haccpDocs])
+  }, [haccpDocsForFilter, haccpMonthlyGroups, filteredWzQueueLines, wzQueueLines, docsFilter, docsDateFrom, docsDateTo, docsWorkflowFilter, haccpSearch, haccpStatusFilter, k03AssortmentFilter, syntheticK03Docs, mergedK04Docs, syntheticK04Docs, mergedK07Docs, mergedK06Docs, haccpDocs])
 
   const hubManualDocsForFilter = useMemo(() => {
     if (docsHubSection === 'kartoteki') return []
@@ -3434,14 +3611,14 @@ function App() {
     const productGroup = doc.data?.product_group || product
     const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
     if (doc.document_type === 'K04') {
-      return haccpMonthlyGroups.find(g => g.type === 'K04' && g.period === period && g.chamber === chamber && g.product === productGroup) || null
+      return haccpMonthlyGroups.find(g => g.type === 'K04' && g.period === period) || null
     }
     return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period && g.product === product && g.chamber === chamber) || null
   }
 
   function haccpCount(type) {
     if (type === 'K03') return syntheticK03Docs.length
-    if (type === 'K04') return syntheticK04Docs.length
+    if (type === 'K04') return mergedK04Docs.length
     if (type === 'K06') return mergedK06Docs.length
     if (type === 'K07') return mergedK07Docs.length
     return haccpDocs.filter(d => d.document_type === type).length
@@ -3449,7 +3626,7 @@ function App() {
 
   function haccpNonconformityCount(type) {
     if (type === 'K03') return syntheticK03Docs.filter(d => d.status === 'N').length
-    if (type === 'K04') return syntheticK04Docs.filter(d => d.status === 'N').length
+    if (type === 'K04') return mergedK04Docs.filter(d => d.status === 'N').length
     if (type === 'K06') return mergedK06Docs.filter(d => d.status === 'N').length
     if (type === 'K07') return mergedK07Docs.filter(d => d.status === 'N').length
     return haccpDocs.filter(d => d.document_type === type && d.status === 'N').length
@@ -3457,7 +3634,7 @@ function App() {
 
   function haccpPendingCount(type) {
     if (type === 'K03') return syntheticK03Docs.filter(d => !d.signed_by_operator).length
-    if (type === 'K04') return syntheticK04Docs.filter(d => !d.signed_by_operator).length
+    if (type === 'K04') return mergedK04Docs.filter(d => !d.signed_by_operator).length
     if (type === 'K06') return mergedK06Docs.filter(d => !d.signed_by_operator).length
     if (type === 'K07') return mergedK07Docs.filter(d => !d.signed_by_operator).length
     return haccpDocs.filter(d => d.document_type === type && !d.signed_by_operator).length
@@ -4175,54 +4352,116 @@ function App() {
     }
 
     if (group.type === 'K04') {
-      const maxRows = Math.max(16, docs.length)
-      const chamber = group.chamber || docs[0]?.chamber_code || 'CP3'
-      const productLabel = docs[0]?.product_name || docs[0]?.data?.produkty || group.product || ''
-      const defaultTemp = k04TempForProductName(productLabel)
+      const period = group.period
+      const periodDocs = dedupeK04Docs([...docs].sort(k04DocSort))
+      const blankCount = 3 + (k04BlankSlots[period] || 0)
+      const chamber = group.chamber || 'CP3'
+
+      function renderK04BlankRow(bi) {
+        const draftKey = `${period}|blank|${bi}`
+        const defaultDraft = {
+          document_date: `${period}-01`,
+          godzina: '',
+          temperatura_chlodnia_1: '',
+          temperatura_chlodnia_2: '',
+          podpis_kontrolujacego: '',
+          uwagi: 'P'
+        }
+        const draft = k04BlankDrafts[draftKey] || defaultDraft
+        const patchDraft = (updates) => setK04BlankDrafts(prev => ({
+          ...prev,
+          [draftKey]: { ...(prev[draftKey] || defaultDraft), ...updates }
+        }))
+        const saveBlankRow = async () => {
+          const nextDraft = { ...(k04BlankDrafts[draftKey] || draft) }
+          if (!nextDraft.document_date?.trim()) {
+            setMessage('K04: wpisz datę wiersza, potem Zapisz.')
+            return
+          }
+          const manualId = `K04-manual-${period}-${Date.now()}-${bi}`
+          const rowDoc = buildManualK04BlankDoc(period, manualId, nextDraft)
+          const saved = await saveK04DocumentField(rowDoc, nextDraft)
+          if (saved) {
+            setK04BlankDrafts(prev => {
+              const next = { ...prev }
+              delete next[draftKey]
+              return next
+            })
+            setK04BlankSlots(prev => ({ ...prev, [period]: Math.max(0, (prev[period] || 0) - 1) }))
+            setMessage('K04: zapisano wiersz.')
+          }
+        }
+        return (
+          <tr className="blank-row editable-blank" key={draftKey}>
+            <td><input className="cell-input no-print" type="date" value={draft.document_date} onChange={e => patchDraft({ document_date: e.target.value })} /></td>
+            <td><input className="cell-input no-print" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="09:15" /></td>
+            <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_1} onChange={e => patchDraft({ temperatura_chlodnia_1: e.target.value })} placeholder="°C" /></td>
+            <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_2} onChange={e => patchDraft({ temperatura_chlodnia_2: e.target.value })} placeholder="°C" /></td>
+            <td><select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
+            <td className={draft.uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={draft.uwagi} onChange={e => patchDraft({ uwagi: e.target.value })}><option value="P">P</option><option value="N">N</option></select></td>
+            <td className="col-actions no-print"><button type="button" className="mini secondary" onClick={() => void saveBlankRow()}>Zapisz</button></td>
+          </tr>
+        )
+      }
+
       return <div className="monthly-paper k02-original k04-original">
-        <div className="no-print employee-signature-row" style={{marginBottom: '10px'}}>
+        <div className="no-print employee-signature-row" style={{ marginBottom: '10px', flexWrap: 'wrap', gap: '10px' }}>
+          <button type="button" className="mini secondary" onClick={() => addK04ManualRow(group)}>+ Dodaj wiersz</button>
           <label>Podpis kontrolującego (zbiorczo)
             <select value={defaultK04Employee} onChange={e => setDefaultK04Employee(e.target.value)}>
               <option value="">Wybierz pracownika</option>
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
-          <button className="secondary" onClick={() => setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
+          <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
         </div>
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
             <td className="k02-title"><b>Karta K04 - Karta kontroli parametrów<br/>magazynowania produktów gotowych (CP3)</b></td>
-            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Komora:</b> {chamber}<br/><b>Produkt:</b> {productLabel}</td>
+            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0, 4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5, 7)}<br/><b>Komora:</b> {chamber}</td>
           </tr>
           <tr>
             <td className="k02-note">- Temp. CP3: jabłko na obierkę/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C.<br/><b>Jabłko przemysłowe nie jest magazynowane</b> – prosto do sprzedaży (K04.1).</td>
             <td className="k02-version">Wersja I/2024</td>
           </tr>
         </tbody></table>
-        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>nr 1 [°C]</th><th>Temperatura<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>
-          {Array.from({length: maxRows}).map((_,i) => {
-            const baseDoc = docs[i]
-            if (!baseDoc) return <tr className="blank-row" key={`k04-blank-${i}`}><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-            const doc = getLiveK04Doc(baseDoc, k04Overrides)
-            const godzina = doc.data?.godzina || '09:15'
-            const temp1 = doc.data?.temperatura_chlodnia_1 ?? String(defaultTemp)
-            const temp2 = doc.data?.temperatura_chlodnia_2 ?? String(defaultTemp)
-            const signed = doc.data?.podpis_kontrolujacego || doc.signed_by_operator || ''
-            const uwagi = formNormalizePn(doc.data?.uwagi || 'P')
-            return <tr key={doc.id}>
-              <td>{doc.document_date}</td>
-              <td><input className="cell-input no-print" value={godzina} onChange={e=>setK04Override(doc,'godzina',e.target.value)} /><span className="print-only">{godzina}</span></td>
-              <td><input className="cell-input no-print" value={temp1} onChange={e=>setK04Override(doc,'temperatura_chlodnia_1',e.target.value)} /><span className="print-only">{temp1}</span></td>
-              <td><input className="cell-input no-print" value={temp2} onChange={e=>setK04Override(doc,'temperatura_chlodnia_2',e.target.value)} /><span className="print-only">{temp2}</span></td>
-              <td><select className="mini-select no-print" value={signed} onChange={e=>setK04Override(doc,'podpis_kontrolujacego',e.target.value)}><option value="">Wybierz</option>{employees.map(emp=><option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-              <td className={uwagi==='N'?'pn-n':''}><select className="mini-select no-print" value={uwagi} onChange={e=>setK04Override(doc,'uwagi',e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>nr 1 [°C]</th><th>Temperatura<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th><th className="no-print">Akcje</th></tr></thead><tbody>
+          {periodDocs.map(doc => {
+            const live = getLiveK04Doc(doc, k04Overrides)
+            const godzina = live.data?.godzina ?? ''
+            const temp1 = live.data?.temperatura_chlodnia_1 ?? ''
+            const temp2 = live.data?.temperatura_chlodnia_2 ?? ''
+            const signed = live.data?.podpis_kontrolujacego || live.signed_by_operator || ''
+            const uwagi = formNormalizePn(live.data?.uwagi || 'P')
+            const produktyHint = live.data?.produkty ? ` · ${live.data.produkty}` : ''
+            return <tr key={live.id}>
+              <td>
+                <input className="cell-input no-print" type="date" value={live.document_date || ''} onChange={e => setK04Override(live, 'document_date', e.target.value)} />
+                <span className="print-only">{live.document_date}{produktyHint ? <small>{produktyHint}</small> : null}</span>
+              </td>
+              <td><input className="cell-input no-print" value={godzina} onChange={e => setK04Override(live, 'godzina', e.target.value)} placeholder="09:15" /><span className="print-only">{godzina}</span></td>
+              <td><input className="cell-input no-print" value={temp1} onChange={e => setK04Override(live, 'temperatura_chlodnia_1', e.target.value)} placeholder="°C" /><span className="print-only">{temp1}</span></td>
+              <td><input className="cell-input no-print" value={temp2} onChange={e => setK04Override(live, 'temperatura_chlodnia_2', e.target.value)} placeholder="°C" /><span className="print-only">{temp2}</span></td>
+              <td><select className="mini-select no-print" value={signed} onChange={e => setK04Override(live, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
+              <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(live, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+              <td className="col-actions no-print">
+                {k04DeletePending === live.id ? (
+                  <span className="k06-delete-confirm">
+                    <button type="button" className="mini danger" onClick={() => void deleteK04Row(live)}>Potwierdź</button>
+                    <button type="button" className="mini secondary" onClick={() => setK04DeletePending(null)}>Anuluj</button>
+                  </span>
+                ) : (
+                  <button type="button" className="mini danger" onClick={() => setK04DeletePending(live.id)}>Usuń</button>
+                )}
+              </td>
             </tr>
           })}
+          {Array.from({ length: blankCount }).map((_, bi) => renderK04BlankRow(bi))}
         </tbody></table>
-        {docs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: wykryto różne asortymenty w tej komorze tego dnia – sprawdź przypisanie partii w Magazynie.</div>}
-        <p className="hint no-print">K04: wpisy od daty przerobu (K03) do daty WZ. Tylko partie w CP3 (jabłko przemysłowe → K04.1).</p>
+        {periodDocs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: w tym dniu magazynowano różne asortymenty – sprawdź wpisy.</div>}
+        <p className="hint no-print">K04: jedna kartoteka na miesiąc (wszystkie produkty CP3). Wpisy auto z K03 uzupełniają dni przerobu–WZ. Każdą kolumnę edytujesz ręcznie; „+ Dodaj wiersz” lub „Utwórz kartotekę miesiąca” na liście K04.</p>
       </div>
     }
 
@@ -5939,6 +6178,58 @@ function App() {
               <td>{g.docs.length}</td>
               <td>{k02GroupHasManualMonth(g.docs) ? 'ręczna / miesiąc' : 'auto z K01'}</td>
               <td>{g.docs.filter(d => normalizePN(d.data?.uwagi || d.status) === 'N').length || '—'}</td>
+              <td className="row-actions">
+                <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
+                <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
+                <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
+                {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && (
+                  <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy}><Trash2 size={14}/> Usuń</button>
+                )}
+              </td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      </>}
+    </>
+  }
+
+  function renderK04Section() {
+    return <>
+      <div className="card inner-card no-print r13-add-panel">
+        <h3>Utwórz kartotekę K04 za miesiąc</h3>
+        <p className="hint">
+          Jedna kartoteka na miesiąc (wszystkie produkty CP3). System utworzy wpis na każdy dzień kalendarza – puste wiersze możesz uzupełnić ręcznie.
+          Wpisy auto z K03 (przerób–WZ) doklejają się do tej samej kartoteki. Zapis tylko w HACCP – bez wpływu na FIFO.
+        </p>
+        <div className="k03-bulk-row">
+          <label>Rok i miesiąc
+            <div className="r13-month-picker">
+              <button type="button" className="mini secondary" onClick={() => shiftK04NewMonth(-1)} title="Poprzedni miesiąc">◀</button>
+              <input type="month" value={k04NewMonth} onChange={e => setK04NewMonth(e.target.value)} />
+              <button type="button" className="mini secondary" onClick={() => shiftK04NewMonth(1)} title="Następny miesiąc">▶</button>
+            </div>
+          </label>
+          <label>Podpis kontrolujący (domyślny)
+            <select value={defaultK04Employee} onChange={e => setDefaultK04Employee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button onClick={createK04MonthKartoteka} disabled={haccpBusy}>{haccpBusy ? 'Tworzenie…' : 'Utwórz kartotekę miesiąca'}</button>
+        </div>
+        <p className="hint">Silnik formularzy: {HACCP_FORMS_VERSION}. Otwórz kartotekę miesiąca – każda kolumna edytowalna, „+ Dodaj wiersz”, Usuń wiersz.</p>
+      </div>
+      {haccpMonthlyGroups.length === 0 && <p className="hint">Brak kartotek K04 w filtrze – utwórz miesiąc powyżej lub poczekaj na K03 w CP3.</p>}
+      {haccpMonthlyGroups.length > 0 && <>
+        <h3>Lista kartotek K04</h3>
+        <div className="table-wrap docs-table-wrap"><table className="docs-table">
+          <thead><tr><th>Okres</th><th>Wpisy</th><th>Typ</th><th>N</th><th>Akcje</th></tr></thead>
+          <tbody>{haccpMonthlyGroups.map(g => (
+            <tr key={g.key}>
+              <td><b>{periodLabel(g)}</b><KartotekaPrintBadge group={g} localPrints={kartotekaLocalPrints} onToggle={toggleKartotekaPrintStatus} /></td>
+              <td>{g.docs.length}</td>
+              <td>{k04GroupHasManualMonth(g.docs) ? 'ręczna / miesiąc' : 'auto + ręczna'}</td>
+              <td>{g.docs.filter(d => formNormalizePn(d.data?.uwagi || d.status) === 'N').length || '—'}</td>
               <td className="row-actions">
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
@@ -10417,6 +10708,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
         {docsFilter === 'K02' && renderK02Section()}
 
+        {docsFilter === 'K04' && renderK04Section()}
+
         {docsFilter === 'K03' && <>
           <section className="card k03-bulk-panel">
             <div className="section-title"><RefreshCcw size={20}/><div>
@@ -10502,7 +10795,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
         {!['K01.1', 'K04.1', 'K05', 'K02'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
-          {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – uzupełnij K03 (WZ) i odśwież magazyn, lub przypisz partie w CP3.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – utwórz kartotekę miesiąca powyżej lub uzupełnij K03 (magazyn CP3).</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – utwórz K03 dla WZ (przerób / bez przerobu), potem odśwież kartoteki.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak K07 – wpisy powstają z K03 (decyzja: przerób) dla maliny i porzeczki czarnej. Odśwież kartoteki lub uzupełnij w kartotece miesięcznej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – auto po produkcji lub ręczny wpis poniżej.</p>}

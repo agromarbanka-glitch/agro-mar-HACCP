@@ -1,7 +1,9 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '2.0'
+export const HACCP_FORMS_VERSION = '2.1'
+
+import { calendarDaysInMonth } from './r13Engine'
 
 function normalizeText(value) {
   return String(value || '')
@@ -171,10 +173,75 @@ function applyK04Override(doc, ov = {}) {
   if (Object.prototype.hasOwnProperty.call(ov, 'uwagi')) data.uwagi = ov.uwagi
   return {
     ...doc,
+    document_date: Object.prototype.hasOwnProperty.call(ov, 'document_date') ? ov.document_date : doc.document_date,
     data,
     status: normalizePn(data.uwagi || 'P') === 'N' ? 'N' : 'P',
     signed_by_operator: ov.podpis_kontrolujacego ?? doc.signed_by_operator ?? ''
   }
+}
+
+export function normalizeK04Data(data = {}, signedBy = '') {
+  const d = data || {}
+  return {
+    godzina: d.godzina ?? '',
+    temperatura_chlodnia_1: d.temperatura_chlodnia_1 ?? '',
+    temperatura_chlodnia_2: d.temperatura_chlodnia_2 ?? '',
+    podpis_kontrolujacego: signedBy || d.podpis_kontrolujacego || '',
+    uwagi: normalizePn(d.uwagi || 'P'),
+    produkty: d.produkty || '',
+    product_group: d.product_group || '',
+    month_key: d.month_key || '',
+    sort_order: Number(d.sort_order || 0),
+    manual_month: Boolean(d.manual_month),
+    auto_source: d.auto_source || '',
+    lot_ids: Array.isArray(d.lot_ids) ? d.lot_ids : []
+  }
+}
+
+export function k04StableKey(doc) {
+  const date = String(doc?.document_date || '').slice(0, 10)
+  const period = String(doc?.data?.month_key || date.slice(0, 7))
+  return `${period}|${date}`
+}
+
+export function isSyntheticK04Doc(doc) {
+  if (!doc || doc.document_type !== 'K04') return false
+  if (doc.synthetic) return true
+  const id = String(doc.id || '')
+  if (id.startsWith('K04-manual-')) return true
+  return id.startsWith('K04-') && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+}
+
+export function scoreK04Doc(doc) {
+  let s = 0
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(doc?.id || ''))) s += 50
+  if (doc?.data?.manual_month) s += 20
+  if (doc?.data?.auto_source === 'manual') s += 15
+  if (doc?.data?.godzina) s += 5
+  if (doc?.signed_by_operator || doc?.data?.podpis_kontrolujacego) s += 5
+  if (doc?.data?.temperatura_chlodnia_1) s += 2
+  return s
+}
+
+export function k04DocSort(a, b) {
+  return String(a.document_date || '').localeCompare(String(b.document_date || '')) ||
+    Number(a.data?.sort_order || 0) - Number(b.data?.sort_order || 0) ||
+    String(a.id || '').localeCompare(String(b.id || ''))
+}
+
+export function dedupeK04Docs(docs = []) {
+  const byKey = new Map()
+  for (const d of docs || []) {
+    if (d?.document_type !== 'K04') continue
+    const key = k04StableKey(d)
+    const existing = byKey.get(key)
+    if (!existing || scoreK04Doc(d) > scoreK04Doc(existing)) byKey.set(key, d)
+  }
+  return Array.from(byKey.values()).sort(k04DocSort)
+}
+
+export function k04GroupHasManualMonth(docs = []) {
+  return (docs || []).some(d => d.data?.manual_month || d.data?.auto_source === 'manual_month')
 }
 
 export const K07_KONTROLA_ETAPY = [
@@ -647,19 +714,20 @@ export function getLiveK06Doc(doc, overrides = {}) {
 function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGroup, productName, lot, start, end, lotId = null }) {
   const temp = k04TempForProductName(productName)
   for (const date of dateRangeInclusive(start, end)) {
+    const period = date.slice(0, 7)
     const mixedKey = `${chamberCode}|${date}`
-    const id = `K04-${chamberCode}-${productGroup}-${date}`
+    const id = `K04-${period}-${date}`
     if (!dailyEntries.has(id)) {
       dailyEntries.set(id, {
         id,
         synthetic: true,
         document_type: 'K04',
         document_date: date,
-        product_name: productName,
+        product_name: 'CP3 – magazyn produktów gotowych',
         lot_no: lot?.lot_no || '',
         supplier_name: '',
-        document_no: `K04/${chamberCode}/${productGroup}/${date}`,
-        chamber_code: chamberCode,
+        document_no: `K04/${period}/${date}`,
+        chamber_code: chamberCode || 'CP3',
         qty: Number(lot?.remaining_qty || lot?.initial_qty || 0),
         status: 'P',
         data: {
@@ -670,8 +738,10 @@ function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGrou
           uwagi: 'P',
           product_group: productGroup,
           produkty: productName,
+          month_key: period,
           lot_ids: lotId ? [lotId] : [],
-          k03_source: lotId ? null : 'k03'
+          k03_source: lotId ? null : 'k03',
+          auto_source: 'trace'
         },
         signed_by_operator: '',
         document_version: 'I/2024',
@@ -680,12 +750,18 @@ function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGrou
     } else {
       const entry = dailyEntries.get(id)
       if (lotId && !entry.data.lot_ids.includes(lotId)) entry.data.lot_ids.push(lotId)
-      if (!normalizeText(entry.product_name).includes(normalizeText(productName))) {
-        entry.data.produkty = `${entry.data.produkty}, ${productName}`
+      const produkty = String(entry.data.produkty || '')
+      if (productName && !normalizeText(produkty).includes(normalizeText(productName))) {
+        entry.data.produkty = produkty ? `${produkty}, ${productName}` : productName
+      }
+      if (productGroup && entry.data.product_group && entry.data.product_group !== productGroup) {
+        mixedDays.add(mixedKey)
+      } else if (productGroup && !entry.data.product_group) {
+        entry.data.product_group = productGroup
       }
     }
     const groupsOnDay = dailyEntries.get(id)?.data?.product_group
-    if (groupsOnDay && groupsOnDay !== productGroup) mixedDays.add(mixedKey)
+    if (groupsOnDay && productGroup && groupsOnDay !== productGroup) mixedDays.add(mixedKey)
   }
 }
 
@@ -756,17 +832,13 @@ export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}, k03Fo
     })
   }
 
-  return Array.from(dailyEntries.values()).map(doc => {
+  return dedupeK04Docs(Array.from(dailyEntries.values()).map(doc => {
     const mixedKey = `${doc.chamber_code}|${doc.document_date}`
     if (mixedDays.has(mixedKey)) {
       doc.data.chamber_mix_warning = true
     }
     return applyK04Override(doc, overrides[doc.id] || {})
-  }).sort((a, b) =>
-    String(a.chamber_code).localeCompare(String(b.chamber_code)) ||
-    String(a.data?.product_group || '').localeCompare(String(b.data?.product_group || '')) ||
-    String(a.document_date).localeCompare(String(b.document_date))
-  )
+  }))
 }
 
 /** Fallback gdy brak danych magazynowych – stary mechanizm z haccp_documents. */
@@ -943,6 +1015,92 @@ export function buildK06InsertPayload(doc) {
   }
 }
 
+export function buildK04MonthPayloads(yearMonth, options = {}) {
+  const { signedBy = '' } = options
+  return calendarDaysInMonth(yearMonth).map((day, i) => {
+    const data = normalizeK04Data({
+      month_key: yearMonth,
+      sort_order: i + 1,
+      godzina: day.isSunday ? '' : '09:15',
+      temperatura_chlodnia_1: day.isSunday ? '' : '0',
+      temperatura_chlodnia_2: day.isSunday ? '' : '0',
+      podpis_kontrolujacego: day.isSunday ? '' : signedBy,
+      uwagi: day.isSunday ? '' : 'P',
+      manual_month: true,
+      auto_source: 'manual_month'
+    }, signedBy)
+    return {
+      document_type: 'K04',
+      lot_id: null,
+      operation_id: null,
+      document_date: day.date,
+      document_no: `K04/${yearMonth}/${String(i + 1).padStart(2, '0')}`,
+      product_name: 'CP3 – magazyn produktów gotowych',
+      lot_no: null,
+      supplier_name: null,
+      chamber_code: 'CP3',
+      qty: 0,
+      status: 'P',
+      data,
+      signed_by_operator: day.isSunday ? null : (signedBy || null),
+      document_version: 'I/2024',
+      updated_at: new Date().toISOString()
+    }
+  })
+}
+
+/** Pusty wiersz K04 do ręcznego uzupełnienia. */
+export function buildManualK04BlankDoc(period, manualId, seed = {}, overrides = {}) {
+  const date = String(seed.document_date || `${period}-01`).slice(0, 10)
+  const id = manualId || `K04-manual-${period}-${Date.now()}`
+  const ov = overrides[id] || {}
+  const base = {
+    id,
+    synthetic: true,
+    document_type: 'K04',
+    document_date: date,
+    product_name: 'CP3 – magazyn produktów gotowych',
+    lot_no: '',
+    document_no: `K04/reczny/${date}`,
+    chamber_code: 'CP3',
+    qty: 0,
+    status: 'P',
+    data: normalizeK04Data({
+      godzina: seed.godzina || '',
+      temperatura_chlodnia_1: seed.temperatura_chlodnia_1 ?? '',
+      temperatura_chlodnia_2: seed.temperatura_chlodnia_2 ?? '',
+      podpis_kontrolujacego: seed.podpis_kontrolujacego || '',
+      uwagi: seed.uwagi || 'P',
+      month_key: period,
+      auto_source: 'manual'
+    }),
+    signed_by_operator: seed.podpis_kontrolujacego || '',
+    document_version: 'I/2024',
+    created_at: date
+  }
+  return applyK04Override(base, ov)
+}
+
+export function buildK04InsertPayload(doc) {
+  const live = doc.data ? applyK04Override(doc, {}) : doc
+  const d = normalizeK04Data(live.data || {}, live.signed_by_operator)
+  if (!d.month_key && live.document_date) d.month_key = String(live.document_date).slice(0, 7)
+  return {
+    document_type: 'K04',
+    operation_id: live.operation_id || null,
+    document_date: live.document_date,
+    product_name: live.product_name || 'CP3 – magazyn produktów gotowych',
+    lot_no: live.lot_no || null,
+    document_no: live.document_no || `K04/${live.document_date || 'brak'}`,
+    chamber_code: live.chamber_code || 'CP3',
+    qty: live.qty || 0,
+    status: live.status || (normalizePn(d.uwagi) === 'N' ? 'N' : 'P'),
+    data: d,
+    signed_by_operator: live.signed_by_operator || d.podpis_kontrolujacego || null,
+    document_version: 'I/2024'
+  }
+}
+
 export function buildK07InsertPayload(doc) {
   const live = doc.data ? { ...doc, data: normalizeK07Data(doc.data, doc) } : doc
   const d = normalizeK07Data(live.data || {}, live)
@@ -982,18 +1140,18 @@ function k04TempNote(productName = '', chamberCode = '') {
 }
 
 export function buildK04MonthlyHtml(group, escapeHtml) {
-  const docs = group.docs || []
+  const docs = dedupeK04Docs(group.docs || [])
   const year = (group.period || docs[0]?.document_date || '').slice(0, 4)
   const month = (group.period || docs[0]?.document_date || '').slice(5, 7)
   const chamber = group.chamber || docs[0]?.chamber_code || 'CP3'
-  const productLabel = group.product || docs[0]?.product_name || docs[0]?.data?.produkty || ''
+  const productLabel = docs.map(d => d.data?.produkty).filter(Boolean).join(', ') || 'według wpisów w tabeli'
   const rows = docs.map(doc => {
     const d = doc.data || {}
-    return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(d.godzina || '09:15')}</td><td>${escapeHtml(d.temperatura_chlodnia_1 || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_2 || '')}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis_kontrolujacego || '')}</td><td>${normalizePn(d.uwagi || 'P')}</td></tr>`
+    return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(d.godzina || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_1 || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_2 || '')}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis_kontrolujacego || '')}</td><td>${normalizePn(d.uwagi || 'P')}</td></tr>`
   }).join('')
   const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
-  const note = k04TempNote(productLabel, chamber)
-  return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(chamber)} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.5}.meta{width:25%;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:11pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K04 - Karta kontroli parametrów<br>magazynowania produktów gotowych (CP3)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Komora:</b> ${escapeHtml(chamber)}<br><b>Produkt:</b> ${escapeHtml(productLabel)}</td></tr><tr><td class="temp-note">${note}</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br>nr 1 [°C]</th><th>Temperatura<br>nr 2 [°C]</th><th>Podpis osoby<br>kontrolującej</th><th>Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  const note = k04TempNote('', chamber)
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(group.period || '')}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.5}.meta{width:25%;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:11pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K04 - Karta kontroli parametrów<br>magazynowania produktów gotowych (CP3)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Komora:</b> ${escapeHtml(chamber)}</td></tr><tr><td class="temp-note">${note}</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br>nr 1 [°C]</th><th>Temperatura<br>nr 2 [°C]</th><th>Podpis osoby<br>kontrolującej</th><th>Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildK06MonthlyHtml(group, escapeHtml) {
@@ -1138,10 +1296,10 @@ export function buildManualExcelRows(group, config) {
 }
 
 export function buildK04ExcelRows(group) {
-  const docs = group.docs || []
+  const docs = dedupeK04Docs(group.docs || [])
   const rows = []
   rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
-  rows.push(['Karta K04 - magazynowanie produktów gotowych (CP3)', '', '', '', '', `Okres: ${group.period || ''} · ${group.chamber || ''} · ${group.product || ''}`])
+  rows.push(['Karta K04 - magazynowanie produktów gotowych (CP3)', '', '', '', '', `Okres: ${group.period || ''}`])
   rows.push(['Data', 'Godzina', 'Temperatura nr 1 [°C]', 'Temperatura nr 2 [°C]', 'Podpis', 'Uwagi (P/N)'])
   for (const doc of docs) {
     const d = doc.data || {}
