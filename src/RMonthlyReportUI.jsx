@@ -20,6 +20,7 @@ import {
   r04MakeStation,
   buildR04ControlPayload,
   defaultR04Reading,
+  normalizeR04Reading,
   resolveR04Stations,
   findPreviousR04Control,
   r00MakeEmployeeColumn,
@@ -31,6 +32,7 @@ import {
   R00_DEFAULT_GODZINA
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
+import { batchInsertHaccpDocuments } from './haccpLoadHelpers'
 import {
   buildR11CalendarRows, r11MagnetsForDoc, r11UwagiForDoc,
   r11MakeColumn, R11_HEADER, resolveR11Columns, buildR11SparseDisplayRows,
@@ -473,7 +475,11 @@ export function RMonthlyReportSection({
 }
 
 async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage, code, mergeHaccpDoc) {
-  if (!supabase || !doc?.id) return
+  if (!supabase) return
+  if (!doc?.id) {
+    setMessage(`${code}: nie można zapisać – brak ID wpisu. Odśwież kartoteki i otwórz ponownie.`)
+    return
+  }
   const nextData = { ...(doc.data || {}), ...patch }
   if (patch.nested && typeof patch.nested === 'object') {
     Object.assign(nextData, patch.nested)
@@ -522,6 +528,11 @@ export function RMonthlyReportPreview({
   }, [cfg?.layout, singleDoc?.id, singleDoc?.updated_at])
 
   if (!cfg) return <div>Brak konfiguracji {code}</div>
+
+  function liveDoc(doc) {
+    if (!doc?.id) return doc
+    return (haccpDocs || []).find(d => d.id === doc.id) || doc
+  }
 
   const period = String(group.period || '')
   const year = period.slice(0, 4)
@@ -651,26 +662,37 @@ export function RMonthlyReportPreview({
     const existing = sortRMonthlyDocs(docs.filter(d => !d.data?.is_shell && d.data?.stations))
     const stations = existing.length
       ? (existing[existing.length - 1].data?.stations || columns).map(s => ({ ...s }))
-      : (columns.length ? columns : resolveR04Stations([], period, [])).map(s => ({ ...s }))
+      : (columns.length ? columns : resolveR04Stations(haccpDocs, period, [])).map(s => ({ ...s }))
     const copyFrom = existing.length
       ? existing[existing.length - 1]
       : findPreviousR04Control(haccpDocs, period)
     const payload = buildR04ControlPayload(period, date, stations, defaultEmployee, '', copyFrom)
-    const { error } = await supabase.from('haccp_documents').insert(payload)
-    if (error) { setMessage(`${code}: ${error.message}`); return }
-    await loadHaccpDocs()
-    setMessage(`${code}: dodano kontrolę na ${formatRMonthlyPlDate(date)} (${stations.length} stacji).`)
+    try {
+      const { rows } = await batchInsertHaccpDocuments(supabase, [payload])
+      if (mergeHaccpDocsBatch) mergeHaccpDocsBatch(rows)
+      else await loadHaccpDocs()
+      setMessage(`${code}: dodano kontrolę na ${formatRMonthlyPlDate(date)} (${stations.length} stacji).`)
+    } catch (err) {
+      setMessage(`${code}: ${err.message}`)
+    }
   }
 
   async function saveR04ControlDate(doc, date) {
-    if (!supabase || !doc?.id) return
-    const { error } = await supabase.from('haccp_documents').update({
+    const current = liveDoc(doc)
+    if (!supabase || !current?.id) return
+    const payload = {
       document_date: date,
-      data: { ...(doc.data || {}), control_date: date },
+      data: { ...(current.data || {}), control_date: date },
       updated_at: new Date().toISOString()
-    }).eq('id', doc.id)
-    if (error) setMessage(`${code}: ${error.message}`)
-    else await loadHaccpDocs()
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', current.id)
+      if (error) throw error
+      if (mergeHaccpDoc) mergeHaccpDoc(current.id, payload)
+      else await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`${code}: ${err.message}`)
+    }
   }
 
   async function deleteControl(doc) {
@@ -683,41 +705,62 @@ export function RMonthlyReportPreview({
     setMessage(`${code}: usunięto kontrolę.`)
   }
 
-  function saveR04Reading(doc, stId, patch) {
-    const readings = { ...(doc.data?.readings || {}), [stId]: { ...(doc.data?.readings?.[stId] || defaultR04Reading(cfg)), ...patch } }
-    saveDoc(supabase, doc, { readings }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
+  async function saveR04Reading(doc, stId, patch) {
+    const current = liveDoc(doc)
+    const readings = {
+      ...(current.data?.readings || {}),
+      [stId]: normalizeR04Reading({
+        ...(current.data?.readings?.[stId] || defaultR04Reading(cfg)),
+        ...patch
+      }, cfg)
+    }
+    await saveDoc(supabase, current, { readings }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)
   }
 
   async function addR04StationToDoc(doc, kind) {
-    if (!supabase || !doc) return
-    const stations = [...(doc.data?.stations || columns)]
+    const current = liveDoc(doc)
+    if (!supabase || !current?.id) return
+    const stations = [...(current.data?.stations || columns)]
     const col = r04MakeStation(kind, stations)
     if (!col) return
     const next = [...stations, col]
-    const readings = { ...(doc.data?.readings || {}), [col.id]: defaultR04Reading(cfg) }
+    const readings = { ...(current.data?.readings || {}), [col.id]: defaultR04Reading(cfg) }
     saveRMonthlyColumns(code, next)
-    const { error } = await supabase.from('haccp_documents').update({
-      data: { ...(doc.data || {}), stations: next, readings },
+    const payload = {
+      data: { ...(current.data || {}), stations: next, readings },
       updated_at: new Date().toISOString()
-    }).eq('id', doc.id)
-    if (error) { setMessage(`${code}: ${error.message}`); return }
-    await loadHaccpDocs()
-    setMessage(`${code}: dodano ${col.label}.`)
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', current.id)
+      if (error) throw error
+      if (mergeHaccpDoc) mergeHaccpDoc(current.id, payload)
+      else await loadHaccpDocs()
+      setMessage(`${code}: dodano ${col.label}.`)
+    } catch (err) {
+      setMessage(`${code}: ${err.message}`)
+    }
   }
 
   async function removeR04Station(doc, stId) {
     if (!allowDelete) { setMessage('Tylko administrator może usuwać.'); return }
-    if (!supabase || !doc || !confirmDelete('Tę stację z kontroli deratyzacji.')) return
-    const stations = (doc.data?.stations || []).filter(s => s.id !== stId)
-    const readings = { ...(doc.data?.readings || {}) }
+    const current = liveDoc(doc)
+    if (!supabase || !current?.id || !confirmDelete('Tę stację z kontroli deratyzacji.')) return
+    const stations = (current.data?.stations || []).filter(s => s.id !== stId)
+    const readings = { ...(current.data?.readings || {}) }
     delete readings[stId]
     saveRMonthlyColumns(code, stations)
-    const { error } = await supabase.from('haccp_documents').update({
-      data: { ...(doc.data || {}), stations, readings },
+    const payload = {
+      data: { ...(current.data || {}), stations, readings },
       updated_at: new Date().toISOString()
-    }).eq('id', doc.id)
-    if (error) { setMessage(`${code}: ${error.message}`); return }
-    await loadHaccpDocs()
+    }
+    try {
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', current.id)
+      if (error) throw error
+      if (mergeHaccpDoc) mergeHaccpDoc(current.id, payload)
+      else await loadHaccpDocs()
+    } catch (err) {
+      setMessage(`${code}: ${err.message}`)
+    }
   }
 
   const headR04 = (docNo = '') => (
@@ -855,6 +898,7 @@ export function RMonthlyReportPreview({
 
   if (cfg.layout === 'r04-control') {
     const controls = sortRMonthlyDocs(docs.filter(d => !d.data?.is_shell && (d.data?.stations || d.data?.readings)))
+      .map(d => liveDoc(d))
     const stationsFromFirst = controls[0]?.data?.stations || columns
 
     return <div className="monthly-paper r04-paper">{toolbar}
@@ -876,11 +920,12 @@ export function RMonthlyReportPreview({
             {headR04(doc.data?.document_no)}
             <div className="r04-meta-row no-print">
               <label>Nr bieżący dokumentu
-                <input className="cell-input" defaultValue={doc.data?.document_no || ''} onBlur={e => saveDoc(supabase, doc, { document_no: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} />
+                <input className="cell-input" key={`${doc.id}-docno-${doc.updated_at || ''}`} defaultValue={doc.data?.document_no || ''}
+                  onBlur={e => void saveDoc(supabase, doc, { document_no: e.target.value }, undefined, loadHaccpDocs, setMessage, code, mergeHaccpDoc)} />
               </label>
               <label>Data kontroli
-                <input type="date" className="cell-input" defaultValue={(doc.data?.control_date || doc.document_date || '').slice(0, 10)}
-                  onBlur={e => saveR04ControlDate(doc, e.target.value)} />
+                <input type="date" className="cell-input" key={`${doc.id}-date-${doc.updated_at || ''}`} defaultValue={(doc.data?.control_date || doc.document_date || '').slice(0, 10)}
+                  onBlur={e => void saveR04ControlDate(doc, e.target.value)} />
               </label>
               <label>{cfg.signLabel}
                 <select className="mini-select" value={doc.signed_by_operator || ''} onChange={e => saveDoc(supabase, doc, {}, e.target.value, loadHaccpDocs, setMessage, code, mergeHaccpDoc)}>
@@ -918,25 +963,29 @@ export function RMonthlyReportPreview({
                 </thead>
                 <tbody>
                   {stations.map(st => {
-                    const rd = doc.data?.readings?.[st.id] || defaultR04Reading(cfg)
+                    const rd = normalizeR04Reading(doc.data?.readings?.[st.id], cfg)
                     const kindHint = st.kind === 'trap' ? 'Pułapka żywołowna' : 'Stacja deratyzacyjna'
                     return (
                       <tr key={st.id}>
                         <td className="r04-station-label"><b>{st.label}</b><br/><small>{kindHint}</small></td>
                         <td>
-                          <input className="cell-input no-print" placeholder="np. 25%" defaultValue={rd.bait || ''} onBlur={e => saveR04Reading(doc, st.id, { bait: e.target.value })} />
+                          <input className="cell-input no-print" placeholder="np. 25%" key={`${doc.id}-${st.id}-bait-${doc.updated_at || ''}`} defaultValue={rd.bait}
+                            onBlur={e => void saveR04Reading(doc, st.id, { bait: e.target.value })} />
                           <span className="print-only">{rd.bait || ''}</span>
                         </td>
                         <td>
-                          <input className="cell-input no-print" defaultValue={rd.rodents || cfg.defaultRodents} onBlur={e => saveR04Reading(doc, st.id, { rodents: e.target.value })} />
-                          <span className="print-only">{rd.rodents || cfg.defaultRodents}</span>
+                          <input className="cell-input no-print" key={`${doc.id}-${st.id}-rodents-${doc.updated_at || ''}`} defaultValue={rd.rodents}
+                            onBlur={e => void saveR04Reading(doc, st.id, { rodents: e.target.value })} />
+                          <span className="print-only">{rd.rodents}</span>
                         </td>
                         <td>
-                          <input className="cell-input no-print" defaultValue={rd.state || cfg.defaultState} onBlur={e => saveR04Reading(doc, st.id, { state: e.target.value })} />
-                          <span className="print-only">{rd.state || cfg.defaultState}</span>
+                          <input className="cell-input no-print" key={`${doc.id}-${st.id}-state-${doc.updated_at || ''}`} defaultValue={rd.state}
+                            onBlur={e => void saveR04Reading(doc, st.id, { state: e.target.value })} />
+                          <span className="print-only">{rd.state}</span>
                         </td>
                         <td>
-                          <input className="cell-input no-print" defaultValue={rd.notes || ''} onBlur={e => saveR04Reading(doc, st.id, { notes: e.target.value })} />
+                          <input className="cell-input no-print" key={`${doc.id}-${st.id}-notes-${doc.updated_at || ''}`} defaultValue={rd.notes}
+                            onBlur={e => void saveR04Reading(doc, st.id, { notes: e.target.value })} />
                           <span className="print-only">{rd.notes || ''}</span>
                         </td>
                         <td className="no-print">

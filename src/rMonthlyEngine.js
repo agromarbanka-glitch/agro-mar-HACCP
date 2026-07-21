@@ -240,6 +240,17 @@ export function columnsFromDocs(code, docs, fallback) {
       auto_m: Boolean(c.auto_m)
     }))
   }
+  if (cfg?.layout === 'r04-control') {
+    const shell = (docs || []).find(d => d.data?.is_shell && Array.isArray(d.data?.stations) && d.data.stations.length)
+    if (shell) {
+      return shell.data.stations.map((c, i) => ({
+        id: String(c.id || `col-${i + 1}`),
+        label: String(c.label || `Kolumna ${i + 1}`),
+        kind: String(c.kind || ''),
+        auto_m: Boolean(c.auto_m)
+      }))
+    }
+  }
   return (fallback || loadRMonthlyColumns(code)).map(c => ({ ...c }))
 }
 
@@ -269,6 +280,20 @@ export function defaultR04Reading(cfg = getRMonthlyConfig('R04')) {
     rodents: cfg?.defaultRodents || 'brak gryzoni',
     state: cfg?.defaultState || 'nienaruszona',
     notes: ''
+  }
+}
+
+/** Normalizacja odczytu stacji (stary station-matrix miał rodents jako checkbox bool). */
+export function normalizeR04Reading(reading, cfg = getRMonthlyConfig('R04')) {
+  const rd = reading || {}
+  let rodents = rd.rodents
+  if (rodents === true) rodents = 'obecność gryzoni'
+  else if (rodents === false) rodents = cfg?.defaultRodents || 'brak gryzoni'
+  return {
+    bait: String(rd.bait ?? ''),
+    rodents: String(rodents ?? cfg?.defaultRodents ?? 'brak gryzoni'),
+    state: String(rd.state ?? cfg?.defaultState ?? 'nienaruszona'),
+    notes: String(rd.notes ?? '')
   }
 }
 
@@ -420,6 +445,7 @@ export function buildRMonthlyPeriodGroups(code, docs) {
       const keepAll = ['register-rows', 'station-matrix', 'r04-control', 'single-month', 'quarter-trend'].includes(cfg.layout)
       const columns = code === 'R00' ? r00ResolveColumns(rows.length ? rows : allDocs, loadRMonthlyColumns(code))
         : code === 'R11' ? resolveR11Columns(rows.length ? rows : allDocs)
+        : cfg.layout === 'r04-control' ? columnsFromDocs(code, allDocs)
         : columnsFromDocs(code, rows.length ? rows : allDocs)
       let docsForGroup = keepAll ? allDocs : (rows.length ? rows : allDocs.filter(d => !d.data?.is_shell))
       if (cfg.layout === 'r04-control') {
