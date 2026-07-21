@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '1.8'
+export const HACCP_FORMS_VERSION = '1.9'
 
 function normalizeText(value) {
   return String(value || '')
@@ -200,14 +200,79 @@ export function isK07EligibleDoc(doc) {
 }
 
 function k07PartiaGroupKey(doc) {
-  const partia = String(doc?.data?.numer_partii || doc?.lot_no || '').trim().toLowerCase()
-  const date = String(doc?.document_date || '').slice(0, 10)
-  if (partia && date) return `partia:${partia}|${date}`
+  const partia = normalizeK07Partia(doc?.data?.numer_partii || doc?.lot_no)
+  if (partia) return `partia:${partia}`
   const k03Key = doc?.data?.k03_key
   if (k03Key) return `k03:${k03Key}`
   const opId = doc?.data?.operation_id || doc?.operation_id
   if (opId) return `op:${opId}`
   return `id:${doc?.id || ''}`
+}
+
+/** Normalizacja numeru partii (pcz/006 = Pcz/006). */
+export function normalizeK07Partia(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, '')
+}
+
+/**
+ * Stabilny klucz K07: jedna partia × jeden etap = max 1 wiersz (data może się różnić w duplikatach).
+ * Priorytet: k03_key → numer partii → operation_id.
+ */
+export function k07StableKey(doc) {
+  const etap = doc?.data?.kontrola_etap || 'przed'
+  const k03Key = doc?.data?.k03_key
+  if (k03Key) return `k03:${k03Key}|${etap}`
+  const partia = normalizeK07Partia(doc?.data?.numer_partii || doc?.lot_no)
+  if (partia) return `partia:${partia}|${etap}`
+  const opId = doc?.data?.operation_id || doc?.operation_id
+  if (opId) return `op:${opId}|${etap}`
+  return `id:${doc?.id || ''}|${etap}`
+}
+
+export function k07CoverageForK03Key(haccpDocs, k03Key) {
+  const entries = (haccpDocs || []).filter(d =>
+    d.document_type === 'K07' && d.data?.k03_key === k03Key
+  )
+  const etaps = new Set(entries.map(d => d.data?.kontrola_etap || 'przed'))
+  return { przed: etaps.has('przed'), po: etaps.has('po') }
+}
+
+export function k07CoverageForPartiaEtap(haccpDocs, numerPartii) {
+  const partia = normalizeK07Partia(numerPartii)
+  if (!partia) return { przed: false, po: false }
+  const entries = (haccpDocs || []).filter(d => {
+    if (d.document_type !== 'K07') return false
+    return normalizeK07Partia(d.data?.numer_partii || d.lot_no) === partia
+  })
+  const etaps = new Set(entries.map(d => d.data?.kontrola_etap || 'przed'))
+  return { przed: etaps.has('przed'), po: etaps.has('po') }
+}
+
+/** Punktacja – który duplikat zostawić (najpełniejszy wpis). */
+export function scoreK07Doc(doc) {
+  let s = 0
+  if (doc?.data?.k03_key) s += 40
+  if (doc?.data?.godzina) s += 15
+  if (doc?.signed_by_operator || doc?.data?.podpis_kontrolujacego) s += 15
+  if (doc?.data?.auto_source === 'k03_przerob') s += 10
+  if (String(doc?.id || '').match(/^[0-9a-f-]{36}$/i)) s += 5
+  if (doc?.updated_at) s += 1
+  return s
+}
+
+/** Grupy duplikatów K07 (ta sama partia/etap lub ten sam K03/etap). */
+export function findK07DuplicateGroups(haccpDocs = []) {
+  const groups = new Map()
+  for (const d of (haccpDocs || []).filter(x => x.document_type === 'K07')) {
+    const key = k07StableKey(d)
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(d)
+  }
+  return Array.from(groups.values()).filter(g => g.length > 1)
+}
+
+export function pickBestK07Duplicate(docs = []) {
+  return [...docs].sort((a, b) => scoreK07Doc(b) - scoreK07Doc(a) || String(a.document_date || '').localeCompare(String(b.document_date || '')))[0]
 }
 
 function applyK07Override(doc, ov = {}) {
@@ -261,14 +326,8 @@ export function k07K03EtapKey(doc) {
 
 /** Czy w bazie jest już wpis K07 dla tego samego przerobu / partii. */
 export function k07AlreadyInDb(haccpDocs, doc) {
-  const key = k07DedupeKey(doc)
-  const k03Etap = k07K03EtapKey(doc)
-  return (haccpDocs || []).some(d => {
-    if (d.document_type !== 'K07') return false
-    if (k07DedupeKey(d) === key) return true
-    if (k03Etap && k07K03EtapKey(d) === k03Etap) return true
-    return false
-  })
+  const stable = k07StableKey(doc)
+  return (haccpDocs || []).some(d => d.document_type === 'K07' && k07StableKey(d) === stable)
 }
 
 export function k07RowHideKey(doc) {
@@ -372,7 +431,7 @@ export function buildMissingK07PoPairs(haccpDocs = [], overrides = {}) {
     const przed = entries.find(e => (e.data?.kontrola_etap || 'przed') === 'przed') || entries[0]
     if (!przed) continue
     const po = buildK07PoFromTemplate(przed, overrides)
-    const key = k07DedupeKey(po)
+    const key = k07StableKey(po)
     if (seen.has(key)) continue
     seen.add(key)
     result.push(po)
@@ -431,12 +490,12 @@ export function buildSyntheticK07DocsFromK03(k03Forms = [], haccpDocs = [], over
   for (const k03 of k03Forms || []) {
     if (!shouldIncludeK03InK07(k03)) continue
     const k03Key = k03.id
-    const date = k06EvaluationDateFromK03(k03)
     const numerPartii = String(k03.lot_no || k03.data?.k03_workflow?.lot_no || '').trim()
-    const coverage = k07CoverageForPartia(haccpDocs, numerPartii, date)
+    const coverageK03 = k07CoverageForK03Key(haccpDocs, k03Key)
+    const coveragePartia = k07CoverageForPartiaEtap(haccpDocs, numerPartii)
 
     for (const etap of K07_KONTROLA_ETAPY) {
-      if (coverage[etap.id]) continue
+      if (coverageK03[etap.id] || coveragePartia[etap.id]) continue
       const id = k07SyntheticIdFromK03(k03Key, etap.id)
       if (existingIds.has(id)) continue
       result.push(buildK07EntryFromK03(k03, etap.id, overrides))
@@ -748,10 +807,10 @@ export function buildSyntheticK07DocsFromTrace(trace = {}, overrides = {}, haccp
 /** Pełna lista syntetycznych K07: wyłącznie K03 (przerób malina / porzeczka czarna) + brakujące „po”. */
 export function buildAllSyntheticK07Docs(trace = {}, k03Forms = [], overrides = {}, haccpDocs = []) {
   const fromK03 = buildSyntheticK07DocsFromK03(k03Forms, haccpDocs, overrides)
-  const keys = new Set(fromK03.map(k07DedupeKey))
+  const keys = new Set(fromK03.map(k07StableKey))
   const merged = [...fromK03]
   for (const doc of buildMissingK07PoPairs(haccpDocs, overrides)) {
-    const key = k07DedupeKey(doc)
+    const key = k07StableKey(doc)
     if (keys.has(key)) continue
     keys.add(key)
     merged.push(doc)

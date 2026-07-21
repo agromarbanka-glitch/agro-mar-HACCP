@@ -198,7 +198,8 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
 .k07-table .col-etap{width:11%}
 .k07-table .col-time{width:9%;min-width:88px}
 .k07-table .col-product{width:22%;text-align:left!important}
-.k07-table .col-lot{width:12%}
+.k07-table .col-lot{width:14%;min-width:120px}
+.k07-table .col-lot .cell-input.wide{min-width:110px}
 .k07-table .col-pn{width:8%}
 .k07-table .col-sign{width:14%;min-width:130px}
 .k07-table .col-actions{width:92px;min-width:92px}
