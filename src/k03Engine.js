@@ -3,9 +3,9 @@
  * Jeden formularz = jedna pozycja WZ (operacja + produkt).
  */
 
-import { getK03PrefixRules, syncK03LotSequences, allocateK03LotNoRpc } from './appSettingsEngine'
+import { getK03PrefixRules, syncK03LotSequences } from './appSettingsEngine'
 
-export const K03_ENGINE_VERSION = '4.0'
+export const K03_ENGINE_VERSION = '4.1'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -1556,6 +1556,7 @@ export function mergeK03Snapshots(forms, snapshots = []) {
     const openDoc = {
       ...form,
       haccp_doc_id: snap.id,
+      lot_no: snap.lot_no || form.lot_no || form.data?.k03_workflow?.lot_no || '',
       signed_by_operator: signed,
       data: {
         ...form.data,
@@ -1711,67 +1712,108 @@ export function k03ProcessingOrderKey(doc) {
   )
 }
 
-/**
- * Usuwa duplikaty numerów partii (ten sam lot_no na 2+ kartach).
- * Pierwsza karta wg momentu przerobu zostaje; pozostałe dostają kolejny wolny numer.
- */
-export async function repairK03DuplicateLotNumbers(client, { onProgress } = {}) {
-  if (!client) throw new Error('Brak połączenia z bazą')
+/** Metadane numeru partii dla zapisanej kartoteki K03 (Pcz vs Pczp, rok). */
+export function resolveK03DocLotMeta(doc, prefixRules = null) {
+  const wf = doc?.data?.k03_workflow || {}
+  const mode = wf.mode || (wf.przerob_date ? 'przerob' : 'bez_przerobu')
+  const refDate = mode === 'przerob' ? (wf.przerob_date || doc.document_date) : doc.document_date
+  const year = k03LotReferenceYear(refDate)
+  const rules = prefixRules || getK03PrefixRules()
+  const code = inferK03LotCode(doc.product_name, { name: doc.product_name }, { mode, prefixRules: rules })
+  return { mode, refDate, year, code }
+}
 
-  const { data: docs, error } = await client
-    .from('haccp_documents')
-    .select('id, document_no, document_date, product_name, lot_no, data, created_at, updated_at')
-    .eq('document_type', 'K03')
-  if (error) throw error
-
-  const withLot = (docs || []).filter(d => parseK03LotNo(d.lot_no))
-  const byLot = new Map()
-  for (const doc of withLot) {
-    const k = String(doc.lot_no || '').trim().toLowerCase()
-    if (!byLot.has(k)) byLot.set(k, [])
-    byLot.get(k).push(doc)
-  }
-
-  const updates = []
-  for (const group of byLot.values()) {
-    if (group.length <= 1) continue
-    group.sort((a, b) => k03ProcessingOrderKey(a).localeCompare(k03ProcessingOrderKey(b)))
-    for (let i = 1; i < group.length; i++) updates.push(group[i])
-  }
-
-  if (!updates.length) {
-    await syncK03LotSequences(client).catch(() => {})
-    return { changed: 0, duplicatesBefore: 0 }
-  }
-
-  let changed = 0
-  for (let i = 0; i < updates.length; i++) {
-    const doc = updates[i]
-    const parsed = parseK03LotNo(doc.lot_no)
-    onProgress?.(`Nowy numer dla duplikatu ${i + 1}/${updates.length}: ${doc.lot_no}`)
-    let newLot = null
-    try {
-      newLot = await allocateK03LotNoRpc(client, parsed.code, Number(parsed.year))
-    } catch { /* v49 */ }
-    if (!newLot) {
-      const seq = nextK03LotSequence(withLot, parsed.code, parsed.year)
-      newLot = formatK03LotNo(parsed.code, seq, parsed.year)
-    }
-    const nextData = {
+function buildK03LotPatch(doc, newLot) {
+  return {
+    lot_no: newLot,
+    data: {
       ...(doc.data || {}),
       k03_workflow: doc.data?.k03_workflow
         ? { ...doc.data.k03_workflow, lot_no: newLot }
         : doc.data?.k03_workflow,
-      k03_edits: { ...(doc.data?.k03_edits || {}), lot_no: newLot }
-    }
+      k03_edits: {
+        ...(doc.data?.k03_edits || {}),
+        lot_no: newLot
+      }
+    },
+    updated_at: new Date().toISOString()
+  }
+}
+
+/**
+ * Przepisuje numery partii w już zapisanych kartach K03:
+ * poprawny prefiks (Pcz/Pczp), kolejność wg momentu przerobu, bez duplikatów.
+ * scope: 'all' | 'porzeczka_czarna'
+ */
+export async function repairK03SavedLotNumbers(client, options = {}) {
+  if (!client) throw new Error('Brak połączenia z bazą')
+  const onProgress = options.onProgress
+  const scope = options.scope || 'all'
+  const prefixRules = getK03PrefixRules()
+
+  const { data: docs, error } = await client
+    .from('haccp_documents')
+    .select('id, document_no, document_date, product_name, lot_no, data, created_at, updated_at, operation_id')
+    .eq('document_type', 'K03')
+  if (error) throw error
+
+  const eligible = (docs || []).filter(doc => {
+    const hasWorkflow = Boolean(doc?.data?.k03_workflow?.mode || doc?.data?.k03_workflow?.lot_no)
+    const hasLot = Boolean(parseK03LotNo(doc?.lot_no))
+    if (!hasWorkflow && !hasLot) return false
+    if (scope === 'porzeczka_czarna') return isPorzeczkaCzarnaAlias(doc.product_name)
+    return true
+  })
+
+  const buckets = new Map()
+  for (const doc of eligible) {
+    const meta = resolveK03DocLotMeta(doc, prefixRules)
+    const key = `${meta.code.toUpperCase()}|${meta.year}`
+    if (!buckets.has(key)) buckets.set(key, [])
+    buckets.get(key).push({ doc, meta })
+  }
+
+  const planned = []
+  for (const [, items] of buckets) {
+    items.sort((a, b) => k03ProcessingOrderKey(a.doc).localeCompare(k03ProcessingOrderKey(b.doc)))
+    items.forEach((item, idx) => {
+      planned.push({
+        doc: item.doc,
+        newLot: formatK03LotNo(item.meta.code, idx + 1, item.meta.year)
+      })
+    })
+  }
+
+  const updates = planned.filter(({ doc, newLot }) => {
+    const old = String(doc.lot_no || '').trim()
+    const wf = String(doc.data?.k03_workflow?.lot_no || '').trim()
+    const ed = String(doc.data?.k03_edits?.lot_no || '').trim()
+    return newLot !== old || newLot !== wf || (ed && newLot !== ed)
+  })
+
+  if (!updates.length) {
+    await syncK03LotSequences(client).catch(() => {})
+    return { changed: 0, scope, eligible: eligible.length }
+  }
+
+  let changed = 0
+  for (let i = 0; i < updates.length; i++) {
+    const { doc, newLot } = updates[i]
+    const oldLot = String(doc.lot_no || '').trim()
+    onProgress?.(`K03 ${i + 1}/${updates.length}: ${oldLot || '—'} → ${newLot}`)
     const { error: updErr } = await client
       .from('haccp_documents')
-      .update({ lot_no: newLot, data: nextData, updated_at: new Date().toISOString() })
+      .update(buildK03LotPatch(doc, newLot))
       .eq('id', doc.id)
     if (updErr) throw updErr
     changed += 1
   }
 
   await syncK03LotSequences(client).catch(() => {})
-  return { changed, duplicatesBefore: updates.length }
+  return { changed, scope, eligible: eligible.length, updates: updates.map(u => ({ id: u.doc.id, from: u.doc.lot_no, to: u.newLot })) }
+}
+
+/** @deprecated użyj repairK03SavedLotNumbers */
+export async function repairK03DuplicateLotNumbers(client, options = {}) {
+  return repairK03SavedLotNumbers(client, options)
 }

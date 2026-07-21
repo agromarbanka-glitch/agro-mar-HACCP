@@ -6,7 +6,7 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03DuplicateLotNumbers } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
@@ -8789,26 +8789,46 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
-  async function repairK03LotDuplicatesFromSettings() {
+  async function repairK03SavedLots(scope = 'porzeczka_czarna') {
     if (!supabase) {
       setMessage('Brak konfiguracji Supabase.')
       return
     }
+    const scopeLabel = scope === 'porzeczka_czarna' ? 'porzeczka czarna' : 'wszystkie K03'
+    if (!window.confirm(
+      `Przepisać numery partii w zapisanych kartach (${scopeLabel})?\n\n` +
+      '• przerób → Pczp/…, bez przerobu → Pcz/…\n' +
+      '• kolejność wg momentu przerobu (nie daty WZ)\n' +
+      '• jeden numer = jedna karta\n\n' +
+      'Po naprawie kartoteki odświeżą się automatycznie.'
+    )) return
+    setFifoRecalculating(true)
     try {
-      const result = await repairK03DuplicateLotNumbers(supabase, {
+      const result = await repairK03SavedLotNumbers(supabase, {
+        scope,
         onProgress: msg => setMessage(String(msg))
       })
+      setK03Overrides({})
       await loadK03SnapshotsOnly()
-      await loadK03TraceData()
-      loadHaccpDocs({ syncK01: false })
+      await loadK03TraceData({ repairPz: false })
+      await loadHaccpDocs({ syncK01: false })
       if (!result.changed) {
-        setMessage('Partie K03: brak duplikatów do renumeracji (sekwencje zsynchronizowane).')
+        setMessage(`Numery partii K03 (${scopeLabel}): wszystko zgodne z regułami (${result.eligible || 0} kart sprawdzonych).`)
       } else {
-        setMessage(`Renumerowano ${result.changed} zduplikowanych kart K03 – numer wg kolejności przerobu, nie daty WZ.`)
+        setMessage(
+          `Zaktualizowano ${result.changed} kart K03 (${scopeLabel}). ` +
+          'Prefiks Pcz/Pczp i numeracja wg kolejności przerobu. Jeśli K07 ma stare numery → „Napraw i uzupełnij K07”.'
+        )
       }
     } catch (err) {
-      setMessage(`Naprawa partii K03: ${err.message}`)
+      setMessage(`Naprawa numerów partii K03: ${err.message}`)
+    } finally {
+      setFifoRecalculating(false)
     }
+  }
+
+  async function repairK03LotDuplicatesFromSettings() {
+    await repairK03SavedLots('all')
   }
 
   async function logAuditSoftDeleteEmployee(employee) {
@@ -10385,6 +10405,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             <button className="secondary" disabled={haccpBusy} onClick={async () => { await clickRefreshHaccp(); loadK03TraceData(); loadFifoData() }}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież'}</button>
             {docsFilter === 'K03' && <>
               <button className="secondary" onClick={() => runResyncOpenK03(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'K03…' : 'Napraw otwarte K03'}</button>
+              <button className="secondary" onClick={() => repairK03SavedLots('porzeczka_czarna')} disabled={fifoRecalculating}>{fifoRecalculating ? 'Numery…' : 'Napraw numery partii (porzeczka)'}</button>
               <button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'FIFO…' : 'Uzupełnij FIFO'}</button>
               <button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO</button>
             </>}
@@ -10420,6 +10441,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
               </ol>
             </details>
           </section>
+          <p className="hint no-print" style={{ marginBottom: 12 }}>
+            Stare lub zduplikowane numery partii w już zapisanych kartach (np. kilka× Pcz/006/2026)? Kliknij u góry <b>Napraw numery partii (porzeczka)</b> – przepisze numery w bazie (Pcz bez przerobu, Pczp z przerobem, kolejność wg momentu przerobu). Potem odśwież widok lub przejdź ponownie do K03.
+          </p>
           <details className="docs-k03-wz" open>
             <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje (widoczne {filteredWzQueueLines.length} z {wzQueueLines.length}) · {syntheticK03Docs.length} K03</summary>
             {filteredWzQueueLines.length === 0 && !k03Loading && wzQueueLines.length > 0 && (

@@ -97,7 +97,7 @@ export function AppSettingsSection({
   async function repairLots() {
     if (!onRepairK03Lots) return
     if (!window.confirm(
-      'Renumerować tylko zduplikowane numery partii K03?\n\nTa sama partia na 2+ kartach: starszy przerób zostaje, pozostałe dostaną kolejny wolny numer.\n\nKontynuować?'
+      'Przepisać numery partii we wszystkich zapisanych kartach K03?\n\nPoprawi prefiks (Pcz/Pczp), duplikaty i kolejność wg przerobu.\n\nKontynuować?'
     )) return
     setRepairing(true)
     try {
@@ -147,7 +147,7 @@ export function AppSettingsSection({
             <RefreshCw size={16} /> Sync sekwencji z kart K03
           </button>
           <button type="button" className="secondary" disabled={repairing} onClick={() => void repairLots()}>
-            <Wrench size={16} /> {repairing ? 'Renumeracja…' : 'Napraw duplikaty partii K03'}
+            <Wrench size={16} /> {repairing ? 'Przepisywanie…' : 'Przepisz numery partii K03 (wszystkie)'}
           </button>
         </div>
         {sequences.length > 0 && (
