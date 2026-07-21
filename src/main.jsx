@@ -10,7 +10,7 @@ import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03Fo
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, k07RowHideKey, k07DedupeKey, k07AlreadyInDb, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth
@@ -1995,15 +1995,49 @@ function App() {
   }
 
   async function saveK07DocumentField(doc, patch = {}) {
-    if (!supabase || !doc) return null
+    if (!supabase || !doc) {
+      setMessage('Brak bazy – zapis K07 wymaga Supabase.')
+      return null
+    }
     try {
       const live = getLiveK07Doc(doc, { [doc.id]: { ...(k07Overrides[doc.id] || {}), ...patch } })
-      const dedupeKey = k07DedupeKey(live)
-      const existing = (haccpDocs || []).find(d =>
-        d.document_type === 'K07' && k07DedupeKey(d) === dedupeKey
-      ) || (isPersistedHaccpDoc(doc) ? doc : null)
 
-      if (!existing && isSyntheticK07Doc(doc)) {
+      if (isPersistedHaccpDoc(doc)) {
+        const nextData = normalizeK07Data({ ...(doc.data || {}), ...(k07Overrides[doc.id] || {}), ...patch }, live)
+        const status = formNormalizePn(nextData.stan_sita) === 'N' ? 'N' : 'P'
+        const signed = patch.podpis_kontrolujacego !== undefined
+          ? patch.podpis_kontrolujacego
+          : (live.signed_by_operator || nextData.podpis_kontrolujacego || doc.signed_by_operator || '')
+        const payload = {
+          data: nextData,
+          status,
+          document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : (live.document_date || doc.document_date),
+          product_name: nextData.surowiec || live.product_name || doc.product_name,
+          lot_no: nextData.numer_partii || live.lot_no || doc.lot_no,
+          signed_by_operator: signed || null,
+          updated_at: new Date().toISOString()
+        }
+        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+        if (error) throw error
+        const workingDoc = { ...doc, ...payload }
+        setK07Overrides(prev => {
+          const next = { ...prev }
+          delete next[doc.id]
+          return next
+        })
+        setK07ManualExtra(prev => prev.filter(d => d.id !== doc.id))
+        mergeHaccpDoc(workingDoc.id, workingDoc)
+        return workingDoc
+      }
+
+      if (isSyntheticK07Doc(doc)) {
+        const dedupeKey = k07DedupeKey(live)
+        const existing = (haccpDocs || []).find(d =>
+          d.document_type === 'K07' && isPersistedHaccpDoc(d) && k07DedupeKey(d) === dedupeKey
+        )
+        if (existing) {
+          return saveK07DocumentField(existing, { ...(k07Overrides[doc.id] || {}), ...patch })
+        }
         const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK07InsertPayload(live)).select('*').single()
         if (error) throw error
         const workingDoc = inserted
@@ -2017,32 +2051,25 @@ function App() {
         return workingDoc
       }
 
-      const base = existing || doc
-      const nextData = normalizeK07Data({ ...(base.data || {}), ...patch }, base)
+      const nextData = normalizeK07Data({ ...(doc.data || {}), ...(k07Overrides[doc.id] || {}), ...patch }, live)
       const status = formNormalizePn(nextData.stan_sita) === 'N' ? 'N' : 'P'
-      const signed = patch.podpis_kontrolujacego !== undefined
-        ? patch.podpis_kontrolujacego
-        : (base.signed_by_operator || nextData.podpis_kontrolujacego || '')
       const payload = {
         data: nextData,
         status,
-        document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : base.document_date,
-        product_name: nextData.surowiec || base.product_name,
-        lot_no: nextData.numer_partii || base.lot_no,
-        signed_by_operator: signed || null,
+        document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : doc.document_date,
+        product_name: nextData.surowiec || doc.product_name,
+        lot_no: nextData.numer_partii || doc.lot_no,
+        signed_by_operator: patch.podpis_kontrolujacego ?? doc.signed_by_operator ?? nextData.podpis_kontrolujacego ?? null,
         updated_at: new Date().toISOString()
       }
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', base.id)
+      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
       if (error) throw error
-      const workingDoc = { ...base, ...payload }
-      if (doc.id !== base.id) {
-        setK07Overrides(prev => {
-          const next = { ...prev }
-          delete next[doc.id]
-          return next
-        })
-      }
-      setK07ManualExtra(prev => prev.filter(d => d.id !== doc.id))
+      const workingDoc = { ...doc, ...payload }
+      setK07Overrides(prev => {
+        const next = { ...prev }
+        delete next[doc.id]
+        return next
+      })
       mergeHaccpDoc(workingDoc.id, workingDoc)
       return workingDoc
     } catch (err) {
@@ -9188,10 +9215,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     const trace = { lots: lotsData, operations, allocations }
     const pending = buildAllSyntheticK07Docs(trace, k03Forms, {}, currentDocs)
     if (!pending.length) return 0
+    const knownKeys = new Set((currentDocs || []).filter(d => d.document_type === 'K07').map(k07DedupeKey))
     let inserted = 0
     for (const doc of pending) {
+      if (k07AlreadyInDb(currentDocs, doc)) continue
+      const key = k07DedupeKey(doc)
+      if (knownKeys.has(key)) continue
       const { error } = await supabase.from('haccp_documents').insert(buildK07InsertPayload(doc))
-      if (!error) inserted += 1
+      if (!error) {
+        inserted += 1
+        knownKeys.add(key)
+      }
     }
     return inserted
   }

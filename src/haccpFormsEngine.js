@@ -253,6 +253,24 @@ export function k07DedupeKey(doc) {
   return `id:${doc?.id || ''}|${etap}`
 }
 
+export function k07K03EtapKey(doc) {
+  const k03Key = doc?.data?.k03_key
+  if (!k03Key) return ''
+  return `${k03Key}|${doc?.data?.kontrola_etap || 'przed'}`
+}
+
+/** Czy w bazie jest już wpis K07 dla tego samego przerobu / partii. */
+export function k07AlreadyInDb(haccpDocs, doc) {
+  const key = k07DedupeKey(doc)
+  const k03Etap = k07K03EtapKey(doc)
+  return (haccpDocs || []).some(d => {
+    if (d.document_type !== 'K07') return false
+    if (k07DedupeKey(d) === key) return true
+    if (k03Etap && k07K03EtapKey(d) === k03Etap) return true
+    return false
+  })
+}
+
 export function k07RowHideKey(doc) {
   return k07DedupeKey(doc) || String(doc?.id || '').trim()
 }
