@@ -5,7 +5,7 @@
 
 import { getK03PrefixRules, syncK03LotSequences } from './appSettingsEngine'
 
-export const K03_ENGINE_VERSION = '4.1'
+export const K03_ENGINE_VERSION = '4.2'
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -60,11 +60,11 @@ export function inferK03LotCode(productName, product, options = {}) {
   if (isPorzeczkaKolorowa) {
     return mode === 'przerob' ? (r.porzeczka_kolorowa_przerob || 'Pkp') : (r.porzeczka_kolorowa_bez_przerobu || 'Pk')
   }
-  if (mode === 'przerob' && isMalina) return r.malina_przerob || 'Mp'
-  if (variantKey === 'malina pw' || variantKey === 'malina swieza') return r.malina_pw || 'Mpw'
-  if (variantKey === 'malina klasa i') return r.malina_klasa_i || 'M1'
-  if (variantKey === 'malina extra') return r.malina_extra || 'Mex'
-  if (variantKey === 'malina pulpa') return r.malina_pulpa || 'Mp'
+  if (isMalina) {
+    if (mode === 'przerob') return r.malina_przerob || 'Mp'
+    // Bez przerobu: zawsze M1 (także przy mieszaniu M1 + extra w surowcu WZ).
+    return r.malina_bez_przerobu || r.malina_klasa_i || 'M1'
+  }
 
   const defaults = r.defaults || {}
   const nameKey = normalizeText(productName)
@@ -1712,6 +1712,11 @@ export function k03ProcessingOrderKey(doc) {
   )
 }
 
+/** Czy produkt K03 to malina (dowolna klasa). */
+export function isMalinaK03Product(productName = '') {
+  return /^malina/.test(normalizeFifoProductKey(productName))
+}
+
 /** Metadane numeru partii dla zapisanej kartoteki K03 (Pcz vs Pczp, rok). */
 export function resolveK03DocLotMeta(doc, prefixRules = null) {
   const wf = doc?.data?.k03_workflow || {}
@@ -1743,7 +1748,7 @@ function buildK03LotPatch(doc, newLot) {
 /**
  * Przepisuje numery partii w już zapisanych kartach K03:
  * poprawny prefiks (Pcz/Pczp), kolejność wg momentu przerobu, bez duplikatów.
- * scope: 'all' | 'porzeczka_czarna'
+ * scope: 'all' | 'porzeczka_czarna' | 'malina'
  */
 export async function repairK03SavedLotNumbers(client, options = {}) {
   if (!client) throw new Error('Brak połączenia z bazą')
@@ -1762,6 +1767,7 @@ export async function repairK03SavedLotNumbers(client, options = {}) {
     const hasLot = Boolean(parseK03LotNo(doc?.lot_no))
     if (!hasWorkflow && !hasLot) return false
     if (scope === 'porzeczka_czarna') return isPorzeczkaCzarnaAlias(doc.product_name)
+    if (scope === 'malina') return isMalinaK03Product(doc.product_name)
     return true
   })
 

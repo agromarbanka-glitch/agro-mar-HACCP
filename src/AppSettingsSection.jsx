@@ -17,11 +17,8 @@ const PREFIX_FIELDS = [
   { key: 'porzeczka_czarna_przerob', label: 'Porzeczka czarna – przerób (pulpa)', example: 'Pczp/001/2026' },
   { key: 'porzeczka_kolorowa_bez_przerobu', label: 'Porzeczka kolorowa – bez przerobu', example: 'Pk/001/2026' },
   { key: 'porzeczka_kolorowa_przerob', label: 'Porzeczka kolorowa – przerób', example: 'Pkp/001/2026' },
-  { key: 'malina_przerob', label: 'Malina – przerób', example: 'Mp/001/2026' },
-  { key: 'malina_pw', label: 'Malina PW', example: 'Mpw/001/2026' },
-  { key: 'malina_klasa_i', label: 'Malina klasa I', example: 'M1/001/2026' },
-  { key: 'malina_extra', label: 'Malina extra', example: 'Mex/001/2026' },
-  { key: 'malina_pulpa', label: 'Malina pulpa', example: 'Mp/001/2026' }
+  { key: 'malina_przerob', label: 'Malina – przerób (pulpa i inne)', example: 'Mp/001/2026' },
+  { key: 'malina_bez_przerobu', label: 'Malina – bez przerobu (M1, extra, mix)', example: 'M1/001/2026' },
 ]
 
 export function AppSettingsSection({

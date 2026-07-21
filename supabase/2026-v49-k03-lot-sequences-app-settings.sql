@@ -127,6 +127,7 @@ INSERT INTO public.app_settings (key, value) VALUES
     "porzeczka_kolorowa_bez_przerobu": "Pk",
     "porzeczka_kolorowa_przerob": "Pkp",
     "malina_przerob": "Mp",
+    "malina_bez_przerobu": "M1",
     "malina_pw": "Mpw",
     "malina_klasa_i": "M1",
     "malina_extra": "Mex",

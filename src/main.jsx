@@ -8794,10 +8794,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       setMessage('Brak konfiguracji Supabase.')
       return
     }
-    const scopeLabel = scope === 'porzeczka_czarna' ? 'porzeczka czarna' : 'wszystkie K03'
+    const scopeLabel = scope === 'porzeczka_czarna' ? 'porzeczka czarna'
+      : scope === 'malina' ? 'malina'
+      : 'wszystkie K03'
     if (!window.confirm(
       `Przepisać numery partii w zapisanych kartach (${scopeLabel})?\n\n` +
-      '• przerób → Pczp/…, bez przerobu → Pcz/…\n' +
+      '• przerób → Pczp/…, bez przerobu → Pcz/… (porzeczka) lub M1/… vs Mp/… (malina)\n' +
       '• kolejność wg momentu przerobu (nie daty WZ)\n' +
       '• jeden numer = jedna karta\n\n' +
       'Po naprawie kartoteki odświeżą się automatycznie.'
@@ -10406,6 +10408,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             {docsFilter === 'K03' && <>
               <button className="secondary" onClick={() => runResyncOpenK03(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'K03…' : 'Napraw otwarte K03'}</button>
               <button className="secondary" onClick={() => repairK03SavedLots('porzeczka_czarna')} disabled={fifoRecalculating}>{fifoRecalculating ? 'Numery…' : 'Napraw numery partii (porzeczka)'}</button>
+              <button className="secondary" onClick={() => repairK03SavedLots('malina')} disabled={fifoRecalculating}>{fifoRecalculating ? 'Numery…' : 'Napraw numery partii (malina)'}</button>
               <button onClick={() => runFifoIncremental(true)} disabled={fifoRecalculating}>{fifoRecalculating ? 'FIFO…' : 'Uzupełnij FIFO'}</button>
               <button className="secondary" onClick={() => runFifoFullRecalculate(true)} disabled={fifoRecalculating}>Pełne FIFO</button>
             </>}
@@ -10442,7 +10445,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
             </details>
           </section>
           <p className="hint no-print" style={{ marginBottom: 12 }}>
-            Stare lub zduplikowane numery partii w już zapisanych kartach (np. kilka× Pcz/006/2026)? Kliknij u góry <b>Napraw numery partii (porzeczka)</b> – przepisze numery w bazie (Pcz bez przerobu, Pczp z przerobem, kolejność wg momentu przerobu). Potem odśwież widok lub przejdź ponownie do K03.
+            Stare lub złe numery partii w zapisanych kartach? U góry: <b>Napraw numery partii (porzeczka)</b> lub <b>(malina)</b>.
+            Malina bez przerobu → <b>M1</b> (także przy mix M1+extra). Malina przerób → <b>Mp</b>. Porzeczka: Pcz / Pczp.
           </p>
           <details className="docs-k03-wz" open>
             <summary><b>Lista WZ</b> – {filteredWzQueueLines.filter(l => l.status === 'pending').length} oczekuje (widoczne {filteredWzQueueLines.length} z {wzQueueLines.length}) · {syntheticK03Docs.length} K03</summary>
