@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
-import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronRight, ChevronUp, X } from 'lucide-react'
+import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangle, RefreshCcw, Warehouse, ArrowRightLeft, Eye, Trash2, Settings, ClipboardList, LayoutDashboard, History, LogOut, FolderOpen, BarChart3, ChevronDown, ChevronRight, ChevronUp, X, Maximize2, Minimize2 } from 'lucide-react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
@@ -363,6 +363,10 @@ function App() {
   const [haccpFrom, setHaccpFrom] = useState('')
   const [haccpTo, setHaccpTo] = useState('')
   const [selectedHaccpDoc, setSelectedHaccpDoc] = useState(null)
+  const KARTOTEKA_FULLSCREEN_KEY = 'agro-mar-kartoteka-fullscreen-v1'
+  const [kartotekaPreviewFullscreen, setKartotekaPreviewFullscreen] = useState(() => {
+    try { return localStorage.getItem(KARTOTEKA_FULLSCREEN_KEY) === '1' } catch { return false }
+  })
   const [employees, setEmployees] = useState([])
   const [newEmployeeName, setNewEmployeeName] = useState('')
   const [defaultK01Employee, setDefaultK01Employee] = useState(() => {
@@ -7070,11 +7074,48 @@ function App() {
     </>
   }
 
+  function toggleKartotekaPreviewFullscreen() {
+    setKartotekaPreviewFullscreen(prev => {
+      const next = !prev
+      try { localStorage.setItem(KARTOTEKA_FULLSCREEN_KEY, next ? '1' : '0') } catch { /* ignore quota */ }
+      return next
+    })
+  }
+
   function renderHaccpPreview(doc) {
     if (!doc) return null
     if (doc.groupPreview) {
       const liveGroup = resolvePreviewGroup(doc)
-      return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}><div className="haccp-modal wide" onClick={e => e.stopPropagation()}><div className="haccp-paper">{renderGroupPreviewTable(liveGroup)}</div><div className="modal-actions no-print">
+      const fs = kartotekaPreviewFullscreen
+      const groupTitle = `${liveGroup.type || 'Kartoteka'}${liveGroup.period ? ` – ${liveGroup.period}` : ''}${liveGroup.product ? ` · ${liveGroup.product}` : ''}`
+      return (
+        <div
+          className={`modal-backdrop${fs ? ' kartoteka-fullscreen-backdrop' : ''}`}
+          onClick={() => setSelectedHaccpDoc(null)}
+        >
+          <div
+            className={`haccp-modal wide${fs ? ' kartoteka-fullscreen' : ''}`}
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={groupTitle}
+          >
+            <div className="kartoteka-modal-toolbar no-print">
+              <span className="kartoteka-modal-title">{groupTitle}</span>
+              <button
+                type="button"
+                className="mini secondary kartoteka-fullscreen-toggle"
+                onClick={toggleKartotekaPreviewFullscreen}
+                title={fs ? 'Wyjdź z pełnego ekranu' : 'Pełny ekran – więcej wierszy bez przewijania okna'}
+              >
+                {fs ? <Minimize2 size={16}/> : <Maximize2 size={16}/>}
+                {fs ? ' Zmniejsz' : ' Pełny ekran'}
+              </button>
+            </div>
+            <div className="kartoteka-preview-body">
+              <div className="haccp-paper">{renderGroupPreviewTable(liveGroup)}</div>
+            </div>
+            <div className="modal-actions no-print">
         {liveGroup.type === 'K03' && (liveGroup.docs || [])[0] && (liveGroup.docs[0].frozen
           ? <>
             <span className="status ok">Zamrożony – FIFO nie zmieni tej kartoteki</span>
@@ -7110,7 +7151,11 @@ function App() {
             setMessage(`${liveGroup.type}: ${err.message}`)
           }
         }}><Trash2 size={16}/> Usuń kartotekę</button>}
-        <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button></div></div></div>
+        <button className="secondary" onClick={() => setSelectedHaccpDoc(null)}>Zamknij</button>
+            </div>
+          </div>
+        </div>
+      )
     }
     return <div className="modal-backdrop" onClick={() => setSelectedHaccpDoc(null)}>
       <div className="haccp-modal" onClick={e => e.stopPropagation()}>
