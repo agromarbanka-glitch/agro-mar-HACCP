@@ -39,7 +39,6 @@ import {
   buildR11ManualRowPayload, normalizeR11MagnetInput
 } from './r11Engine'
 import { confirmDelete } from './authEngine'
-import { batchInsertHaccpDocuments } from './haccpLoadHelpers'
 import { KartotekaPrintBadge } from './KartotekaPrintBadge'
 
 export { isRMonthlyReport, getRMonthlyConfig }
