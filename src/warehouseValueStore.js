@@ -2,7 +2,7 @@
  * Magazyn wartości (raport Excel FIFO) — trwały zapis w Supabase.
  * Osobne od HACCP: operations, lots, fifo_allocations.
  */
-import { warehouseValueDedupKey, excelRowDedupKey } from './reportExcelStore'
+import { warehouseValueDedupKey } from './reportExcelStore'
 import {
   classifyOperation,
   resolveDocumentIssueDate,
@@ -11,8 +11,8 @@ import {
 } from './excelImport'
 import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.4'
-const INSERT_CHUNK = 400
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.5'
+const INSERT_CHUNK = 250
 const FETCH_PAGE_SIZE = 3000
 const FETCH_CONCURRENCY = 4
 const LINE_SELECT =
@@ -152,120 +152,132 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
   return rows
 }
 
-/** Wszystkie dedup_key w bazie — do synchronizacji brakujących linii z Excela. */
-export async function fetchAllWarehouseValueDedupKeys(client) {
-  if (!client) return new Set()
+function yieldToUi() {
+  return new Promise(resolve => setTimeout(resolve, 0))
+}
 
-  const { count, error: countErr } = await client
+async function insertWarehouseValueChunk(client, chunk) {
+  const { data: inserted, error } = await client
     .from('warehouse_value_lines')
-    .select('dedup_key', { count: 'exact', head: true })
-  if (countErr) throw countErr
-
-  const total = count || 0
-  const keys = new Set()
-  if (!total) return keys
-
-  const pageSize = 5000
-  for (let from = 0; from < total; from += pageSize) {
-    const to = Math.min(from + pageSize - 1, total - 1)
-    const { data, error } = await client
-      .from('warehouse_value_lines')
-      .select('dedup_key')
-      .order('dedup_key', { ascending: true })
-      .range(from, to)
-    if (error) throw error
-    for (const row of data || []) {
-      if (row.dedup_key) keys.add(row.dedup_key)
-    }
-  }
-  return keys
+    .upsert(chunk, { onConflict: 'dedup_key', ignoreDuplicates: true })
+    .select('id')
+  if (error) throw error
+  const chunkAdded = inserted?.length || 0
+  return { added: chunkAdded, duplicates: chunk.length - chunkAdded }
 }
 
 /**
- * Wstawia tylko linie z Excela, których dedup_key nie ma jeszcze w bazie.
- * Użyj po audycie „brakuje X linii” — nie duplikuje już zapisanych wierszy.
+ * Wstawia brakujące linie z Excela (upsert — pomija istniejące dedup_key).
+ * @param {Function} [opts.onProgress] — ({ phase, done, total, added, message })
  */
-export async function syncMissingWarehouseValueFromParsedFiles(client, parsedFiles, { uploadedBy = '' } = {}) {
+export async function syncMissingWarehouseValueFromParsedFiles(client, parsedFiles, { uploadedBy = '', onProgress } = {}) {
   if (!client) throw new Error('Brak połączenia z Supabase.')
 
-  const existingKeys = await fetchAllWarehouseValueDedupKeys(client)
-  const results = []
-  let totalAdded = 0
-  let totalDuplicates = 0
-  let totalSkippedNoDate = 0
-  let totalCandidates = 0
+  const fileList = parsedFiles || []
+  const allRows = fileList.flatMap(f => f.rows || [])
+  const totalRows = allRows.length
+  onProgress?.({ phase: 'prepare', done: 0, total: totalRows, added: 0, message: 'Przygotowanie wierszy…' })
 
-  for (const { fileName, rows } of parsedFiles || []) {
-    const name = fileName || 'sync.xlsx'
-    const { data: batch, error: batchErr } = await client
-      .from('warehouse_value_batches')
-      .insert({
-        file_name: `${name} (dopisanie brakujących)`,
-        uploaded_by: uploadedBy || null,
-        row_count: 0,
-        duplicate_count: 0,
-        engine_version: EXCEL_REPORT_VERSION,
-        notes: 'Synchronizacja — dopisanie linii brakujących w bazie'
-      })
-      .select('id')
-      .single()
-    if (batchErr) throw batchErr
-
-    const batchId = batch.id
-    const toInsert = []
-    let skippedNoDate = 0
-    let duplicates = 0
-
-    for (const r of rows || []) {
-      const { payload, reason } = excelRowToInsert(r, batchId)
-      if (!payload) {
-        if (reason === 'no_date') skippedNoDate += 1
-        continue
-      }
-      if (existingKeys.has(payload.dedup_key)) {
-        duplicates += 1
-        continue
-      }
-      existingKeys.add(payload.dedup_key)
-      toInsert.push(payload)
-    }
-
-    totalCandidates += toInsert.length + duplicates
-
-    let added = 0
-    for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
-      const chunk = toInsert.slice(i, i + INSERT_CHUNK)
-      const { data: inserted, error } = await client
-        .from('warehouse_value_lines')
-        .insert(chunk)
-        .select('id')
-      if (error) throw error
-      added += inserted?.length || 0
-    }
-
-    await client
-      .from('warehouse_value_batches')
-      .update({ row_count: added, duplicate_count: duplicates })
-      .eq('id', batchId)
-
-    if (added === 0) {
-      await client.from('warehouse_value_batches').delete().eq('id', batchId)
-    }
-
-    totalAdded += added
-    totalDuplicates += duplicates
-    totalSkippedNoDate += skippedNoDate
-    results.push({
-      fileName: name,
-      added,
-      duplicates,
-      skippedNoDate,
-      batchId: added > 0 ? batchId : null
+  const primaryName = fileList[0]?.fileName || 'sync.xlsx'
+  const { data: batch, error: batchErr } = await client
+    .from('warehouse_value_batches')
+    .insert({
+      file_name: `${primaryName} (dopisanie brakujących)`,
+      uploaded_by: uploadedBy || null,
+      row_count: 0,
+      duplicate_count: 0,
+      engine_version: EXCEL_REPORT_VERSION,
+      notes: 'Synchronizacja — dopisanie linii brakujących w bazie'
     })
+    .select('id')
+    .single()
+  if (batchErr) throw batchErr
+
+  const batchId = batch.id
+  const payloads = []
+  let skippedNoDate = 0
+  let skippedInvalid = 0
+
+  for (let i = 0; i < allRows.length; i++) {
+    const { payload, reason } = excelRowToInsert(allRows[i], batchId)
+    if (payload) payloads.push(payload)
+    else if (reason === 'no_date') skippedNoDate += 1
+    else if (reason === 'invalid') skippedInvalid += 1
+
+    if (i > 0 && i % 250 === 0) {
+      onProgress?.({
+        phase: 'prepare',
+        done: i,
+        total: totalRows,
+        added: 0,
+        message: `Przygotowanie ${i.toLocaleString('pl-PL')} / ${totalRows.toLocaleString('pl-PL')}…`
+      })
+      await yieldToUi()
+    }
   }
 
-  if (totalAdded > 0) invalidateWarehouseValueLinesCache()
-  return { results, totalAdded, totalDuplicates, totalSkippedNoDate, totalCandidates }
+  const chunkCount = Math.max(1, Math.ceil(payloads.length / INSERT_CHUNK))
+  let totalAdded = 0
+  let totalDuplicates = 0
+
+  onProgress?.({
+    phase: 'upload',
+    done: 0,
+    total: chunkCount,
+    added: 0,
+    message: `Zapis do Supabase (0 / ${chunkCount} paczek)…`
+  })
+
+  for (let i = 0; i < payloads.length; i += INSERT_CHUNK) {
+    const chunk = payloads.slice(i, i + INSERT_CHUNK)
+    const { added, duplicates } = await insertWarehouseValueChunk(client, chunk)
+    totalAdded += added
+    totalDuplicates += duplicates
+    const packNo = Math.floor(i / INSERT_CHUNK) + 1
+    onProgress?.({
+      phase: 'upload',
+      done: packNo,
+      total: chunkCount,
+      added: totalAdded,
+      message: `Zapis paczki ${packNo}/${chunkCount} · dopisano ${totalAdded.toLocaleString('pl-PL')} wierszy`
+    })
+    await yieldToUi()
+  }
+
+  await client
+    .from('warehouse_value_batches')
+    .update({ row_count: totalAdded, duplicate_count: totalDuplicates })
+    .eq('id', batchId)
+
+  if (totalAdded === 0) {
+    await client.from('warehouse_value_batches').delete().eq('id', batchId)
+  } else {
+    invalidateWarehouseValueLinesCache()
+  }
+
+  onProgress?.({
+    phase: 'done',
+    done: chunkCount,
+    total: chunkCount,
+    added: totalAdded,
+    message: `Gotowe: +${totalAdded.toLocaleString('pl-PL')} wierszy`
+  })
+
+  return {
+    results: [{
+      fileName: primaryName,
+      added: totalAdded,
+      duplicates: totalDuplicates,
+      skippedNoDate,
+      skippedInvalid,
+      prepared: payloads.length,
+      batchId: totalAdded > 0 ? batchId : null
+    }],
+    totalAdded,
+    totalDuplicates,
+    totalSkippedNoDate: skippedNoDate,
+    totalCandidates: payloads.length
+  }
 }
 
 export async function fetchWarehouseValueBatches(client) {
@@ -346,14 +358,9 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
 
     for (let i = 0; i < payloads.length; i += INSERT_CHUNK) {
       const chunk = payloads.slice(i, i + INSERT_CHUNK)
-      const { data: inserted, error } = await client
-        .from('warehouse_value_lines')
-        .upsert(chunk, { onConflict: 'dedup_key', ignoreDuplicates: true })
-        .select('id')
-      if (error) throw error
-      const chunkAdded = inserted?.length || 0
+      const { added: chunkAdded, duplicates: chunkDup } = await insertWarehouseValueChunk(client, chunk)
       added += chunkAdded
-      duplicates += chunk.length - chunkAdded
+      duplicates += chunkDup
     }
 
     await client

@@ -126,6 +126,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [integrityNote, setIntegrityNote] = useState('')
   const [monthStats, setMonthStats] = useState([])
   const [importAudit, setImportAudit] = useState(null)
+  const [syncProgress, setSyncProgress] = useState(null)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
@@ -145,7 +146,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     return result
   }, [])
 
-  const reloadFromSupabase = useCallback(async (silent = false, { forceRefresh = false } = {}) => {
+  const reloadFromSupabase = useCallback(async (silent = false, { forceRefresh = false, preserveAudit = false } = {}) => {
     if (!supabase) {
       setExcelRows([])
       setBatches([])
@@ -176,7 +177,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       })
       setExcelRows(rows)
       setMonthStats(computeWarehouseValueMonthStats(rows))
-      setImportAudit(null)
+      if (!preserveAudit) setImportAudit(null)
       const probe = computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current)
       const skipped = rows.length - (probe.diagnostics?.excelLines || 0)
       setIntegrityNote(
@@ -325,36 +326,55 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   async function handleSyncMissingFromAudit() {
     if (!supabase || !importAudit?.parsedFiles?.length) return
     const missing = importAudit.missingInDbCount || 0
+    const auditSnapshot = importAudit
     if (!window.confirm(
       `Dopisać brakujące linie z Excela do Supabase?\n\n` +
-      `W bazie: ${importAudit.dbLineCount} · w Excelu: ${importAudit.excelLineCount} · brakuje ok. ${missing} linii.\n\n` +
-      `Już zapisane wiersze zostaną pominięte.`
+      `W bazie: ${auditSnapshot.dbLineCount} · w Excelu: ${auditSnapshot.excelLineCount} · brakuje ok. ${missing} linii.\n\n` +
+      `Już zapisane wiersze zostaną pominięte. Operacja może potrwać 1–3 min — postęp pokaże się poniżej.`
     )) return
     setLoading(true)
+    setSyncProgress({ phase: 'start', done: 0, total: 1, added: 0, message: 'Start…' })
     try {
       const { totalAdded, totalDuplicates, totalSkippedNoDate } = await syncMissingWarehouseValueFromParsedFiles(
         supabase,
-        importAudit.parsedFiles,
-        { uploadedBy: savedBy }
+        auditSnapshot.parsedFiles,
+        {
+          uploadedBy: savedBy,
+          onProgress: p => setSyncProgress(p)
+        }
       )
-      await reloadFromSupabase(true, { forceRefresh: true })
-      const dbRows = await fetchAllWarehouseValueLines(supabase, { forceRefresh: true })
-      const fileRows = importAudit.parsedFiles.flatMap(f => f.rows)
-      const ym = String(asOfDateRef.current || '').slice(0, 7)
-      const audit = auditWarehouseValueImport(fileRows, dbRows, { yearMonth: ym })
-      setImportAudit({ ...audit, fileNames: importAudit.fileNames, parsedFiles: importAudit.parsedFiles })
+
+      setSyncProgress({ phase: 'reload', done: 0, total: 1, added: totalAdded, message: 'Odświeżanie danych z bazy…' })
+      await reloadFromSupabase(true, { forceRefresh: true, preserveAudit: true })
+
+      const dbCount = lineCountHint || excelRows.length
       setMessage?.(
-        `Dopisano ${totalAdded} brakujących wierszy` +
-        (totalDuplicates ? ` · ${totalDuplicates} już było w bazie` : '') +
+        `Dopisano ${totalAdded.toLocaleString('pl-PL')} wierszy` +
+        (totalDuplicates ? ` · ${totalDuplicates.toLocaleString('pl-PL')} już było w bazie` : '') +
         (totalSkippedNoDate ? ` · ${totalSkippedNoDate} bez daty pominięto` : '') +
-        `. W bazie teraz ${dbRows.length} wierszy (było ${importAudit.dbLineCount}).`
+        `. Kliknij „Odśwież z bazy” jeśli licznik wierszy się nie zaktualizował, potem „Przelicz”.`
       )
-      if (audit.ok) setIntegrityNote('')
+
+      if (totalAdded > 0) {
+        setImportAudit(prev => prev ? {
+          ...prev,
+          ok: false,
+          summary: `Dopisano ${totalAdded} wierszy — uruchom ponownie „Sprawdź kompletność importu” aby zweryfikować.`,
+          missingInDbCount: Math.max(0, (prev.missingInDbCount || 0) - totalAdded)
+        } : prev)
+        setIntegrityNote('')
+      } else if (totalDuplicates > 0) {
+        setMessage?.(
+          `Nie dopisano nowych wierszy (${totalDuplicates.toLocaleString('pl-PL')} uznano za duplikaty). ` +
+          `Audyt porównuje inaczej niż klucz zapisu — wgraj Excel przyciskiem „Zapisz w Supabase” lub wyczyść magazyn i wgraj od nowa.`
+        )
+      }
     } catch (err) {
       console.error('sync missing warehouse value', err)
       setMessage?.(`Błąd dopisywania: ${err?.message || String(err)}`)
     } finally {
       setLoading(false)
+      setSyncProgress(null)
     }
   }
 
@@ -562,6 +582,14 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       {importAudit && !importAudit.ok && (
         <section className="card stock-excel-panel inline-warning">
           <h3>Audyt importu — rozbieżności</h3>
+          {syncProgress && (
+            <p className="hint">
+              <b>{syncProgress.message || 'Trwa dopisywanie…'}</b>
+              {syncProgress.total > 0 && syncProgress.phase !== 'done' && (
+                <> ({syncProgress.done} / {syncProgress.total}{syncProgress.added ? ` · dopisano ${syncProgress.added.toLocaleString('pl-PL')}` : ''})</>
+              )}
+            </p>
+          )}
           <p className="hint">{importAudit.summary}</p>
           {importAudit.monthGaps?.length > 0 && (
             <table className="docs-table r14-table">
@@ -602,7 +630,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                   disabled={loading || !supabase || !importAudit.parsedFiles?.length}
                   onClick={() => void handleSyncMissingFromAudit()}
                 >
-                  <Upload size={16} /> Dopisz brakujące do bazy ({importAudit.missingInDbCount} linii)
+                  <Upload size={16} /> {loading && syncProgress ? 'Dopisywanie…' : `Dopisz brakujące do bazy (${importAudit.missingInDbCount} linii)`}
                 </button>
               </div>
             </>
