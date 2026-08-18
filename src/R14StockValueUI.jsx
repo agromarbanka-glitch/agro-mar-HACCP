@@ -304,7 +304,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const fileRows = parsedFiles.flatMap(f => f.rows)
       const auditNames = parsedFiles.map(f => f.fileName)
       const ym = String(asOfDateRef.current || '').slice(0, 7)
-      const audit = auditWarehouseValueImport(fileRows, excelRows, { yearMonth: ym })
+      const audit = auditWarehouseValueImport(fileRows, excelRows, { yearMonth: ym, parsedFiles })
       setImportAudit({
         ...audit,
         fileNames: auditNames,
@@ -363,10 +363,11 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           missingInDbCount: Math.max(0, (prev.missingInDbCount || 0) - totalAdded)
         } : prev)
         setIntegrityNote('')
-      } else if (totalDuplicates > 0) {
+      } else {
         setMessage?.(
-          `Nie dopisano nowych wierszy (${totalDuplicates.toLocaleString('pl-PL')} uznano za duplikaty). ` +
-          `Audyt porównuje inaczej niż klucz zapisu — wgraj Excel przyciskiem „Zapisz w Supabase” lub wyczyść magazyn i wgraj od nowa.`
+          `Nie dopisano nowych wierszy (${totalDuplicates.toLocaleString('pl-PL')} uznano za duplikaty istniejących kluczy). ` +
+          `Audyt porównujący jeden duży Excel z trzema osobnymi importami daje mylące wyniki. ` +
+          `Wyczyść magazyn wartości i wgraj ponownie te 3 pliki: czerwiec, Lipiec 1-19, Lipiec 20-31.`
         )
       }
     } catch (err) {
@@ -488,13 +489,19 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                 ? <>Łączenie z Supabase… <b>{lineCountHint.toLocaleString('pl-PL')}</b> wierszy do pobrania</>
                 : 'Wczytywanie…'
           ) : calcLoading ? (
-            <>Przeliczam FIFO… {lineCountHint ? `(${lineCountHint.toLocaleString('pl-PL')} wierszy)` : ''}</>
+            <>Przeliczam… {lineCountHint ? `(${lineCountHint.toLocaleString('pl-PL')} wierszy)` : ''}</>
           ) : (
             excelRows.length
-              ? <><b>{excelRows.length}</b> wierszy PZ/WZ · <b>{batches.length}</b> import(ów)</>
+              ? <><b>{excelRows.length.toLocaleString('pl-PL')}</b> unikalnych wierszy PZ/WZ · <b>{batches.length}</b> import(ów)</>
               : 'Brak danych — wgraj pierwszy Excel poniżej.'
           )}
         </p>
+        {batches.length > 1 && excelRows.length > 0 && (
+          <p className="hint">
+            Suma wierszy z listy importów może być większa niż {excelRows.length.toLocaleString('pl-PL')} — duplikaty między plikami są pomijane.
+            Audyt „kompletności” rób <b>tym samym plikiem</b>, który wgrywasz (albo wyczyść magazyn i wgraj 3 pliki od nowa).
+          </p>
+        )}
         {batches.length > 0 && (
           <ul className="warehouse-batch-list hint">
             {batches.map(b => (

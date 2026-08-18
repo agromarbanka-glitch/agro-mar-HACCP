@@ -11,7 +11,7 @@ import {
 } from './excelImport'
 import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.5'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.6'
 const INSERT_CHUNK = 250
 const FETCH_PAGE_SIZE = 3000
 const FETCH_CONCURRENCY = 4
@@ -29,7 +29,7 @@ function cacheKey(lineCount, batchCount) {
   return `${lineCount}:${batchCount}`
 }
 
-function lineToExcelRow(stored) {
+function lineToExcelRow(stored, batchFileName = '') {
   return {
     rowNo: stored.row_no,
     documentType: stored.document_type,
@@ -39,7 +39,8 @@ function lineToExcelRow(stored) {
     unitNetPrice: stored.unit_net_price,
     productName: stored.product_name,
     _lineId: stored.id,
-    _batchId: stored.batch_id
+    _batchId: stored.batch_id,
+    _batchSourceFile: batchFileName
   }
 }
 
@@ -52,7 +53,18 @@ function resolveWarehouseValueIssueDate(row, documentNo) {
     || String(row.issueDate || '').slice(0, 10)
 }
 
-function excelRowToInsert(row, batchId) {
+/** Ten sam klucz co przy zapisie do Supabase — do audytu i synchronizacji. */
+export function buildWarehouseValueDedupKey(row, { sourceFile = '' } = {}) {
+  const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
+  if (!documentNo || !row.productName || !Number(row.qty)) return null
+  const operation = classifyOperation(row.documentType, documentNo)
+  if (operation === 'pominiete_mm') return null
+  const issueDate = resolveWarehouseValueIssueDate(row, documentNo)
+  if (!issueDate || issueDate === '0000-01-01') return null
+  return warehouseValueDedupKey({ ...row, documentNo, issueDate }, { sourceFile })
+}
+
+function excelRowToInsert(row, batchId, sourceFile = '') {
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
   if (!documentNo) return { payload: null, reason: 'no_doc' }
   const operation = classifyOperation(row.documentType, documentNo)
@@ -64,7 +76,7 @@ function excelRowToInsert(row, batchId) {
   if (!issueDate || issueDate === '0000-01-01') return { payload: null, reason: 'no_date' }
 
   const rowForDedup = { ...row, documentNo, issueDate }
-  const dedupKey = warehouseValueDedupKey(rowForDedup)
+  const dedupKey = warehouseValueDedupKey(rowForDedup, { sourceFile })
   if (!dedupKey) return { payload: null, reason: 'no_dedup' }
 
   const price = Number(row.unitNetPrice)
@@ -101,9 +113,10 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
 
   const batchCountRes = await client
     .from('warehouse_value_batches')
-    .select('id', { count: 'exact', head: true })
+    .select('id, file_name')
   if (batchCountRes.error) throw batchCountRes.error
-  const batchCount = batchCountRes.count || 0
+  const batchFileById = new Map((batchCountRes.data || []).map(b => [b.id, b.file_name || '']))
+  const batchCount = batchFileById.size
   const key = cacheKey(total, batchCount)
 
   if (
@@ -147,7 +160,7 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
     }
   }
 
-  const rows = pages.flat().map(lineToExcelRow)
+  const rows = pages.flat().map(line => lineToExcelRow(line, batchFileById.get(line.batch_id) || ''))
   sessionLinesCache = { key, rows, fetchedAt: Date.now() }
   return rows
 }
@@ -174,8 +187,7 @@ export async function syncMissingWarehouseValueFromParsedFiles(client, parsedFil
   if (!client) throw new Error('Brak połączenia z Supabase.')
 
   const fileList = parsedFiles || []
-  const allRows = fileList.flatMap(f => f.rows || [])
-  const totalRows = allRows.length
+  const totalRows = fileList.reduce((s, f) => s + (f.rows?.length || 0), 0)
   onProgress?.({ phase: 'prepare', done: 0, total: totalRows, added: 0, message: 'Przygotowanie wierszy…' })
 
   const primaryName = fileList[0]?.fileName || 'sync.xlsx'
@@ -197,22 +209,27 @@ export async function syncMissingWarehouseValueFromParsedFiles(client, parsedFil
   const payloads = []
   let skippedNoDate = 0
   let skippedInvalid = 0
+  let prepared = 0
 
-  for (let i = 0; i < allRows.length; i++) {
-    const { payload, reason } = excelRowToInsert(allRows[i], batchId)
-    if (payload) payloads.push(payload)
-    else if (reason === 'no_date') skippedNoDate += 1
-    else if (reason === 'invalid') skippedInvalid += 1
+  for (const { fileName, rows } of fileList) {
+    const sourceFile = fileName || primaryName
+    for (const row of rows || []) {
+      const { payload, reason } = excelRowToInsert(row, batchId, sourceFile)
+      if (payload) payloads.push(payload)
+      else if (reason === 'no_date') skippedNoDate += 1
+      else if (reason === 'invalid') skippedInvalid += 1
 
-    if (i > 0 && i % 250 === 0) {
-      onProgress?.({
-        phase: 'prepare',
-        done: i,
-        total: totalRows,
-        added: 0,
-        message: `Przygotowanie ${i.toLocaleString('pl-PL')} / ${totalRows.toLocaleString('pl-PL')}…`
-      })
-      await yieldToUi()
+      prepared += 1
+      if (prepared > 0 && prepared % 250 === 0) {
+        onProgress?.({
+          phase: 'prepare',
+          done: prepared,
+          total: totalRows,
+          added: 0,
+          message: `Przygotowanie ${prepared.toLocaleString('pl-PL')} / ${totalRows.toLocaleString('pl-PL')}…`
+        })
+        await yieldToUi()
+      }
     }
   }
 
@@ -348,7 +365,7 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
     let skippedInvalid = 0
     const payloads = []
     for (const r of rows || []) {
-      const { payload, reason } = excelRowToInsert(r, batchId)
+      const { payload, reason } = excelRowToInsert(r, batchId, name)
       if (payload) payloads.push(payload)
       else if (reason === 'no_date') skippedNoDate += 1
       else if (reason === 'invalid' && (r.productName || r.qty)) skippedInvalid += 1

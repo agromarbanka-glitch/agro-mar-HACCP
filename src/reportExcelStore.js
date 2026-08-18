@@ -76,14 +76,22 @@ export function excelRowDedupKeyStrict(row) {
 }
 
 /**
- * Klucz zapisu w Supabase (magazyn wartości): data + nr wiersza Excel.
- * Nie scala wielu linii tego samego WZ/PZ (ten sam dok.+produkt+ilość) — to psuło FIFO.
- * Przy ponownym imporcie tego samego pliku duplikat i tak się nie wklei (ten sam rowNo).
+ * Klucz zapisu w Supabase (magazyn wartości): data + nr wiersza Excel + plik źródłowy.
+ * Plik w kluczu — osobne importy (czerwiec, Lipiec 1-19, Lipiec 20-31) nie nadpisują
+ * wierszy z innego pliku przy tym samym numerze wiersza w Excelu.
  */
-export function warehouseValueDedupKey(row) {
+export function warehouseValueDedupKey(row, { sourceFile = '' } = {}) {
   const strict = excelRowDedupKeyStrict(row)
   if (!strict) return null
-  return `${strict}|r${row.rowNo ?? ''}`
+  const tag = String(sourceFile || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.(xlsx|xls)$/i, '')
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_\-.]/g, '')
+    .slice(0, 64)
+  const rowPart = `r${row.rowNo ?? ''}`
+  return tag ? `${strict}|${rowPart}|f:${tag}` : `${strict}|${rowPart}`
 }
 
 function compactRow(row, batchId, lineId) {

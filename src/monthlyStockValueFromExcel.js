@@ -18,9 +18,9 @@ import {
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
-import { normalizeProductKey } from './reportExcelStore'
+import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.9'
+export const EXCEL_REPORT_VERSION = '2.10'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -494,6 +494,21 @@ function lineContentKey(line) {
   return `${line.operation}|${line.documentNo}|${line.productKey}|${line.qty}|${line.issueDate}`
 }
 
+/** Klucz dedup identyczny jak przy zapisie do Supabase. */
+function dedupKeyFromRawRow(row, sourceFile = '') {
+  if (!row?.productName || !Number(row.qty)) return null
+  const documentNo = normalizeDocumentNo(row.documentNo)
+  if (!documentNo) return null
+  const operation = classifyOperation(row.documentType, documentNo)
+  if (operation === 'pominiete_mm') return null
+  const opKind = operation === 'sprzedaz' ? 'sprzedaz' : 'przyjecie'
+  const issueDate = resolveStockValueMovementDate(row.issueDate, documentNo, opKind)
+    || resolveDocumentIssueDate(row.issueDate, documentNo)
+    || String(row.issueDate || '').slice(0, 10)
+  if (!issueDate || issueDate === '0000-01-01') return null
+  return warehouseValueDedupKey({ ...row, documentNo, issueDate }, { sourceFile })
+}
+
 /** Statystyki PZ/WZ wg miesiąca ruchu (do audytu importu). */
 export function computeWarehouseValueMonthStats(excelRows) {
   const filled = prepareReportRows(excelRows || [])
@@ -527,28 +542,49 @@ export function computeWarehouseValueMonthStats(excelRows) {
  * Porównanie wierszy Excel (po forward-fill) z danymi w Supabase.
  * Wykrywa brakujące linie w bazie i wiersze pominięte przy imporcie (brak daty).
  */
-export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '' } = {}) {
-  const filled = prepareReportRows(excelRows || [])
-  const excelLines = normalizeExcelRows(filled)
-  const dbLines = normalizeExcelRows(dbRows || [])
+export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '', parsedFiles = [] } = {}) {
+  const dbLines = normalizeExcelRows(prepareReportRows(dbRows || []))
 
-  const excelKeys = new Map()
-  for (const line of excelLines) {
-    const key = lineContentKey(line)
-    if (!excelKeys.has(key)) excelKeys.set(key, line)
+  const excelDedup = new Map()
+  let excelLines = []
+
+  const fileParts = (parsedFiles || []).length
+    ? parsedFiles
+    : [{ fileName: '', rows: excelRows || [] }]
+
+  for (const { fileName, rows } of fileParts) {
+    const filled = prepareReportRows(rows || [])
+    excelLines = excelLines.concat(normalizeExcelRows(filled))
+    for (const row of filled) {
+      const key = dedupKeyFromRawRow(row, fileName)
+      if (!key || excelDedup.has(key)) continue
+      const norm = normalizeExcelRows([row])[0]
+      if (norm) excelDedup.set(key, { ...norm, _dedupKey: key, _raw: row })
+    }
   }
-  const dbKeys = new Set(dbLines.map(lineContentKey))
+
+  const dbDedup = new Set()
+  for (const row of dbRows || []) {
+    const key = dedupKeyFromRawRow(row, row._batchSourceFile || '')
+    if (key) dbDedup.add(key)
+  }
 
   const missingInDb = []
-  for (const [key, line] of excelKeys) {
-    if (!dbKeys.has(key)) missingInDb.push(line)
+  for (const [key, line] of excelDedup) {
+    if (!dbDedup.has(key)) missingInDb.push(line)
   }
 
   const extraInDb = []
-  for (const line of dbLines) {
-    const key = lineContentKey(line)
-    if (!excelKeys.has(key)) extraInDb.push(line)
+  for (const row of dbRows || []) {
+    const key = dedupKeyFromRawRow(row)
+    if (key && !excelDedup.has(key)) {
+      const norm = normalizeExcelRows([row])[0]
+      if (norm) extraInDb.push(norm)
+    }
   }
+
+  const dedupMissingCount = missingInDb.length
+  const alreadyInDbCount = excelDedup.size - dedupMissingCount
 
   const filterMonth = (lines) => {
     if (!yearMonth) return lines
@@ -562,7 +598,9 @@ export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '' } 
   }
 
   const skippedNoDate = []
-  for (const row of filled) {
+  for (const { fileName, rows } of fileParts) {
+    const filledPart = prepareReportRows(rows || [])
+    for (const row of filledPart) {
     if (!row.productName || !Number(row.qty)) continue
     if (isMmDocument(row.documentType, row.documentNo)) continue
     const documentNo = normalizeDocumentNo(row.documentNo)
@@ -572,15 +610,17 @@ export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '' } 
     const rawDate = resolveDocumentIssueDate(row.issueDate, documentNo)
     const moveDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
     if (!moveDate) {
-      skippedNoDate.push({ documentNo, productName: row.productName, qty: row.qty, operation })
+      skippedNoDate.push({ documentNo, productName: row.productName, qty: row.qty, operation, fileName })
     } else if (!rawDate && operation === 'sprzedaz') {
       skippedNoDate.push({
         documentNo,
         productName: row.productName,
         qty: row.qty,
         operation,
-        inferredDate: moveDate
+        inferredDate: moveDate,
+        fileName
       })
+    }
     }
   }
 
@@ -601,18 +641,23 @@ export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '' } 
   }).filter(g => Math.abs(g.missingPzKg) > 0.01 || Math.abs(g.missingWzKg) > 0.01
     || g.missingPzLines !== 0 || g.missingWzLines !== 0)
 
-  let summary = `Excel: ${excelLines.length} linii · baza: ${dbLines.length} linii`
-  if (missingInDb.length) summary += ` · brakuje w bazie: ${missingInDb.length}`
+  let summary = `Excel: ${excelLines.length} linii (${excelDedup.size} unikalnych kluczy) · baza: ${dbLines.length} linii`
+  if (dedupMissingCount) summary += ` · brakuje w bazie: ${dedupMissingCount} (wg klucza importu)`
+  else if (alreadyInDbCount > 0 && excelDedup.size > dbLines.length) {
+    summary += ` · w Excelu więcej wierszy niż w bazie, ale klucze importu się pokrywają — użyj tych samych plików co w liście importów`
+  }
   if (missingMonth.length && yearMonth) {
     summary += ` · brakuje w ${yearMonth}: ${missingMonth.length} linii (${missingMonthKg.wz.toLocaleString('pl-PL')} kg WZ, ${missingMonthKg.pz.toLocaleString('pl-PL')} kg PZ)`
   }
 
   return {
-    ok: missingInDb.length === 0 && skippedNoDate.length === 0,
+    ok: dedupMissingCount === 0 && skippedNoDate.length === 0,
     summary,
     excelLineCount: excelLines.length,
+    excelDedupCount: excelDedup.size,
     dbLineCount: dbLines.length,
-    missingInDbCount: missingInDb.length,
+    missingInDbCount: dedupMissingCount,
+    alreadyInDbCount,
     missingInDb: missingInDb.slice(0, 40),
     missingMonth,
     missingMonthKg,
