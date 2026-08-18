@@ -1,0 +1,64 @@
+---
+description: Wartość magazynu (R14) — wzorzec produkcyjny; nie zmieniaj bez wyraźnej komendy użytkownika
+globs: src/R14StockValueUI.jsx,src/warehouseValueStore.js,src/monthlyStockValueFromExcel.js,src/reportExcelStore.js,supabase/*warehouse-value*.sql
+alwaysApply: true
+---
+
+# Wartość magazynu (R14) — wzorzec produkcyjny (zatwierdzony)
+
+**Nie modyfikuj tej zakładki ani powiązanych plików**, dopóki użytkownik wyraźnie nie napisze, że pracujecie nad **Wartość magazynu** / **R14** / **magazyn wartości**.
+
+Osobna reguła od HACCP: `excel-import-haccp.mdc`. Nigdy nie łącz ścieżek importu.
+
+## Gdzie i po co
+
+| Cel | UI | Supabase |
+|-----|-----|----------|
+| Raport ilości/wartości magazynu | **Raporty → Wartość magazynu** | `warehouse_value_batches`, `warehouse_value_lines`, `warehouse_value_snapshots` |
+| HACCP, FIFO, K01 | Importy → Import Excel | `operations`, `lots`, … |
+
+Cena netto z Excela: **TAK** (tylko ta zakładka). HACCP: **NIE**.
+
+## Wersje (stan zatwierdzony)
+
+- Silnik raportu: `EXCEL_REPORT_VERSION` w `monthlyStockValueFromExcel.js` (**2.10**)
+- Magazyn Supabase: `WAREHOUSE_VALUE_STORE_VERSION` w `warehouseValueStore.js` (**1.7**)
+
+## Formuła raportu
+
+- **Ilość końcowa** = Σ PZ − Σ WZ (do daty stanu), nie FIFO partii HACCP.
+- Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca.
+- Grupowanie produktów jak Comarch (np. Truskawka + Truskawka z szypułką).
+
+## Import Excel → Supabase
+
+1. **Osobne pliki** — np. czerwiec, Lipiec 1–19, Lipiec 20–31; doklejanie, nie zastępowanie.
+2. **dedup_key** musi zawierać **nazwę pliku źródłowego** (`warehouseValueDedupKey` + `sourceFile`) — ten sam `rowNo` w dwóch plikach to **dwa** wiersze.
+3. WZ bez daty w Excelu → data z `resolveStockValueMovementDate` (numer WZ + ewentualnie dzień z kolumny).
+4. MM pomijane; PZ z dniem w numerze → data z numeru.
+5. Zapis: upsert po `dedup_key`, chunk **250**; pominięte duplikaty OK.
+6. **Nie kasuj czerwca**, jeśli jest OK — usuń tylko złe partie lipca i wgraj ponownie pliki lipca.
+
+## Wczytywanie z Supabase (krytyczne)
+
+- **Paginacja po `id`**, paczki **1000** — **nigdy** nie polegaj na jednym `.range(0, 2999)`.
+- Po pobraniu: `wczytane === count` z bazy; inaczej błąd / komunikat „odśwież z bazy”.
+- Cache sesji invalidować po imporcie, usunięciu partii, sync.
+
+## Audyt i „Dopisz brakujące”
+
+- Audyt: **te same pliki** co import (`parsedFiles`), nie jeden sklejony Excel vs trzy partie w bazie.
+- Sync = upsert brakujących kluczy; **0 dopisanych** przy pełnej bazie to OK (duplikaty).
+- Jeśli w bazie 7000+ wierszy a UI pokazuje 3000 → problem paginacji, nie brak importu.
+
+## Pliki objęte regułą
+
+- `src/R14StockValueUI.jsx`
+- `src/warehouseValueStore.js`
+- `src/monthlyStockValueFromExcel.js`
+- `src/reportExcelStore.js` (tylko `warehouseValueDedupKey` i powiązane)
+- `supabase/2026-v45-warehouse-value-magazyn.sql`
+
+## Migracja SQL
+
+Tabela magazynu wartości: `supabase/2026-v45-warehouse-value-magazyn.sql` — nie mieszać z migracjami HACCP/importu.
