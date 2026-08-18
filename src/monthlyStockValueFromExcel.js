@@ -576,7 +576,7 @@ export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '', p
 
   const extraInDb = []
   for (const row of dbRows || []) {
-    const key = dedupKeyFromRawRow(row)
+    const key = dedupKeyFromRawRow(row, row._batchSourceFile || '')
     if (key && !excelDedup.has(key)) {
       const norm = normalizeExcelRows([row])[0]
       if (norm) extraInDb.push(norm)

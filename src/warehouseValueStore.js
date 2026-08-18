@@ -11,10 +11,10 @@ import {
 } from './excelImport'
 import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.6'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.7'
 const INSERT_CHUNK = 250
-const FETCH_PAGE_SIZE = 3000
-const FETCH_CONCURRENCY = 4
+/** Supabase/PostgREST często zwraca max 1000 wierszy na zapytanie — mniejsze paczki + paginacja po id. */
+const FETCH_PAGE_SIZE = 1000
 const LINE_SELECT =
   'id, batch_id, document_type, document_no, issue_date, qty, unit_net_price, product_name, row_no'
 
@@ -129,38 +129,36 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
     return sessionLinesCache.rows
   }
 
-  const pageCount = Math.ceil(total / FETCH_PAGE_SIZE)
-  const pages = new Array(pageCount)
-  let loaded = 0
+  const allLines = []
+  let lastId = null
 
-  async function fetchPage(pageIndex) {
-    const from = pageIndex * FETCH_PAGE_SIZE
-    const to = from + FETCH_PAGE_SIZE - 1
-    const { data, error } = await client
+  while (allLines.length < total) {
+    let query = client
       .from('warehouse_value_lines')
       .select(LINE_SELECT)
-      .order('issue_date', { ascending: true })
-      .order('row_no', { ascending: true, nullsFirst: false })
-      .order('document_no', { ascending: true })
-      .range(from, to)
+      .order('id', { ascending: true })
+      .limit(FETCH_PAGE_SIZE)
+    if (lastId) query = query.gt('id', lastId)
+
+    const { data, error } = await query
     if (error) throw error
-    loaded += data?.length || 0
-    onProgress?.(loaded, total)
-    return { pageIndex, data: data || [] }
+    const page = data || []
+    if (!page.length) break
+
+    allLines.push(...page)
+    lastId = page[page.length - 1].id
+    onProgress?.(allLines.length, total)
+
+    if (page.length < FETCH_PAGE_SIZE) break
   }
 
-  for (let start = 0; start < pageCount; start += FETCH_CONCURRENCY) {
-    const chunk = []
-    for (let p = start; p < Math.min(start + FETCH_CONCURRENCY, pageCount); p++) {
-      chunk.push(fetchPage(p))
-    }
-    const results = await Promise.all(chunk)
-    for (const { pageIndex, data } of results) {
-      pages[pageIndex] = data
-    }
+  if (allLines.length !== total) {
+    throw new Error(
+      `Pobrano tylko ${allLines.length.toLocaleString('pl-PL')} z ${total.toLocaleString('pl-PL')} wierszy magazynu wartości. Spróbuj „Odśwież z bazy”.`
+    )
   }
 
-  const rows = pages.flat().map(line => lineToExcelRow(line, batchFileById.get(line.batch_id) || ''))
+  const rows = allLines.map(line => lineToExcelRow(line, batchFileById.get(line.batch_id) || ''))
   sessionLinesCache = { key, rows, fetchedAt: Date.now() }
   return rows
 }

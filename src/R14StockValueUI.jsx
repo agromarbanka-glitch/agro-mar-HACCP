@@ -168,7 +168,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         setIntegrityNote('')
         setMonthStats([])
         setImportAudit(null)
-        return
+        return { lineCount: 0, loadedCount: 0 }
       }
 
       const rows = await fetchAllWarehouseValueLines(supabase, {
@@ -190,6 +190,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       if (!silent && rows.length) {
         setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${meta.batchCount} importów).`)
       }
+      return { lineCount: meta.lineCount, loadedCount: rows.length }
     } catch (err) {
       console.error('warehouse value load', err)
       const msg = String(err?.message || err)
@@ -345,17 +346,15 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       )
 
       setSyncProgress({ phase: 'reload', done: 0, total: 1, added: totalAdded, message: 'Odświeżanie danych z bazy…' })
-      await reloadFromSupabase(true, { forceRefresh: true, preserveAudit: true })
-
-      const dbCount = lineCountHint || excelRows.length
-      setMessage?.(
-        `Dopisano ${totalAdded.toLocaleString('pl-PL')} wierszy` +
-        (totalDuplicates ? ` · ${totalDuplicates.toLocaleString('pl-PL')} już było w bazie` : '') +
-        (totalSkippedNoDate ? ` · ${totalSkippedNoDate} bez daty pominięto` : '') +
-        `. Kliknij „Odśwież z bazy” jeśli licznik wierszy się nie zaktualizował, potem „Przelicz”.`
-      )
+      const reloadStats = await reloadFromSupabase(true, { forceRefresh: true, preserveAudit: true }) || {}
 
       if (totalAdded > 0) {
+        setMessage?.(
+          `Dopisano ${totalAdded.toLocaleString('pl-PL')} wierszy` +
+          (totalDuplicates ? ` · ${totalDuplicates.toLocaleString('pl-PL')} już było w bazie` : '') +
+          (totalSkippedNoDate ? ` · ${totalSkippedNoDate} bez daty pominięto` : '') +
+          `. Uruchom ponownie „Sprawdź kompletność importu”.`
+        )
         setImportAudit(prev => prev ? {
           ...prev,
           ok: false,
@@ -364,10 +363,15 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         } : prev)
         setIntegrityNote('')
       } else {
+        const dbCount = reloadStats.lineCount || auditSnapshot.dbLineCount || 0
+        const loadedCount = reloadStats.loadedCount || 0
+        const partialLoad = dbCount > 0 && loadedCount < dbCount
         setMessage?.(
-          `Nie dopisano nowych wierszy (${totalDuplicates.toLocaleString('pl-PL')} uznano za duplikaty istniejących kluczy). ` +
-          `Audyt porównujący jeden duży Excel z trzema osobnymi importami daje mylące wyniki. ` +
-          `Wyczyść magazyn wartości i wgraj ponownie te 3 pliki: czerwiec, Lipiec 1-19, Lipiec 20-31.`
+          partialLoad
+            ? `Nie dopisano nowych wierszy — w Supabase jest już ${dbCount.toLocaleString('pl-PL')} wierszy, ale aplikacja wczytała tylko ${loadedCount.toLocaleString('pl-PL')}. ` +
+              `To błąd paginacji (naprawiony w wersji ${WAREHOUSE_VALUE_STORE_VERSION}). Odśwież stronę po deployu i kliknij „Odśwież z bazy”.`
+            : `Nie dopisano nowych wierszy (${totalDuplicates.toLocaleString('pl-PL')} uznano za duplikaty istniejących kluczy). ` +
+              `Jeśli audyt nadal pokazuje braki — usuń tylko lipcowe importy i wgraj ponownie 2 pliki lipca (czerwiec zostaw).`
         )
       }
     } catch (err) {
@@ -470,7 +474,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Ilość końcowa</b> = Σ PZ − Σ WZ (do daty). Jeśli czerwiec OK a lipiec źle → użyj „Sprawdź kompletność importu” i wgraj Excel ponownie.
+        <b>Ilość końcowa</b> = Σ PZ − Σ WZ (do daty). Jeśli widzisz „wczytano mniej niż w bazie” — kliknij <b>Odśwież z bazy</b> (po deployu naprawy paginacji).
       </p>
 
       {!isSupabaseConfigured && (
