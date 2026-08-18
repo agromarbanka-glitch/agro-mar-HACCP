@@ -2,7 +2,8 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.5: WZ rozlicza PZ o tej samej nazwie produktu z importu (normalizeKey).
+ * Silnik v2.6: WZ rozlicza PZ o tej samej nazwie produktu z importu (normalizeKey).
+ * FIFO: PZ tylko z datą ≤ data WZ (nie z całego miesiąca naraz).
  * Kolejność wierszy = jak w Excelu (rowNo), forward-fill dat w obrębie dokumentu.
  */
 import {
@@ -13,8 +14,9 @@ import {
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
+import { saleDocumentSequence } from './fifoEngine'
 
-export const EXCEL_REPORT_VERSION = '2.5'
+export const EXCEL_REPORT_VERSION = '2.6'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -88,20 +90,34 @@ function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
 
-function simulateFifoExactName({ cutoffDate, lots, sales }) {
-  const sortedSales = [...sales].sort((a, b) =>
-    a.issueDate.localeCompare(b.issueDate) ||
+function compareStockValueLotOrder(a, b) {
+  return a.issueDate.localeCompare(b.issueDate) ||
+    saleDocumentSequence(a.documentNo) - saleDocumentSequence(b.documentNo) ||
+    String(a.documentNo || '').localeCompare(String(b.documentNo || '')) ||
+    (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0) ||
     String(a.lineId || '').localeCompare(String(b.lineId || ''))
-  )
+}
+
+function compareStockValueSaleOrder(a, b) {
+  return compareStockValueLotOrder(a, b)
+}
+
+/** FIFO: każde WZ pobiera tylko PZ z datą przyjęcia ≤ data tego WZ (jak fifoEngine / K03). */
+function simulateFifoExactName({ cutoffDate, lots, sales }) {
+  const sortedSales = [...sales].sort(compareStockValueSaleOrder)
 
   for (const sale of sortedSales) {
+    const saleDate = String(sale.issueDate || '').slice(0, 10)
+    if (!saleDate || saleDate > cutoffDate) continue
+
     let left = sale.qty
     const pool = lots
-      .filter(l => l.productKey === sale.productKey && l.remaining_qty > 0 && l.issueDate <= cutoffDate)
-      .sort((a, b) =>
-        a.issueDate.localeCompare(b.issueDate) ||
-        String(a.lineId || '').localeCompare(String(b.lineId || ''))
+      .filter(l =>
+        l.productKey === sale.productKey
+        && l.remaining_qty > 0.0005
+        && String(l.issueDate || '').slice(0, 10) <= saleDate
       )
+      .sort(compareStockValueLotOrder)
 
     for (const lot of pool) {
       if (left <= 0.0005) break
@@ -132,7 +148,9 @@ function normalizeExcelRows(rows) {
       productName: displayName(row.productName),
       productKey: normalizeKey(row.productName),
       qty: Math.abs(Number(row.qty) || 0),
-      unitPriceNet: unitPrice > 0 ? unitPrice : null
+      unitPriceNet: unitPrice > 0 ? unitPrice : null,
+      rowNo: row.rowNo ?? null,
+      lineId: row._lineId || `x-${out.length}`
     })
   }
   return out
@@ -204,8 +222,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   let wzAfterCutoff = 0
   let linesWithPrice = 0
 
-  lines.forEach((line, idx) => {
-    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo } = line
+  lines.forEach((line) => {
+    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo, rowNo, lineId } = line
 
     if (operation === 'przyjecie') {
       pzLines += 1
@@ -220,7 +238,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
 
       if (issueDate <= cutoffDate) {
         lots.push({
-          lineId: `pz-${idx}`,
+          lineId: lineId || `pz-${lots.length}`,
+          rowNo,
           productKey,
           productName,
           documentNo,
@@ -236,7 +255,15 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
         ensureRow(periodMap, productKey, productName).sold_kg += qty
       }
       if (issueDate <= cutoffDate) {
-        salesForFifo.push({ ...line, qty })
+        salesForFifo.push({
+          productKey,
+          productName,
+          documentNo,
+          issueDate,
+          qty,
+          rowNo,
+          lineId: lineId || `wz-${salesForFifo.length}`
+        })
       } else {
         wzAfterCutoff += 1
       }
