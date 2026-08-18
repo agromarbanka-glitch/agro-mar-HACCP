@@ -21,6 +21,7 @@ import {
   fetchWarehouseValueMeta,
   fetchWarehouseValueStats,
   appendWarehouseValueFromParsedFiles,
+  syncMissingWarehouseValueFromParsedFiles,
   deleteWarehouseValueBatch,
   saveWarehouseValueSnapshot,
   fetchWarehouseValueSnapshots,
@@ -294,10 +295,20 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     if (!files.length || !excelRows.length) return
     setLoading(true)
     try {
-      const { rows: fileRows, fileNames: auditNames } = await parseExcelFilesForReport(files)
+      const parsedFiles = []
+      for (const file of files) {
+        const part = await parseExcelFilesForReport([file])
+        parsedFiles.push({ fileName: file.name, rows: part.rows })
+      }
+      const fileRows = parsedFiles.flatMap(f => f.rows)
+      const auditNames = parsedFiles.map(f => f.fileName)
       const ym = String(asOfDateRef.current || '').slice(0, 7)
       const audit = auditWarehouseValueImport(fileRows, excelRows, { yearMonth: ym })
-      setImportAudit({ ...audit, fileNames: auditNames })
+      setImportAudit({
+        ...audit,
+        fileNames: auditNames,
+        parsedFiles
+      })
       if (!audit.ok) {
         setMessage?.(audit.summary)
       } else {
@@ -308,6 +319,42 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     } finally {
       setLoading(false)
       if (auditInputRef.current) auditInputRef.current.value = ''
+    }
+  }
+
+  async function handleSyncMissingFromAudit() {
+    if (!supabase || !importAudit?.parsedFiles?.length) return
+    const missing = importAudit.missingInDbCount || 0
+    if (!window.confirm(
+      `Dopisać brakujące linie z Excela do Supabase?\n\n` +
+      `W bazie: ${importAudit.dbLineCount} · w Excelu: ${importAudit.excelLineCount} · brakuje ok. ${missing} linii.\n\n` +
+      `Już zapisane wiersze zostaną pominięte.`
+    )) return
+    setLoading(true)
+    try {
+      const { totalAdded, totalDuplicates, totalSkippedNoDate } = await syncMissingWarehouseValueFromParsedFiles(
+        supabase,
+        importAudit.parsedFiles,
+        { uploadedBy: savedBy }
+      )
+      await reloadFromSupabase(true, { forceRefresh: true })
+      const dbRows = await fetchAllWarehouseValueLines(supabase, { forceRefresh: true })
+      const fileRows = importAudit.parsedFiles.flatMap(f => f.rows)
+      const ym = String(asOfDateRef.current || '').slice(0, 7)
+      const audit = auditWarehouseValueImport(fileRows, dbRows, { yearMonth: ym })
+      setImportAudit({ ...audit, fileNames: importAudit.fileNames, parsedFiles: importAudit.parsedFiles })
+      setMessage?.(
+        `Dopisano ${totalAdded} brakujących wierszy` +
+        (totalDuplicates ? ` · ${totalDuplicates} już było w bazie` : '') +
+        (totalSkippedNoDate ? ` · ${totalSkippedNoDate} bez daty pominięto` : '') +
+        `. W bazie teraz ${dbRows.length} wierszy (było ${importAudit.dbLineCount}).`
+      )
+      if (audit.ok) setIntegrityNote('')
+    } catch (err) {
+      console.error('sync missing warehouse value', err)
+      setMessage?.(`Błąd dopisywania: ${err?.message || String(err)}`)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -548,7 +595,16 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                   </li>
                 ))}
               </ul>
-              <p className="hint"><b>Co zrobić:</b> wgraj ponownie ten sam plik Excel — brakujące WZ/PZ zostaną dopisane (duplikaty pominięte).</p>
+              <p className="hint"><b>Co zrobić:</b> kliknij „Dopisz brakujące do bazy” poniżej (albo wgraj ten sam Excel ponownie).</p>
+              <div className="actions">
+                <button
+                  type="button"
+                  disabled={loading || !supabase || !importAudit.parsedFiles?.length}
+                  onClick={() => void handleSyncMissingFromAudit()}
+                >
+                  <Upload size={16} /> Dopisz brakujące do bazy ({importAudit.missingInDbCount} linii)
+                </button>
+              </div>
             </>
           )}
         </section>

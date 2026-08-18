@@ -11,7 +11,7 @@ import {
 } from './excelImport'
 import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.3'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.4'
 const INSERT_CHUNK = 400
 const FETCH_PAGE_SIZE = 3000
 const FETCH_CONCURRENCY = 4
@@ -150,6 +150,122 @@ export async function fetchAllWarehouseValueLines(client, { onProgress, forceRef
   const rows = pages.flat().map(lineToExcelRow)
   sessionLinesCache = { key, rows, fetchedAt: Date.now() }
   return rows
+}
+
+/** Wszystkie dedup_key w bazie — do synchronizacji brakujących linii z Excela. */
+export async function fetchAllWarehouseValueDedupKeys(client) {
+  if (!client) return new Set()
+
+  const { count, error: countErr } = await client
+    .from('warehouse_value_lines')
+    .select('dedup_key', { count: 'exact', head: true })
+  if (countErr) throw countErr
+
+  const total = count || 0
+  const keys = new Set()
+  if (!total) return keys
+
+  const pageSize = 5000
+  for (let from = 0; from < total; from += pageSize) {
+    const to = Math.min(from + pageSize - 1, total - 1)
+    const { data, error } = await client
+      .from('warehouse_value_lines')
+      .select('dedup_key')
+      .order('dedup_key', { ascending: true })
+      .range(from, to)
+    if (error) throw error
+    for (const row of data || []) {
+      if (row.dedup_key) keys.add(row.dedup_key)
+    }
+  }
+  return keys
+}
+
+/**
+ * Wstawia tylko linie z Excela, których dedup_key nie ma jeszcze w bazie.
+ * Użyj po audycie „brakuje X linii” — nie duplikuje już zapisanych wierszy.
+ */
+export async function syncMissingWarehouseValueFromParsedFiles(client, parsedFiles, { uploadedBy = '' } = {}) {
+  if (!client) throw new Error('Brak połączenia z Supabase.')
+
+  const existingKeys = await fetchAllWarehouseValueDedupKeys(client)
+  const results = []
+  let totalAdded = 0
+  let totalDuplicates = 0
+  let totalSkippedNoDate = 0
+  let totalCandidates = 0
+
+  for (const { fileName, rows } of parsedFiles || []) {
+    const name = fileName || 'sync.xlsx'
+    const { data: batch, error: batchErr } = await client
+      .from('warehouse_value_batches')
+      .insert({
+        file_name: `${name} (dopisanie brakujących)`,
+        uploaded_by: uploadedBy || null,
+        row_count: 0,
+        duplicate_count: 0,
+        engine_version: EXCEL_REPORT_VERSION,
+        notes: 'Synchronizacja — dopisanie linii brakujących w bazie'
+      })
+      .select('id')
+      .single()
+    if (batchErr) throw batchErr
+
+    const batchId = batch.id
+    const toInsert = []
+    let skippedNoDate = 0
+    let duplicates = 0
+
+    for (const r of rows || []) {
+      const { payload, reason } = excelRowToInsert(r, batchId)
+      if (!payload) {
+        if (reason === 'no_date') skippedNoDate += 1
+        continue
+      }
+      if (existingKeys.has(payload.dedup_key)) {
+        duplicates += 1
+        continue
+      }
+      existingKeys.add(payload.dedup_key)
+      toInsert.push(payload)
+    }
+
+    totalCandidates += toInsert.length + duplicates
+
+    let added = 0
+    for (let i = 0; i < toInsert.length; i += INSERT_CHUNK) {
+      const chunk = toInsert.slice(i, i + INSERT_CHUNK)
+      const { data: inserted, error } = await client
+        .from('warehouse_value_lines')
+        .insert(chunk)
+        .select('id')
+      if (error) throw error
+      added += inserted?.length || 0
+    }
+
+    await client
+      .from('warehouse_value_batches')
+      .update({ row_count: added, duplicate_count: duplicates })
+      .eq('id', batchId)
+
+    if (added === 0) {
+      await client.from('warehouse_value_batches').delete().eq('id', batchId)
+    }
+
+    totalAdded += added
+    totalDuplicates += duplicates
+    totalSkippedNoDate += skippedNoDate
+    results.push({
+      fileName: name,
+      added,
+      duplicates,
+      skippedNoDate,
+      batchId: added > 0 ? batchId : null
+    })
+  }
+
+  if (totalAdded > 0) invalidateWarehouseValueLinesCache()
+  return { results, totalAdded, totalDuplicates, totalSkippedNoDate, totalCandidates }
 }
 
 export async function fetchWarehouseValueBatches(client) {
