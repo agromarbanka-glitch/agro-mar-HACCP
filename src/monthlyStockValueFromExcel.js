@@ -2,21 +2,25 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.7: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per nazwa produktu z Excela.
+ * Silnik v2.8: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per produkt raportu Comarch.
  * Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca (np. 30.06).
  * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
- * Kolejność wierszy = jak w Excelu (rowNo), forward-fill dat w obrębie dokumentu.
+ * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
+ * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
  */
 import {
   classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument,
+  isWzMonthYearDocument,
+  monthYearFromDocumentNo,
   forwardFillExcelRows
 } from './excelImport'
-import { resolveFifoProductGroup } from './k03Engine'
+import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
+import { normalizeProductKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.7'
+export const EXCEL_REPORT_VERSION = '2.8'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -78,12 +82,67 @@ function roundMoney(n) {
   return Math.round(Number(n || 0) * 100) / 100
 }
 
-function normalizeKey(name) {
-  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
+/** W raporcie Comarch truskawka ze szypułką wchodzi w jedną linię „Truskawka”. */
+const STOCK_VALUE_MERGE_FIFO = {
+  'truskawka z szypulka': 'truskawka'
+}
+
+/** Etykiety jak w Comarch (zestawienie ilościowo-wartościowe). */
+const STOCK_VALUE_LABEL_BY_FIFO = {
+  'malina extra': 'Malina Extra',
+  'malina klasa i': 'Malina świeża 1',
+  'malina pw': 'Malina świeża PW',
+  'porzeczka czarna': 'Porzeczka czarna',
+  'porzeczka kolorowa': 'Porzeczka kolorowa',
+  truskawka: 'Truskawka',
+  'wisnia klasa i': 'Wiśnia I',
+  'wisnia pw': 'Wiśnia Pw'
+}
+
+function stockValueFifoKey(productName) {
+  const canonical = canonicalProductName(productName)
+  const fifoKey = normalizeFifoProductKey(canonical)
+  return STOCK_VALUE_MERGE_FIFO[fifoKey] || fifoKey
+}
+
+export function stockValueReportProductName(productName) {
+  const fifoKey = stockValueFifoKey(productName)
+  return STOCK_VALUE_LABEL_BY_FIFO[fifoKey] || canonicalProductName(productName) || 'Produkt'
+}
+
+function stockValueProductKey(productName) {
+  return normalizeProductKey(stockValueReportProductName(productName))
 }
 
 function displayName(name) {
-  return String(name || '').trim() || 'Produkt'
+  return stockValueReportProductName(name)
+}
+
+/**
+ * Data ruchu dla raportu magazynowego (nie zmienia importu HACCP).
+ * WZ z numerem WZ/NNN/07/2026 i datą wystawienia w sierpniu → lipiec (koniec MM z numeru).
+ */
+export function resolveStockValueMovementDate(issueDate, documentNo, operation) {
+  const resolved = resolveDocumentIssueDate(issueDate, documentNo) || String(issueDate || '').slice(0, 10)
+  if (operation !== 'sprzedaz') return resolved
+
+  const my = monthYearFromDocumentNo(documentNo)
+  if (!my || !isWzMonthYearDocument(documentNo)) return resolved
+
+  const docYm = `${my.year}-${String(my.month).padStart(2, '0')}`
+  const lastDay = new Date(my.year, my.month, 0).getDate()
+  const docMonthEnd = `${docYm}-${String(lastDay).padStart(2, '0')}`
+
+  if (!resolved) return docMonthEnd
+  if (resolved.slice(0, 7) > docYm) return docMonthEnd
+  return resolved
+}
+
+/** Forward-fill tylko dla świeżego Excela — wiersze z Supabase mają już issue_date. */
+function prepareReportRows(excelRows) {
+  const rows = excelRows || []
+  if (rows.length && rows.every(r => r._lineId)) return rows
+  return forwardFillExcelRows(rows)
 }
 
 function inPeriod(date, periodStart, periodEnd) {
@@ -114,15 +173,18 @@ function normalizeExcelRows(rows) {
     if (!documentNo) continue
     const operation = classifyOperation(row.documentType, documentNo)
     if (operation === 'pominiete_mm') continue
-    const issueDate = resolveDocumentIssueDate(row.issueDate, documentNo)
+    const rawIssueDate = resolveDocumentIssueDate(row.issueDate, documentNo) || String(row.issueDate || '').slice(0, 10)
+    const issueDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
     if (!issueDate) continue
     const unitPrice = Number(row.unitNetPrice)
+    const label = displayName(row.productName)
     out.push({
       operation,
       documentNo,
       issueDate,
-      productName: displayName(row.productName),
-      productKey: normalizeKey(row.productName),
+      rawIssueDate,
+      productName: label,
+      productKey: stockValueProductKey(row.productName),
       qty: Math.abs(Number(row.qty) || 0),
       unitPriceNet: unitPrice > 0 ? unitPrice : null,
       rowNo: row.rowNo ?? null,
@@ -178,7 +240,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const { monthStart, periodEnd, yearMonth } = bounds
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
-  const filled = forwardFillExcelRows(excelRows || [])
+  const filled = prepareReportRows(excelRows || [])
   const lines = normalizeExcelRows(filled)
 
   if (!lines.length) {
@@ -203,6 +265,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   let pzLines = 0
   let wzLines = 0
   let wzAfterCutoff = 0
+  let wzClampedToDocMonth = 0
   let linesWithPrice = 0
 
   lines.forEach((line) => {
@@ -239,6 +302,14 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       }
     } else if (operation === 'sprzedaz') {
       wzLines += 1
+      const rawDate = line.rawIssueDate || issueDate
+      if (
+        rawDate && issueDate !== rawDate
+        && isWzMonthYearDocument(documentNo)
+        && issueDate.slice(0, 7) < rawDate.slice(0, 7)
+      ) {
+        wzClampedToDocMonth += 1
+      }
 
       if (openingCutoff && issueDate <= openingCutoff) row._opening_wz += qty
 
@@ -340,6 +411,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzAfterCutoff > 0) {
     message += ` Pominięto ${wzAfterCutoff} WZ z datą po ${formatReportTitleDate(cutoffDate)} (nie obniżają stanu na ten dzień).`
   }
+  if (wzClampedToDocMonth > 0) {
+    message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
+  }
 
   const reportPayload = {
     source: 'excel',
@@ -362,8 +436,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzLines,
       linesWithPrice,
       wzAfterCutoff,
+      wzClampedToDocMonth,
       openingCutoff,
-      engine: 'cumulative_pz_minus_wz'
+      engine: 'cumulative_pz_minus_wz_v28'
     },
     message
   }
