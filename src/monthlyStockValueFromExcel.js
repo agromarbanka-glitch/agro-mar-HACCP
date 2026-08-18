@@ -98,13 +98,9 @@ function compareStockValueLotOrder(a, b) {
     String(a.lineId || '').localeCompare(String(b.lineId || ''))
 }
 
-function compareStockValueSaleOrder(a, b) {
-  return compareStockValueLotOrder(a, b)
-}
-
-/** FIFO: każde WZ pobiera tylko PZ z datą przyjęcia ≤ data tego WZ (jak fifoEngine / K03). */
+/** FIFO: każde WZ pobiera tylko PZ z datą przyjęcia ≤ data tego WZ. */
 function simulateFifoExactName({ cutoffDate, lots, sales }) {
-  const sortedSales = [...sales].sort(compareStockValueSaleOrder)
+  const sortedSales = [...sales].sort(compareStockValueLotOrder)
 
   for (const sale of sortedSales) {
     const saleDate = String(sale.issueDate || '').slice(0, 10)
