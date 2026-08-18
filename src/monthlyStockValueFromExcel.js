@@ -20,7 +20,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { normalizeProductKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.8'
+export const EXCEL_REPORT_VERSION = '2.9'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -488,4 +488,138 @@ export async function parseExcelFilesForReport(files) {
   }
 
   return { rows: allRows, fileNames, skippedMm }
+}
+
+function lineContentKey(line) {
+  return `${line.operation}|${line.documentNo}|${line.productKey}|${line.qty}|${line.issueDate}`
+}
+
+/** Statystyki PZ/WZ wg miesiąca ruchu (do audytu importu). */
+export function computeWarehouseValueMonthStats(excelRows) {
+  const filled = prepareReportRows(excelRows || [])
+  const lines = normalizeExcelRows(filled)
+  const byMonth = new Map()
+  for (const line of lines) {
+    const ym = String(line.issueDate || '').slice(0, 7)
+    if (!ym) continue
+    if (!byMonth.has(ym)) {
+      byMonth.set(ym, { yearMonth: ym, pzLines: 0, wzLines: 0, pzKg: 0, wzKg: 0 })
+    }
+    const bucket = byMonth.get(ym)
+    if (line.operation === 'przyjecie') {
+      bucket.pzLines += 1
+      bucket.pzKg += line.qty
+    } else if (line.operation === 'sprzedaz') {
+      bucket.wzLines += 1
+      bucket.wzKg += line.qty
+    }
+  }
+  return [...byMonth.values()]
+    .map(m => ({
+      ...m,
+      pzKg: roundKg(m.pzKg),
+      wzKg: roundKg(m.wzKg)
+    }))
+    .sort((a, b) => a.yearMonth.localeCompare(b.yearMonth))
+}
+
+/**
+ * Porównanie wierszy Excel (po forward-fill) z danymi w Supabase.
+ * Wykrywa brakujące linie w bazie i wiersze pominięte przy imporcie (brak daty).
+ */
+export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '' } = {}) {
+  const filled = prepareReportRows(excelRows || [])
+  const excelLines = normalizeExcelRows(filled)
+  const dbLines = normalizeExcelRows(dbRows || [])
+
+  const excelKeys = new Map()
+  for (const line of excelLines) {
+    const key = lineContentKey(line)
+    if (!excelKeys.has(key)) excelKeys.set(key, line)
+  }
+  const dbKeys = new Set(dbLines.map(lineContentKey))
+
+  const missingInDb = []
+  for (const [key, line] of excelKeys) {
+    if (!dbKeys.has(key)) missingInDb.push(line)
+  }
+
+  const extraInDb = []
+  for (const line of dbLines) {
+    const key = lineContentKey(line)
+    if (!excelKeys.has(key)) extraInDb.push(line)
+  }
+
+  const filterMonth = (lines) => {
+    if (!yearMonth) return lines
+    return lines.filter(l => String(l.issueDate || '').startsWith(yearMonth))
+  }
+
+  const missingMonth = filterMonth(missingInDb)
+  const missingMonthKg = {
+    pz: roundKg(missingMonth.filter(l => l.operation === 'przyjecie').reduce((s, l) => s + l.qty, 0)),
+    wz: roundKg(missingMonth.filter(l => l.operation === 'sprzedaz').reduce((s, l) => s + l.qty, 0))
+  }
+
+  const skippedNoDate = []
+  for (const row of filled) {
+    if (!row.productName || !Number(row.qty)) continue
+    if (isMmDocument(row.documentType, row.documentNo)) continue
+    const documentNo = normalizeDocumentNo(row.documentNo)
+    if (!documentNo) continue
+    const operation = classifyOperation(row.documentType, documentNo)
+    if (operation === 'pominiete_mm') continue
+    const rawDate = resolveDocumentIssueDate(row.issueDate, documentNo)
+    const moveDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
+    if (!moveDate) {
+      skippedNoDate.push({ documentNo, productName: row.productName, qty: row.qty, operation })
+    } else if (!rawDate && operation === 'sprzedaz') {
+      skippedNoDate.push({
+        documentNo,
+        productName: row.productName,
+        qty: row.qty,
+        operation,
+        inferredDate: moveDate
+      })
+    }
+  }
+
+  const excelStats = computeWarehouseValueMonthStats(excelRows)
+  const dbStats = computeWarehouseValueMonthStats(dbRows)
+  const dbByMonth = new Map(dbStats.map(m => [m.yearMonth, m]))
+  const monthGaps = excelStats.map(ex => {
+    const db = dbByMonth.get(ex.yearMonth) || { pzLines: 0, wzLines: 0, pzKg: 0, wzKg: 0 }
+    return {
+      yearMonth: ex.yearMonth,
+      excel: ex,
+      db,
+      missingPzKg: roundKg(ex.pzKg - db.pzKg),
+      missingWzKg: roundKg(ex.wzKg - db.wzKg),
+      missingPzLines: ex.pzLines - db.pzLines,
+      missingWzLines: ex.wzLines - db.wzLines
+    }
+  }).filter(g => Math.abs(g.missingPzKg) > 0.01 || Math.abs(g.missingWzKg) > 0.01
+    || g.missingPzLines !== 0 || g.missingWzLines !== 0)
+
+  let summary = `Excel: ${excelLines.length} linii · baza: ${dbLines.length} linii`
+  if (missingInDb.length) summary += ` · brakuje w bazie: ${missingInDb.length}`
+  if (missingMonth.length && yearMonth) {
+    summary += ` · brakuje w ${yearMonth}: ${missingMonth.length} linii (${missingMonthKg.wz.toLocaleString('pl-PL')} kg WZ, ${missingMonthKg.pz.toLocaleString('pl-PL')} kg PZ)`
+  }
+
+  return {
+    ok: missingInDb.length === 0 && skippedNoDate.length === 0,
+    summary,
+    excelLineCount: excelLines.length,
+    dbLineCount: dbLines.length,
+    missingInDbCount: missingInDb.length,
+    missingInDb: missingInDb.slice(0, 40),
+    missingMonth,
+    missingMonthKg,
+    extraInDbCount: extraInDb.length,
+    skippedNoDate,
+    monthGaps,
+    excelStats,
+    dbStats
+  }
 }

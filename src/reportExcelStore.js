@@ -67,7 +67,10 @@ export function excelRowDedupKey(row) {
 export function excelRowDedupKeyStrict(row) {
   const op = rowOperation(row)
   if (!op) return null
-  const issueDate = resolveDocumentIssueDate(row.issueDate, op.documentNo)
+  const raw = String(row.issueDate || '').slice(0, 10)
+  const issueDate = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? raw
+    : resolveDocumentIssueDate(row.issueDate, op.documentNo)
   if (!issueDate) return null
   return `${op.operation}|${op.documentNo}|${op.product}|${op.qty}|${issueDate}`
 }

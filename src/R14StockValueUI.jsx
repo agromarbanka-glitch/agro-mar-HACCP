@@ -12,7 +12,9 @@ import {
   parseExcelFilesForReport,
   formatReportTitleDate,
   buildReportTitle,
-  compareStockValueReports
+  compareStockValueReports,
+  computeWarehouseValueMonthStats,
+  auditWarehouseValueImport
 } from './monthlyStockValueFromExcel'
 import {
   fetchAllWarehouseValueLines,
@@ -121,12 +123,15 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [loadProgress, setLoadProgress] = useState({ loaded: 0, total: 0 })
   const [lineCountHint, setLineCountHint] = useState(0)
   const [integrityNote, setIntegrityNote] = useState('')
+  const [monthStats, setMonthStats] = useState([])
+  const [importAudit, setImportAudit] = useState(null)
   const [report, setReport] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
   const [snapshots, setSnapshots] = useState([])
   const fileInputRef = useRef(null)
+  const auditInputRef = useRef(null)
   const asOfDateRef = useRef(asOfDate)
   asOfDateRef.current = asOfDate
 
@@ -159,6 +164,8 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         setExcelRows([])
         setReport(null)
         setIntegrityNote('')
+        setMonthStats([])
+        setImportAudit(null)
         return
       }
 
@@ -167,6 +174,8 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         onProgress: (loaded, total) => setLoadProgress({ loaded, total })
       })
       setExcelRows(rows)
+      setMonthStats(computeWarehouseValueMonthStats(rows))
+      setImportAudit(null)
       const probe = computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current)
       const skipped = rows.length - (probe.diagnostics?.excelLines || 0)
       setIntegrityNote(
@@ -237,7 +246,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         fileNames: parsedFiles.map(f => f.fileName)
       })
       const fileLineCount = fileReport.diagnostics?.excelLines || 0
-      const { totalAdded, totalDuplicates } = await appendWarehouseValueFromParsedFiles(
+      const { totalAdded, totalDuplicates, totalSkippedNoDate } = await appendWarehouseValueFromParsedFiles(
         supabase,
         parsedFiles,
         { uploadedBy: savedBy }
@@ -257,6 +266,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const linesWithPrice = flatRows.filter(r => Number(r.unitNetPrice) > 0).length
       const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
       const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
+      const skipHint = totalSkippedNoDate ? ` · ${totalSkippedNoDate} wierszy bez daty pominięto przy zapisie` : ''
       const fileHint = `Plik: ${fileLineCount} linii raportowych · baza: ${dbRows.length} wierszy (${dbLineCount} do FIFO)`
       const verifyHint = !verify.ok && totalAdded > 0
         ? ' · UWAGA: wynik z bazy różni się od pliku — wyczyść magazyn wartości i wgraj Excel ponownie.'
@@ -264,15 +274,40 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           ? ` · UWAGA: w bazie mniej linii niż w pliku (${dbLineCount} vs ${fileLineCount}) — wyczyść i wgraj od nowa.`
           : ''
       setMessage?.(
-        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${priceHint}. ${fileHint}${verifyHint}. ` +
+        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${skipHint}${priceHint}. ${fileHint}${verifyHint}. ` +
         (totalAdded === 0 ? 'Wszystkie wiersze były już w bazie.' : 'Kolejne miesiące doklejaj — nie trzeba wgrywać historii od nowa.')
       )
+      if (totalSkippedNoDate > 0) {
+        setIntegrityNote(`Przy imporcie pominięto ${totalSkippedNoDate} wierszy bez daty — po aktualizacji silnika wgraj ten sam Excel ponownie.`)
+      }
     } catch (err) {
       console.error('Excel report upload', err)
       setMessage?.(`Błąd importu do Supabase: ${err?.message || String(err)}`)
     } finally {
       setLoading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  async function handleAuditExcelUpload(fileList) {
+    const files = [...(fileList || [])].filter(Boolean)
+    if (!files.length || !excelRows.length) return
+    setLoading(true)
+    try {
+      const { rows: fileRows, fileNames: auditNames } = await parseExcelFilesForReport(files)
+      const ym = String(asOfDateRef.current || '').slice(0, 7)
+      const audit = auditWarehouseValueImport(fileRows, excelRows, { yearMonth: ym })
+      setImportAudit({ ...audit, fileNames: auditNames })
+      if (!audit.ok) {
+        setMessage?.(audit.summary)
+      } else {
+        setMessage?.(`Audyt OK — Excel i baza zgadzają się (${audit.excelLineCount} linii).`)
+      }
+    } catch (err) {
+      setMessage?.(`Błąd audytu: ${err?.message || String(err)}`)
+    } finally {
+      setLoading(false)
+      if (auditInputRef.current) auditInputRef.current.value = ''
     }
   }
 
@@ -367,7 +402,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Ilość końcowa</b> = suma PZ − suma WZ (do wybranej daty), per nazwa produktu z Excela. <b>Stan początkowy</b> = saldo na dzień przed 1. dniem miesiąca (np. 30.06). Wgraj pełną historię PZ/WZ (nie tylko lipiec).
+        <b>Ilość końcowa</b> = Σ PZ − Σ WZ (do daty). Jeśli czerwiec OK a lipiec źle → użyj „Sprawdź kompletność importu” i wgraj Excel ponownie.
       </p>
 
       {!isSupabaseConfigured && (
@@ -432,8 +467,92 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           <button type="button" disabled={loading || !supabase} onClick={() => fileInputRef.current?.click()}>
             <Upload size={16} /> {loading ? 'Zapisuję…' : 'Wybierz Excel i zapisz w Supabase'}
           </button>
+          <input
+            ref={auditInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            multiple
+            className="file-input-hidden"
+            onChange={e => void handleAuditExcelUpload(e.target.files)}
+          />
+          <button
+            type="button"
+            className="secondary"
+            disabled={loading || !excelRows.length}
+            onClick={() => auditInputRef.current?.click()}
+            title="Porównaj plik Excel z danymi w Supabase bez zapisu"
+          >
+            <FileSpreadsheet size={16} /> Sprawdź kompletność importu
+          </button>
         </div>
       </section>
+
+      {monthStats.length > 0 && (
+        <section className="card stock-excel-panel">
+          <h3>Import wg miesiąca (w bazie)</h3>
+          <p className="hint">Lipiec z błędnym stanem przy poprawnym czerwcu zwykle oznacza brakujące WZ w bazie — porównaj lipiec z Excelem.</p>
+          <table className="docs-table r14-table">
+            <thead>
+              <tr>
+                <th>Miesiąc</th>
+                <th className="num">PZ (linie / kg)</th>
+                <th className="num">WZ (linie / kg)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {monthStats.map(m => (
+                <tr key={m.yearMonth}>
+                  <td>{m.yearMonth}</td>
+                  <td className="num">{m.pzLines} · {Number(m.pzKg).toLocaleString('pl-PL')}</td>
+                  <td className="num">{m.wzLines} · {Number(m.wzKg).toLocaleString('pl-PL')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {importAudit && !importAudit.ok && (
+        <section className="card stock-excel-panel inline-warning">
+          <h3>Audyt importu — rozbieżności</h3>
+          <p className="hint">{importAudit.summary}</p>
+          {importAudit.monthGaps?.length > 0 && (
+            <table className="docs-table r14-table">
+              <thead>
+                <tr>
+                  <th>Miesiąc</th>
+                  <th className="num">Brakuje PZ kg</th>
+                  <th className="num">Brakuje WZ kg</th>
+                  <th className="num">Brakuje linii</th>
+                </tr>
+              </thead>
+              <tbody>
+                {importAudit.monthGaps.map(g => (
+                  <tr key={g.yearMonth}>
+                    <td>{g.yearMonth}</td>
+                    <td className="num">{Number(g.missingPzKg).toLocaleString('pl-PL')}</td>
+                    <td className="num">{Number(g.missingWzKg).toLocaleString('pl-PL')}</td>
+                    <td className="num">PZ {g.missingPzLines} · WZ {g.missingWzLines}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {importAudit.missingInDb?.length > 0 && (
+            <>
+              <p className="hint">Przykładowe linie z Excela, których nie ma w bazie (max 15):</p>
+              <ul className="warehouse-batch-list hint">
+                {importAudit.missingInDb.slice(0, 15).map((line, i) => (
+                  <li key={`${line.documentNo}-${i}`}>
+                    {line.operation === 'sprzedaz' ? 'WZ' : 'PZ'} {line.documentNo} · {line.productName} · {Number(line.qty).toLocaleString('pl-PL')} kg · {line.issueDate}
+                  </li>
+                ))}
+              </ul>
+              <p className="hint"><b>Co zrobić:</b> wgraj ponownie ten sam plik Excel — brakujące WZ/PZ zostaną dopisane (duplikaty pominięte).</p>
+            </>
+          )}
+        </section>
+      )}
 
       <section className="card stock-excel-panel">
         <h3>2. Wybierz datę stanu</h3>

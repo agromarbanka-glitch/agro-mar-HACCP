@@ -2,16 +2,16 @@
  * Magazyn wartości (raport Excel FIFO) — trwały zapis w Supabase.
  * Osobne od HACCP: operations, lots, fifo_allocations.
  */
-import { warehouseValueDedupKey } from './reportExcelStore'
+import { warehouseValueDedupKey, excelRowDedupKey } from './reportExcelStore'
 import {
   classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument
 } from './excelImport'
-import { EXCEL_REPORT_VERSION } from './monthlyStockValueFromExcel'
+import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.2'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.3'
 const INSERT_CHUNK = 400
 const FETCH_PAGE_SIZE = 3000
 const FETCH_CONCURRENCY = 4
@@ -43,23 +43,44 @@ function lineToExcelRow(stored) {
   }
 }
 
+function resolveWarehouseValueIssueDate(row, documentNo) {
+  const operation = classifyOperation(row.documentType, documentNo)
+  if (operation === 'pominiete_mm') return ''
+  const opKind = operation === 'sprzedaz' ? 'sprzedaz' : 'przyjecie'
+  return resolveStockValueMovementDate(row.issueDate, documentNo, opKind)
+    || resolveDocumentIssueDate(row.issueDate, documentNo)
+    || String(row.issueDate || '').slice(0, 10)
+}
+
 function excelRowToInsert(row, batchId) {
-  const dedupKey = warehouseValueDedupKey(row)
-  if (!dedupKey) return null
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
-  const issueDate = resolveDocumentIssueDate(row.issueDate, documentNo) || String(row.issueDate || '').slice(0, 10)
-  if (!issueDate || issueDate === '0000-01-01') return null
+  if (!documentNo) return { payload: null, reason: 'no_doc' }
+  const operation = classifyOperation(row.documentType, documentNo)
+  if (operation === 'pominiete_mm' || !row.productName || !Number(row.qty)) {
+    return { payload: null, reason: 'invalid' }
+  }
+
+  const issueDate = resolveWarehouseValueIssueDate(row, documentNo)
+  if (!issueDate || issueDate === '0000-01-01') return { payload: null, reason: 'no_date' }
+
+  const rowForDedup = { ...row, documentNo, issueDate }
+  const dedupKey = warehouseValueDedupKey(rowForDedup)
+  if (!dedupKey) return { payload: null, reason: 'no_dedup' }
+
   const price = Number(row.unitNetPrice)
   return {
-    batch_id: batchId,
-    dedup_key: dedupKey,
-    document_type: row.documentType || null,
-    document_no: documentNo,
-    issue_date: issueDate,
-    qty: Math.abs(Number(row.qty) || 0),
-    unit_net_price: price > 0 ? price : null,
-    product_name: String(row.productName || '').trim(),
-    row_no: row.rowNo ?? null
+    payload: {
+      batch_id: batchId,
+      dedup_key: dedupKey,
+      document_type: row.documentType || null,
+      document_no: documentNo,
+      issue_date: issueDate,
+      qty: Math.abs(Number(row.qty) || 0),
+      unit_net_price: price > 0 ? price : null,
+      product_name: String(row.productName || '').trim(),
+      row_no: row.rowNo ?? null
+    },
+    reason: null
   }
 }
 
@@ -195,7 +216,15 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
     if (batchErr) throw batchErr
 
     const batchId = batch.id
-    const payloads = (rows || []).map(r => excelRowToInsert(r, batchId)).filter(Boolean)
+    let skippedNoDate = 0
+    let skippedInvalid = 0
+    const payloads = []
+    for (const r of rows || []) {
+      const { payload, reason } = excelRowToInsert(r, batchId)
+      if (payload) payloads.push(payload)
+      else if (reason === 'no_date') skippedNoDate += 1
+      else if (reason === 'invalid' && (r.productName || r.qty)) skippedInvalid += 1
+    }
     let added = 0
     let duplicates = 0
 
@@ -220,13 +249,22 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
       await client.from('warehouse_value_batches').delete().eq('id', batchId)
     }
 
-    results.push({ fileName: name, added, duplicates, batchId: added > 0 ? batchId : null })
+    results.push({
+      fileName: name,
+      added,
+      duplicates,
+      skippedNoDate,
+      skippedInvalid,
+      parsedRows: (rows || []).length,
+      batchId: added > 0 ? batchId : null
+    })
   }
 
   const totalAdded = results.reduce((s, r) => s + r.added, 0)
   const totalDup = results.reduce((s, r) => s + r.duplicates, 0)
+  const totalSkippedNoDate = results.reduce((s, r) => s + (r.skippedNoDate || 0), 0)
   if (totalAdded > 0) invalidateWarehouseValueLinesCache()
-  return { results, totalAdded, totalDuplicates: totalDup }
+  return { results, totalAdded, totalDuplicates: totalDup, totalSkippedNoDate }
 }
 
 export async function deleteWarehouseValueBatch(client, batchId) {
