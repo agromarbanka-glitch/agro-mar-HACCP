@@ -366,8 +366,8 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   return (
     <div className="stock-value-report">
       <p className="hint">
-        <b>Wartość magazynu</b> — osobne narzędzie od HACCP. FIFO {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        WZ rozlicza PZ o <b>tej samej nazwie produktu</b> co w Excelu. Silnik {EXCEL_REPORT_VERSION} — ten sam wynik z pliku i z Supabase (każda linia Excel osobno). Po aktualizacji deduplikacji: <b>wyczyść magazyn wartości i wgraj Excel od nowa</b>.
+        <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
+        <b>Ilość końcowa</b> = suma PZ − suma WZ (do wybranej daty), per nazwa produktu z Excela. <b>Stan początkowy</b> = saldo na dzień przed 1. dniem miesiąca (np. 30.06). Wgraj pełną historię PZ/WZ (nie tylko lipiec).
       </p>
 
       {!isSupabaseConfigured && (
@@ -488,9 +488,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       {report && excelRows.length > 0 && (
         <div className="summary r14-summary">
           <span>Stan na: <b>{report.asOfDatePl || formatReportTitleDate(asOfDate)}</b></span>
-          <span>Przybyło (01.–{report.asOfDatePl?.replace(/r\.$/, '') || '…'}): <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b></span>
-          <span>Ubyło: <b>{Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')} kg</b></span>
-          <span>Ilość końcowa FIFO: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
+          <span>Stan początkowy{report.diagnostics?.openingCutoff ? ` (${formatReportTitleDate(report.diagnostics.openingCutoff)})` : ''}: <b>{Number(report.totals?.opening_kg || 0).toLocaleString('pl-PL')} kg</b></span>
+          <span>Przybyło (miesiąc): <b>{Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')} kg</b></span>
+          <span>Ubyło (miesiąc): <b>{Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')} kg</b></span>
+          <span>Ilość końcowa: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
           {diag && (
             <span className="hint">
               {diag.pzLines} PZ, {diag.wzLines} WZ w bazie · {diag.linesWithPrice} z ceną
@@ -506,9 +507,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             <thead>
               <tr>
                 <th>Produkt</th>
-                <th className="num">Przybyło kg</th>
-                <th className="num">Ubyło kg</th>
-                <th className="num">Ilość końcowa<br /><small>FIFO · {report?.asOfDatePl || ''}</small></th>
+                <th className="num">Stan początkowy<br /><small>{report?.diagnostics?.openingCutoff ? formatReportTitleDate(report.diagnostics.openingCutoff) : 'przed miesiącem'}</small></th>
+                <th className="num">Przybyło kg<br /><small>w miesiącu</small></th>
+                <th className="num">Ubyło kg<br /><small>w miesiącu</small></th>
+                <th className="num">Ilość końcowa<br /><small>{report?.asOfDatePl || ''}</small></th>
                 <th className="num">Wartość zakupu<br /><small>netto</small></th>
                 <th className="num">Wartość końcowa<br /><small>netto</small></th>
                 <th>Szczegóły</th>
@@ -522,6 +524,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                   <React.Fragment key={key}>
                     <tr>
                       <td><b>{row.product_name}</b>{row.product_group ? <small className="hint"> · {row.product_group}</small> : null}</td>
+                      <td className="num">{Number(row.opening_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.purchased_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.sold_kg || 0).toLocaleString('pl-PL')}</td>
                       <td className="num">{Number(row.remaining_kg || 0).toLocaleString('pl-PL')}</td>
@@ -542,7 +545,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                     </tr>
                     {open && row.lot_lines?.length > 0 && (
                       <tr className="r14-detail-row">
-                        <td colSpan={7}>
+                        <td colSpan={8}>
                           <table className="r14-lot-table">
                             <thead>
                               <tr>
@@ -575,6 +578,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             <tfoot>
               <tr>
                 <td><b>Razem</b></td>
+                <td className="num"><b>{Number(report?.totals?.opening_kg || 0).toLocaleString('pl-PL')}</b></td>
                 <td className="num"><b>{Number(report?.totals?.purchased_kg || 0).toLocaleString('pl-PL')}</b></td>
                 <td className="num"><b>{Number(report?.totals?.sold_kg || 0).toLocaleString('pl-PL')}</b></td>
                 <td className="num"><b>{Number(report?.totals?.remaining_kg || 0).toLocaleString('pl-PL')}</b></td>

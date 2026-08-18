@@ -392,6 +392,7 @@ export function buildR14PrintHtml(report, escapeHtml) {
     <tr>
       <td>${i + 1}</td>
       <td>${esc(r.product_name)}</td>
+      <td class="num">${Number(r.opening_kg || 0).toLocaleString('pl-PL')}</td>
       <td class="num">${Number(r.purchased_kg || 0).toLocaleString('pl-PL')}</td>
       <td class="num">${Number(r.sold_kg || 0).toLocaleString('pl-PL')}</td>
       <td class="num">${Number(r.remaining_kg || 0).toLocaleString('pl-PL')}</td>
@@ -412,16 +413,17 @@ th{background:#eee}
 tfoot td{font-weight:bold}
 </style></head><body>
 <h1>${esc(title)}</h1>
-<p class="meta">FIFO · sprzedaż wg daty WZ · wartość netto = ilość × cena netto z PZ</p>
+<p class="meta">Ilość końcowa = Σ PZ − Σ WZ (do daty stanu) · wartość netto = ilość końcowa × średnia cena PZ</p>
 <table>
 <thead><tr>
-  <th>Lp.</th><th>Produkt</th>
+  <th>Lp.</th><th>Produkt</th><th>Stan początkowy</th>
   <th>Przybyło kg</th><th>Ubyło kg</th><th>Ilość końcowa</th>
   <th>Wartość zakupu netto</th><th>Wartość końcowa netto</th>
 </tr></thead>
-<tbody>${bodyRows || '<tr><td colspan="7">Brak danych</td></tr>'}</tbody>
+<tbody>${bodyRows || '<tr><td colspan="8">Brak danych</td></tr>'}</tbody>
 <tfoot><tr>
   <td colspan="2">Razem</td>
+  <td class="num">${Number(report.totals?.opening_kg || 0).toLocaleString('pl-PL')}</td>
   <td class="num">${Number(report.totals?.purchased_kg || 0).toLocaleString('pl-PL')}</td>
   <td class="num">${Number(report.totals?.sold_kg || 0).toLocaleString('pl-PL')}</td>
   <td class="num">${Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')}</td>
@@ -437,15 +439,15 @@ export function buildR14ExcelRows(report) {
   const header = [
     [title],
     [],
-    ['Lp.', 'Produkt', 'Grupa', 'Przybyło kg', 'Ubyło kg', 'Ilość końcowa', 'Wartość zakupu netto', 'Wartość końcowa netto']
+    ['Lp.', 'Produkt', 'Grupa', 'Stan początkowy', 'Przybyło kg', 'Ubyło kg', 'Ilość końcowa', 'Wartość zakupu netto', 'Wartość końcowa netto']
   ]
   const data = (report.rows || []).map((r, i) => [
     i + 1, r.product_name, r.product_group || '',
-    r.purchased_kg, r.sold_kg, r.remaining_kg, r.purchased_value, r.remaining_value
+    r.opening_kg, r.purchased_kg, r.sold_kg, r.remaining_kg, r.purchased_value, r.remaining_value
   ])
   const footer = [[
     '', 'Razem', '',
-    report.totals?.purchased_kg || 0, report.totals?.sold_kg || 0,
+    report.totals?.opening_kg || 0, report.totals?.purchased_kg || 0, report.totals?.sold_kg || 0,
     report.totals?.remaining_kg || 0, report.totals?.purchased_value || 0,
     report.totals?.remaining_value || 0
   ]]

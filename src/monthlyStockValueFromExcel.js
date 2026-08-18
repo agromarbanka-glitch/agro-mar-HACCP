@@ -2,8 +2,9 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.6: WZ rozlicza PZ o tej samej nazwie produktu z importu (normalizeKey).
- * FIFO: PZ tylko z datą ≤ data WZ (nie z całego miesiąca naraz).
+ * Silnik v2.7: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per nazwa produktu z Excela.
+ * Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca (np. 30.06).
+ * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
  * Kolejność wierszy = jak w Excelu (rowNo), forward-fill dat w obrębie dokumentu.
  */
 import {
@@ -14,9 +15,8 @@ import {
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup } from './k03Engine'
-import { saleDocumentSequence } from './fifoEngine'
 
-export const EXCEL_REPORT_VERSION = '2.6'
+export const EXCEL_REPORT_VERSION = '2.7'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -90,39 +90,19 @@ function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
 
-function compareStockValueLotOrder(a, b) {
-  return a.issueDate.localeCompare(b.issueDate) ||
-    saleDocumentSequence(a.documentNo) - saleDocumentSequence(b.documentNo) ||
-    String(a.documentNo || '').localeCompare(String(b.documentNo || '')) ||
-    (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0) ||
-    String(a.lineId || '').localeCompare(String(b.lineId || ''))
+/** Dzień przed datą RRRR-MM-DD (np. 2024-07-01 → 2024-06-30). */
+function dayBefore(isoDate) {
+  const s = String(isoDate || '').slice(0, 10)
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return ''
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  d.setDate(d.getDate() - 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-/** FIFO: każde WZ pobiera tylko PZ z datą przyjęcia ≤ data tego WZ. */
-function simulateFifoExactName({ cutoffDate, lots, sales }) {
-  const sortedSales = [...sales].sort(compareStockValueLotOrder)
-
-  for (const sale of sortedSales) {
-    const saleDate = String(sale.issueDate || '').slice(0, 10)
-    if (!saleDate || saleDate > cutoffDate) continue
-
-    let left = sale.qty
-    const pool = lots
-      .filter(l =>
-        l.productKey === sale.productKey
-        && l.remaining_qty > 0.0005
-        && String(l.issueDate || '').slice(0, 10) <= saleDate
-      )
-      .sort(compareStockValueLotOrder)
-
-    for (const lot of pool) {
-      if (left <= 0.0005) break
-      const take = Math.min(lot.remaining_qty, left)
-      if (take <= 0) continue
-      lot.remaining_qty -= take
-      left -= take
-    }
-  }
+function clampStockKg(n) {
+  const v = roundKg(n)
+  return v < 0 ? 0 : v
 }
 
 function normalizeExcelRows(rows) {
@@ -158,6 +138,7 @@ function ensureRow(map, key, label) {
       product_key: key,
       product_name: label,
       product_group: resolveFifoProductGroup(null, label),
+      opening_kg: 0,
       purchased_kg: 0,
       sold_kg: 0,
       remaining_kg: 0,
@@ -165,7 +146,13 @@ function ensureRow(map, key, label) {
       remaining_value: 0,
       purchased_missing_price_kg: 0,
       remaining_missing_price_kg: 0,
-      lot_lines: []
+      lot_lines: [],
+      _cum_pz: 0,
+      _cum_wz: 0,
+      _cum_pz_valued_kg: 0,
+      _cum_pz_value: 0,
+      _opening_pz: 0,
+      _opening_wz: 0
     })
   }
   return map.get(key)
@@ -190,6 +177,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
 
   const { monthStart, periodEnd, yearMonth } = bounds
   const cutoffDate = bounds.asOfDate
+  const openingCutoff = dayBefore(monthStart)
   const filled = forwardFillExcelRows(excelRows || [])
   const lines = normalizeExcelRows(filled)
 
@@ -211,8 +199,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
 
   const periodMap = new Map()
-  const lots = []
-  const salesForFifo = []
+  const pzLotsByProduct = new Map()
   let pzLines = 0
   let wzLines = 0
   let wzAfterCutoff = 0
@@ -220,83 +207,97 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
 
   lines.forEach((line) => {
     const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo, rowNo, lineId } = line
+    const row = ensureRow(periodMap, productKey, productName)
 
     if (operation === 'przyjecie') {
       pzLines += 1
       if (unitPriceNet != null) linesWithPrice += 1
 
+      if (openingCutoff && issueDate <= openingCutoff) row._opening_pz += qty
+
+      if (issueDate <= cutoffDate) {
+        row._cum_pz += qty
+        if (unitPriceNet != null) {
+          row._cum_pz_valued_kg += qty
+          row._cum_pz_value += qty * unitPriceNet
+        }
+        if (!pzLotsByProduct.has(productKey)) pzLotsByProduct.set(productKey, [])
+        pzLotsByProduct.get(productKey).push({
+          pz_no: documentNo,
+          pz_date: issueDate,
+          qty,
+          unit_price_net: unitPriceNet,
+          rowNo,
+          lineId: lineId || `pz-${pzLotsByProduct.get(productKey).length}`
+        })
+      }
+
       if (inPeriod(issueDate, monthStart, periodEnd)) {
-        const row = ensureRow(periodMap, productKey, productName)
         row.purchased_kg += qty
         if (unitPriceNet != null) row.purchased_value += qty * unitPriceNet
         else row.purchased_missing_price_kg += qty
       }
-
-      if (issueDate <= cutoffDate) {
-        lots.push({
-          lineId: lineId || `pz-${lots.length}`,
-          rowNo,
-          productKey,
-          productName,
-          documentNo,
-          issueDate,
-          initial_qty: qty,
-          remaining_qty: qty,
-          unit_price_net: unitPriceNet
-        })
-      }
     } else if (operation === 'sprzedaz') {
       wzLines += 1
-      if (inPeriod(issueDate, monthStart, periodEnd)) {
-        ensureRow(periodMap, productKey, productName).sold_kg += qty
-      }
-      if (issueDate <= cutoffDate) {
-        salesForFifo.push({
-          productKey,
-          productName,
-          documentNo,
-          issueDate,
-          qty,
-          rowNo,
-          lineId: lineId || `wz-${salesForFifo.length}`
-        })
-      } else {
-        wzAfterCutoff += 1
-      }
+
+      if (openingCutoff && issueDate <= openingCutoff) row._opening_wz += qty
+
+      if (issueDate <= cutoffDate) row._cum_wz += qty
+      else wzAfterCutoff += 1
+
+      if (inPeriod(issueDate, monthStart, periodEnd)) row.sold_kg += qty
     }
   })
 
-  simulateFifoExactName({ cutoffDate, lots, sales: salesForFifo })
-
   let missingPriceLines = 0
 
-  for (const lot of lots) {
-    const remaining = roundKg(lot.remaining_qty)
-    if (remaining <= 0.0005) continue
+  for (const row of periodMap.values()) {
+    row.opening_kg = clampStockKg(row._opening_pz - row._opening_wz)
+    row.remaining_kg = clampStockKg(row._cum_pz - row._cum_wz)
 
-    const row = ensureRow(periodMap, lot.productKey, lot.productName)
-    row.remaining_kg += remaining
-
-    const lineValue = lot.unit_price_net != null ? roundMoney(remaining * lot.unit_price_net) : null
-    if (lineValue != null) row.remaining_value += lineValue
-    else {
+    const avgPrice = row._cum_pz_valued_kg > 0 ? row._cum_pz_value / row._cum_pz_valued_kg : 0
+    if (row.remaining_kg > 0 && avgPrice > 0) {
+      row.remaining_value = roundMoney(row.remaining_kg * avgPrice)
+    } else if (row.remaining_kg > 0) {
       missingPriceLines += 1
-      row.remaining_missing_price_kg += remaining
+      row.remaining_missing_price_kg = row.remaining_kg
+      row.remaining_value = 0
+    } else {
+      row.remaining_value = 0
     }
 
-    row.lot_lines.push({
-      pz_no: lot.documentNo,
-      pz_date: lot.issueDate,
-      qty: lot.initial_qty,
-      remaining_kg: remaining,
-      unit_price_net: lot.unit_price_net,
-      line_value: lineValue
-    })
+    const lots = (pzLotsByProduct.get(row.product_key) || [])
+      .sort((a, b) =>
+        String(a.pz_date || '').localeCompare(String(b.pz_date || '')) ||
+        String(a.pz_no || '').localeCompare(String(b.pz_no || '')) ||
+        (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0)
+      )
+    if (lots.length && row.remaining_kg > 0) {
+      let left = row.remaining_kg
+      for (const lot of lots) {
+        if (left <= 0.0005) break
+        const share = Math.min(lot.qty, left)
+        if (share <= 0) continue
+        const lineValue = lot.unit_price_net != null ? roundMoney(share * lot.unit_price_net) : null
+        row.lot_lines.push({
+          pz_no: lot.pz_no,
+          pz_date: lot.pz_date,
+          qty: lot.qty,
+          remaining_kg: roundKg(share),
+          unit_price_net: lot.unit_price_net,
+          line_value: lineValue
+        })
+        left -= share
+      }
+    }
   }
 
   const rows = Array.from(periodMap.values())
     .map(row => ({
-      ...row,
+      product_key: row.product_key,
+      product_name: row.product_name,
+      product_group: row.product_group,
+      opening_kg: roundKg(row.opening_kg),
       purchased_kg: roundKg(row.purchased_kg),
       sold_kg: roundKg(row.sold_kg),
       remaining_kg: roundKg(row.remaining_kg),
@@ -304,18 +305,21 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       remaining_value: roundMoney(row.remaining_value),
       purchased_missing_price_kg: roundKg(row.purchased_missing_price_kg),
       remaining_missing_price_kg: roundKg(row.remaining_missing_price_kg),
-      lot_lines: (row.lot_lines || []).sort((a, b) =>
-        String(a.pz_date || '').localeCompare(String(b.pz_date || '')) ||
-        String(a.pz_no || '').localeCompare(String(b.pz_no || ''))
-      )
+      lot_lines: row.lot_lines || []
     }))
-    .filter(r => r.purchased_kg > 0.0005 || r.sold_kg > 0.0005 || r.remaining_kg > 0.0005)
+    .filter(r =>
+      r.opening_kg > 0.0005
+      || r.purchased_kg > 0.0005
+      || r.sold_kg > 0.0005
+      || r.remaining_kg > 0.0005
+    )
     .sort((a, b) =>
       String(a.product_group || '').localeCompare(String(b.product_group || '')) ||
       String(a.product_name || '').localeCompare(String(b.product_name || ''))
     )
 
   const totals = {
+    opening_kg: roundKg(rows.reduce((s, r) => s + r.opening_kg, 0)),
     purchased_kg: roundKg(rows.reduce((s, r) => s + r.purchased_kg, 0)),
     sold_kg: roundKg(rows.reduce((s, r) => s + r.sold_kg, 0)),
     remaining_kg: roundKg(rows.reduce((s, r) => s + r.remaining_kg, 0)),
@@ -324,7 +328,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
 
   let message = rows.length
-    ? `Przeliczono z Excela: na dzień ${formatReportTitleDate(cutoffDate)} pozostało ${totals.remaining_kg.toLocaleString('pl-PL')} kg · ${totals.remaining_value.toLocaleString('pl-PL', { minimumFractionDigits: 2 })} zł netto.`
+    ? `Przeliczono: stan na ${formatReportTitleDate(cutoffDate)} = ${totals.remaining_kg.toLocaleString('pl-PL')} kg (Σ PZ − Σ WZ). Stan początkowy ${formatReportTitleDate(openingCutoff)}: ${totals.opening_kg.toLocaleString('pl-PL')} kg.`
     : `Brak danych do ${formatReportTitleDate(cutoffDate)} w wczytanym pliku.`
 
   if (linesWithPrice === 0 && pzLines > 0) {
@@ -358,7 +362,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzLines,
       linesWithPrice,
       wzAfterCutoff,
-      lotsInScope: lots.length
+      openingCutoff,
+      engine: 'cumulative_pz_minus_wz'
     },
     message
   }
@@ -401,7 +406,7 @@ export async function parseExcelFilesForReport(files) {
   let skippedMm = 0
 
   for (const file of list) {
-    const { rows, skippedMmCount } = await readAgromarExcel(file)
+    const { rows, skippedMmCount } = await readAgromarExcel(file, { includeUnitPrice: true })
     allRows.push(...(rows || []))
     fileNames.push(file.name)
     skippedMm += skippedMmCount || 0
