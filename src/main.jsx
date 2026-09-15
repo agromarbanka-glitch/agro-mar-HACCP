@@ -5,7 +5,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, removeDuplicateK01Documents, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -9222,7 +9222,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
       const ops = purgeResult?.operations ?? '?'
       const lots = (purgeResult?.lots ?? 0) + (purgeResult?.orphan_lots ?? 0)
-      setMessage(`Import usunięty. Skasowano ${ops} operacji i ${lots} partii. Czyszczenie duplikatów K01…`)
+      setMessage(`Import usunięty. Skasowano ${ops} operacji i ${lots} partii. Odświeżanie list…`)
       setImportPreview([])
       setRows([])
       setFileName('')
@@ -9232,14 +9232,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       } catch (_) { /* v40 migration may not be deployed yet */ }
       await loadImports()
       try {
-        const repair = await repairWarehouseImportDuplicates(supabase, { onProgress: setMessage })
-        await loadHaccpDocs({ force: true })
+        // Po RPC delete_import_excel_admin K01 z tego importu są już skasowane — bez pełnego repair/sync K01 (minuty).
+        const k01Removed = await removeDuplicateK01Documents(supabase, { onProgress: setMessage })
+        await loadHaccpDocs({ force: true, syncK01: false, skipBusy: true })
         await loadFifoData()
+        invalidateFifoBaseCache()
+        const k01Note = k01Removed > 0 ? ` Usunięto ${k01Removed} zduplikowanych K01.` : ''
         setMessage(
-          `Import usunięty (operacje: ${ops}, partie: ${lots}). ${formatRepairWarehouseResult(repair)} Możesz wgrać ten sam plik od nowa.`
+          `Import usunięty (operacje: ${ops}, partie: ${lots}).${k01Note} Możesz wgrać ten sam plik od nowa. Kartoteki K01 uzupełnisz przez Dokumenty → Odśwież kartoteki.`
         )
       } catch (repairErr) {
-        setMessage(`Import usunięty, ale czyszczenie K01 nie powiodło się: ${repairErr?.message || repairErr}. Kliknij „Odśwież” w kartotekach.`)
+        setMessage(`Import usunięty, ale odświeżenie list nie powiodło się: ${repairErr?.message || repairErr}. Kliknij „Odśwież importy” / „Odśwież kartoteki”.`)
       }
     } catch (err) {
       const msg = String(err?.message || err)
@@ -9628,7 +9631,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     } catch (err) { setMessage(`Błąd cofania zmiany: ${err?.message || String(err)}`) }
   }
 
-  async function syncAutoK01Documents(lotsData = null, { minProductionDate = null } = {}) {
+  async function syncAutoK01Documents(lotsData = null, { minProductionDate = null, onProgress } = {}) {
     if (!supabase) return 0
 
     let lots = lotsData
@@ -9638,15 +9641,26 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         d.setDate(d.getDate() - 120)
         return d.toISOString().slice(0, 10)
       })()
-      const { data: lotsRaw, error: lotsErr } = await withImportRetry(() =>
-        supabase
+      onProgress?.(`Sprawdzanie brakujących kart K01 (partie od ${since})…`)
+      const lotsRaw = []
+      let lastLotId = null
+      const lotPage = 1000
+      for (;;) {
+        let query = supabase
           .from('lots')
           .select('id, lot_no, product_id, product_group, production_date, created_at, initial_qty, remaining_qty, source_operation_id, storage_chamber_id')
           .gte('production_date', since)
           .order('id', { ascending: true })
-          .limit(20000)
-      )
-      if (lotsErr) throw lotsErr
+          .limit(lotPage)
+        if (lastLotId) query = query.gt('id', lastLotId)
+        const { data: page, error: lotsErr } = await withImportRetry(() => query)
+        if (lotsErr) throw lotsErr
+        if (!page?.length) break
+        lotsRaw.push(...page)
+        lastLotId = page[page.length - 1].id
+        onProgress?.(`Sprawdzanie brakujących kart K01… ${lotsRaw.length.toLocaleString('pl-PL')} partii`)
+        if (page.length < lotPage) break
+      }
       const productIds = Array.from(new Set((lotsRaw || []).map(l => l.product_id).filter(Boolean)))
       const chamberIds = Array.from(new Set((lotsRaw || []).map(l => l.storage_chamber_id).filter(Boolean)))
       const [productsRaw, chambersRaw] = await Promise.all([
@@ -9918,8 +9932,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       try {
         if (options.syncK01) {
           try {
-            setMessage('Sprawdzanie brakujących kart K01…')
-            const k01Added = await syncAutoK01Documents(null, { minProductionDate: options.minProductionDate })
+            const k01Added = await syncAutoK01Documents(null, {
+              minProductionDate: options.minProductionDate,
+              onProgress: setMessage
+            })
             if (k01Added > 0 && generation === haccpLoadGenerationRef.current) {
               setMessage(`Uzupełniono ${k01Added} brakujących kart K01 (przyjęcia PZ/MM, ocena P).`)
             }
