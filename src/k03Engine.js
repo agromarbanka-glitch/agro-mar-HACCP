@@ -5,7 +5,10 @@
 
 import { getK03PrefixRules, syncK03LotSequences } from './appSettingsEngine'
 
-export const K03_ENGINE_VERSION = '4.2'
+export const K03_ENGINE_VERSION = '4.3'
+
+/** Supabase/PostgREST zwraca max ~1000 wierszy na zapytanie — paginacja po id (jak magazyn wartości). */
+const FETCH_PAGE_SIZE = 1000
 
 const PRODUCT_CODES = new Map([
   ['malina pulpa', 'Mp'], ['porzeczka czarna', 'Pcz'], ['porzeczka czarna pulpa', 'Pczp'],
@@ -1070,6 +1073,25 @@ async function fetchInChunks(client, table, select, column, ids, chunkSize = 80)
   return results
 }
 
+/** Pobiera wszystkie wiersze tabeli z filtrami — paczki po id, bez limitu 1000 PostgREST. */
+async function fetchAllByIdPages(client, table, select, applyFilters) {
+  const all = []
+  let lastId = null
+  for (;;) {
+    let query = client.from(table).select(select).order('id', { ascending: true }).limit(FETCH_PAGE_SIZE)
+    query = applyFilters(query)
+    if (lastId) query = query.gt('id', lastId)
+    const { data, error } = await query
+    if (error) throw error
+    const page = data || []
+    if (!page.length) break
+    all.push(...page)
+    lastId = page[page.length - 1].id
+    if (page.length < FETCH_PAGE_SIZE) break
+  }
+  return all
+}
+
 function pickSaleItems(items, op) {
   const list = items || []
   const rozchod = list.filter(i => i.direction === 'rozchod' && Math.abs(Number(i.qty || 0)) > 0)
@@ -1286,27 +1308,19 @@ export async function loadK03Forms(client) {
     }
   }
 
-  const { data: rozchodItems, error: rozchodErr } = await client
-    .from('operation_items')
-    .select('id, operation_id, product_id, qty, direction, raw_product_name')
-    .eq('direction', 'rozchod')
-    .limit(50000)
-  if (rozchodErr) throw rozchodErr
+  const opSelect = 'id, operation_type, operation_date, document_no, invoice_no, contractor_id, created_at'
+  const itemSelect = 'id, operation_id, product_id, qty, direction, raw_product_name'
+
+  const [rozchodItems, saleTypedOps] = await Promise.all([
+    fetchAllByIdPages(client, 'operation_items', itemSelect, q => q.eq('direction', 'rozchod')),
+    fetchAllByIdPages(client, 'operations', opSelect, q => q.eq('operation_type', 'sprzedaz'))
+  ])
 
   const rozchodOpIds = Array.from(new Set((rozchodItems || []).map(i => i.operation_id).filter(Boolean)))
 
-  const [{ data: saleTypedOps, error: typedErr }, rozchodOps] = await Promise.all([
-    client
-      .from('operations')
-      .select('id, operation_type, operation_date, document_no, invoice_no, contractor_id, created_at')
-      .eq('operation_type', 'sprzedaz')
-      .order('operation_date', { ascending: true })
-      .limit(50000),
-    rozchodOpIds.length
-      ? fetchInChunks(client, 'operations', 'id, operation_type, operation_date, document_no, invoice_no, contractor_id, created_at', 'id', rozchodOpIds)
-      : Promise.resolve([])
-  ])
-  if (typedErr) throw typedErr
+  const rozchodOps = rozchodOpIds.length
+    ? await fetchInChunks(client, 'operations', opSelect, 'id', rozchodOpIds)
+    : []
 
   const opMap = new Map()
   for (const op of [...(saleTypedOps || []), ...(rozchodOps || [])]) {
@@ -1345,13 +1359,16 @@ export async function loadK03Forms(client) {
     itemsByOp.get(item.operation_id).push(item)
   }
 
-  const [{ data: products, error: prodErr }, allocResult] = await Promise.all([
+  const [{ data: products, error: prodErr }, allocations] = await Promise.all([
     client.from('products').select('id, name, code, product_group').limit(10000),
-    client.from('fifo_allocations').select('id, qty, source_lot_id, product_id, operation_id, created_at').order('created_at', { ascending: true }).limit(50000)
+    fetchAllByIdPages(
+      client,
+      'fifo_allocations',
+      'id, qty, source_lot_id, product_id, operation_id, created_at',
+      q => q
+    ).catch(() => [])
   ])
   if (prodErr) throw prodErr
-
-  const allocations = allocResult.error ? [] : (allocResult.data || [])
   const productMap = new Map((products || []).map(p => [p.id, p]))
 
   const saleLines = new Map()
@@ -1413,7 +1430,9 @@ export async function loadK03Forms(client) {
     forms: forms.length,
     allocations: allocations.length,
     rozchodItems: (rozchodItems || []).length,
-    source: 'baza'
+    saleTypedOps: (saleTypedOps || []).length,
+    source: 'baza',
+    engine: K03_ENGINE_VERSION
   }
 
   let message = ''
