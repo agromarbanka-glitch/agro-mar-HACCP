@@ -9,7 +9,7 @@
  * - brakujące pozycje w istniejących PZ → doklejane z Excela (append)
  * - WZ: data z Excela (Data wystawienia), nie ostatni dzień miesiąca z numeru
  */
-export const IMPORT_SAVE_ENGINE_VERSION = '2.4'
+export const IMPORT_SAVE_ENGINE_VERSION = '2.5'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases, monthYearFromDocumentNo } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName, isPulpaProductName } from './k03Engine.js'
@@ -627,7 +627,7 @@ async function purgeStaleInProgressImportsClient(client, filename, excludeImport
     .from('imported_files')
     .select('id')
     .is('deleted_at', null)
-    .eq('status', 'w_trakcie')
+    .in('status', ['w_trakcie', 'przerwany'])
     .ilike('filename', filename)
   if (excludeImportId) query = query.neq('id', excludeImportId)
   const { data: stale, error } = await withImportRetry(() => query)
@@ -685,7 +685,7 @@ async function prepareImportExcelSaveFast(client, filename, excludeImportId = nu
     .from('imported_files')
     .select('id', { count: 'exact', head: true })
     .is('deleted_at', null)
-    .eq('status', 'w_trakcie')
+    .in('status', ['w_trakcie', 'przerwany'])
     .ilike('filename', filename)
   if (excludeImportId) countQuery = countQuery.neq('id', excludeImportId)
   const { count, error: countErr } = await withImportRetry(() => countQuery)
@@ -708,6 +708,18 @@ async function prepareImportExcelSaveFast(client, filename, excludeImportId = nu
 }
 
 /** Przed zapisem: domyślnie szybko (przerwany ten sam plik). Pełne sprzątanie: { fullCleanup: true }. */
+/** Anuluje import ze statusem w_trakcie/przerwany — kasuje częściowe operacje i wpis w rejestrze. */
+export async function cancelStuckInProgressImport(client, importedFileId, { onProgress } = {}) {
+  if (!client || !importedFileId) throw new Error('Brak identyfikatora importu.')
+  onProgress?.('Anulowanie przerwanego importu…')
+  await purgeImportByFileId(client, importedFileId)
+  const { error } = await withImportRetry(() =>
+    client.from('imported_files').delete().eq('id', importedFileId)
+  )
+  if (error) throw error
+  return { ok: true }
+}
+
 export async function prepareImportExcelSave(client, filename, excludeImportId = null, options = {}) {
   const onProgress = options.onProgress
   const fullCleanup = options.fullCleanup === true
@@ -1239,54 +1251,72 @@ export async function saveImportToSupabase(client, {
   onProgress
 }) {
   const notify = msg => onProgress?.(msg)
+  let importedId = null
 
-  notify('Rejestrowanie pliku importu…')
-  const { data: imported, error: fileError } = await withImportRetry(() =>
-    client.from('imported_files').insert({
-      filename: fileName || 'import.xlsx',
-      rows_count: rowsCount,
-      status: 'w_trakcie'
-    }).select('id').single()
-  )
-  if (fileError) throw fileError
+  try {
+    notify('Rejestrowanie pliku importu…')
+    const { data: imported, error: fileError } = await withImportRetry(() =>
+      client.from('imported_files').insert({
+        filename: fileName || 'import.xlsx',
+        rows_count: rowsCount,
+        status: 'w_trakcie'
+      }).select('id').single()
+    )
+    if (fileError) throw fileError
+    importedId = imported.id
 
-  const allProductNames = []
-  const allContractorNames = []
-  for (const group of groupsToImport) {
-    if (group.contractorName) allContractorNames.push(group.contractorName)
-    for (const row of group.items) allProductNames.push(row.productName)
-  }
+    const allProductNames = []
+    const allContractorNames = []
+    for (const group of groupsToImport) {
+      if (group.contractorName) allContractorNames.push(group.contractorName)
+      for (const row of group.items) allProductNames.push(row.productName)
+    }
 
-  notify('Przygotowanie słowników produktów i kontrahentów…')
-  const [productMap, contractorMap] = await Promise.all([
-    ensureProductIds(client, allProductNames, deps),
-    ensureContractorIds(client, allContractorNames)
-  ])
+    notify('Przygotowanie słowników produktów i kontrahentów…')
+    const [productMap, contractorMap] = await Promise.all([
+      ensureProductIds(client, allProductNames, deps),
+      ensureContractorIds(client, allContractorNames)
+    ])
 
-  notify(`Zapis ${groupsToImport.length} dokumentów…`)
-  const { opKeyToId, importedOperations } = await insertOperationsForGroups(
-    client, groupsToImport, imported.id, contractorMap, notify
-  )
+    notify(`Zapis ${groupsToImport.length} dokumentów…`)
+    const { opKeyToId, importedOperations } = await insertOperationsForGroups(
+      client, groupsToImport, importedId, contractorMap, notify
+    )
 
-  notify('Zapis pozycji i partii…')
-  const batchResult = await insertItemsAndLotsForGroups(
-    client, groupsToImport, opKeyToId, productMap, deps, notify, fileName, imported.id
-  )
-  const importedItems = batchResult.importedItems
-  const rozchodItems = batchResult.rozchodItems
-  const createdLots = batchResult.createdLots
+    notify('Zapis pozycji i partii…')
+    const batchResult = await insertItemsAndLotsForGroups(
+      client, groupsToImport, opKeyToId, productMap, deps, notify, fileName, importedId
+    )
+    const importedItems = batchResult.importedItems
+    const rozchodItems = batchResult.rozchodItems
+    const createdLots = batchResult.createdLots
 
-  const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
-  await withImportRetry(() =>
-    client.from('imported_files').update({ status: finalStatus }).eq('id', imported.id)
-  )
+    const finalStatus = duplicateCount ? `pominieto_duplikaty_${duplicateCount}` : 'wczytany'
+    await withImportRetry(() =>
+      client.from('imported_files').update({ status: finalStatus }).eq('id', importedId)
+    )
 
-  return {
-    importedFileId: imported.id,
-    importedOperations,
-    importedItems,
-    createdLots,
-    rozchodItems
+    return {
+      importedFileId: importedId,
+      importedOperations,
+      importedItems,
+      createdLots,
+      rozchodItems
+    }
+  } catch (err) {
+    if (importedId) {
+      try {
+        notify('Cofanie przerwanego zapisu (usuwanie częściowych danych)…')
+        await purgeImportByFileId(client, importedId)
+        await withImportRetry(() => client.from('imported_files').delete().eq('id', importedId))
+      } catch (rollbackErr) {
+        console.warn('import rollback failed', rollbackErr)
+        await withImportRetry(() =>
+          client.from('imported_files').update({ status: 'przerwany' }).eq('id', importedId)
+        ).catch(() => {})
+      }
+    }
+    throw err
   }
 }
 

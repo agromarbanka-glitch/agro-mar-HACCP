@@ -5,7 +5,7 @@ import { Upload, Database, FileText, Package, Printer, ShieldCheck, AlertTriangl
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
-import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, removeDuplicateK01Documents, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError } from './importSaveEngine'
+import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, removeDuplicateK01Documents, cancelStuckInProgressImport, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError, IMPORT_SAVE_ENGINE_VERSION } from './importSaveEngine'
 import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers } from './k03Engine'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
@@ -300,6 +300,7 @@ function App() {
   const [haccpBusy, setHaccpBusy] = useState(false)
   const [k01SupplierBusyId, setK01SupplierBusyId] = useState(null)
   const [importDeleting, setImportDeleting] = useState(false)
+  const [importCancelingId, setImportCancelingId] = useState(null)
   const [importCleaning, setImportCleaning] = useState(false)
   const [importResetting, setImportResetting] = useState(false)
   const [importDeduping, setImportDeduping] = useState(false)
@@ -9181,6 +9182,27 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     }
   }
 
+  async function cancelStuckImport(fileId, fileNameForConfirm) {
+    if (!supabase || !fileId) return
+    if (!ensureCanDelete()) return
+    const name = fileNameForConfirm || fileId
+    if (!window.confirm(
+      `Anulować przerwany import „${name}”?\n\nUsunie wpis w_trakcie i ewentualne częściowo zapisane operacje/partie z tego pliku. Potem możesz kliknąć „Zapisz import do Supabase” ponownie.`
+    )) return
+    setImportCancelingId(fileId)
+    try {
+      await cancelStuckInProgressImport(supabase, fileId, { onProgress: setMessage })
+      importCheckCacheRef.current = null
+      invalidateFifoBaseCache()
+      await loadImports()
+      setMessage(`Anulowano import „${name}”. Wczytaj Excel i zapisz ponownie — postęp widać przy przycisku „Zapisywanie…”.`)
+    } catch (err) {
+      setMessage(`Nie udało się anulować importu: ${err?.message || err}. Spróbuj „Usuń” (admin) lub „Wyczyść pozostałości”.`)
+    } finally {
+      setImportCancelingId(null)
+    }
+  }
+
   async function deleteImportedFile(fileId, fileNameForConfirm) {
     if (!supabase) return
     if (!ensureCanDelete()) return
@@ -10438,6 +10460,16 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         )}
       </div>
       {importRows.length === 0 && <p className="hint">Brak importów do wyświetlenia albo uruchom SQL v21.</p>}
+      {importRows.some(f => f.status === 'w_trakcie' || f.status === 'przerwany') && (
+        <div className="warning inline-warning" style={{ marginBottom: 10 }}>
+          <AlertTriangle size={18}/>
+          <div>
+            <b>Import „w trakcie”</b> — zapis się nie dokończył (zamknięta karta, timeout, błąd sieci) albo nadal trwa w innej karcie.
+            Duży plik (np. lipiec, 6000+ wierszy) może zapisywać się <b>kilka–kilkanaście minut</b> — nie zamykaj karty, gdy widzisz „Zapisywanie…”.
+            Jeśli nic się nie dzieje: <b>Anuluj</b> przy pliku, potem wczytaj Excel i <b>Zapisz</b> ponownie.
+          </div>
+        </div>
+      )}
       {importRows.length > 0 && <div className="table-wrap small import-registry-table"><table>
         <thead><tr><th>Plik</th><th>Data</th><th>Wiersze</th><th>Status</th><th>Akcje</th></tr></thead>
         <tbody>{importRows.map(f => {
@@ -10472,10 +10504,20 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                 </td>
                 <td>{f.created_at ? new Date(f.created_at).toLocaleString('pl-PL') : '-'}</td>
                 <td>{f.rows_count || f.row_count || '-'}</td>
-                <td><span className="pill">{f.status || 'wczytany'}</span></td>
+                <td><span className={`pill${f.status === 'w_trakcie' || f.status === 'przerwany' ? ' pill-warn' : ''}`}>{f.status || 'wczytany'}</span></td>
                 <td className="row-actions">
                   <button type="button" className="secondary mini" onClick={() => loadImportPreview(f.id, fname)}><Eye size={14}/> Podgląd</button>
-                  {isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting} onClick={() => deleteImportedFile(f.id, fname)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}
+                  {(f.status === 'w_trakcie' || f.status === 'przerwany') && isAdmin(authProfile) && (
+                    <button
+                      type="button"
+                      className="mini secondary"
+                      disabled={Boolean(importCancelingId) || importSaving}
+                      onClick={() => cancelStuckImport(f.id, fname)}
+                    >
+                      {importCancelingId === f.id ? 'Anulowanie…' : 'Anuluj'}
+                    </button>
+                  )}
+                  {isAdmin(authProfile) && <button className="danger mini" disabled={importDeleting || importCancelingId === f.id} onClick={() => deleteImportedFile(f.id, fname)}><Trash2 size={14}/> {importDeleting ? '…' : 'Usuń'}</button>}
                 </td>
               </tr>
               {qtyState?.expanded && (
