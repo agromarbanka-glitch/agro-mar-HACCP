@@ -9,7 +9,7 @@
  * - brakujące pozycje w istniejących PZ → doklejane z Excela (append)
  * - WZ: data z Excela (Data wystawienia), nie ostatni dzień miesiąca z numeru
  */
-export const IMPORT_SAVE_ENGINE_VERSION = '2.5'
+export const IMPORT_SAVE_ENGINE_VERSION = '2.6'
 
 import { normalizeDocumentNo, inferDateFromDocumentNo, documentNoHasExplicitDate, documentNoHasMonthYear, isWzMonthYearDocument, resolveDocumentIssueDate, documentNoImportAliases, monthYearFromDocumentNo } from './excelImport.js'
 import { repairPorzeczkaProductGroups, canonicalProductName, isPulpaProductName } from './k03Engine.js'
@@ -544,23 +544,49 @@ async function deleteAllTableRows(client, table, idColumn = 'id', batchSize = 50
   }
 }
 
+async function fetchOperationsForImportFile(client, importedFileId) {
+  const ops = []
+  let lastId = null
+  for (;;) {
+    let query = client
+      .from('operations')
+      .select('id, document_no')
+      .eq('imported_file_id', importedFileId)
+      .order('id', { ascending: true })
+      .limit(1000)
+    if (lastId) query = query.gt('id', lastId)
+    const { data, error } = await withImportRetry(() => query)
+    if (error) throw error
+    if (!data?.length) break
+    ops.push(...data)
+    lastId = data[data.length - 1].id
+    if (data.length < 1000) break
+  }
+  return ops
+}
+
 /** Kasuje operacje, partie i FIFO jednego importu (gdy brak migracji v40/v42 w Supabase). */
 export async function purgeImportDataClientSide(client, importedFileId) {
-  const { data: ops, error: opsErr } = await withImportRetry(() =>
-    client.from('operations').select('id, document_no').eq('imported_file_id', importedFileId)
-  )
-  if (opsErr) throw opsErr
-  const opIds = (ops || []).map(o => o.id)
+  const ops = await fetchOperationsForImportFile(client, importedFileId)
+  const opIds = ops.map(o => o.id)
   if (!opIds.length) return { operations: 0, lots: 0 }
 
-  const [{ data: lotsBySource }, { data: items }] = await Promise.all([
-    withImportRetry(() => client.from('lots').select('id').in('source_operation_id', opIds)),
-    withImportRetry(() => client.from('operation_items').select('lot_id').in('operation_id', opIds))
-  ])
-  const lotIds = [...new Set([
-    ...(lotsBySource || []).map(l => l.id),
-    ...(items || []).map(i => i.lot_id).filter(Boolean)
-  ])]
+  const lotIdSet = new Set()
+  for (let i = 0; i < opIds.length; i += 50) {
+    const chunk = opIds.slice(i, i + 50)
+    const { data: lotsBySource, error: lotErr } = await withImportRetry(() =>
+      client.from('lots').select('id').in('source_operation_id', chunk)
+    )
+    if (lotErr) throw lotErr
+    for (const l of lotsBySource || []) lotIdSet.add(l.id)
+  }
+  const itemsByOp = await fetchOperationItemsByOpIds(client, opIds)
+  for (const items of itemsByOp.values()) {
+    for (const item of items || []) {
+      if (item.lot_id) lotIdSet.add(item.lot_id)
+    }
+  }
+  const lotIds = [...lotIdSet]
 
   const wzNos = [...new Set((ops || []).map(o => o.document_no).filter(Boolean))]
 
@@ -709,15 +735,52 @@ async function prepareImportExcelSaveFast(client, filename, excludeImportId = nu
 
 /** Przed zapisem: domyślnie szybko (przerwany ten sam plik). Pełne sprzątanie: { fullCleanup: true }. */
 /** Anuluje import ze statusem w_trakcie/przerwany — kasuje częściowe operacje i wpis w rejestrze. */
-export async function cancelStuckInProgressImport(client, importedFileId, { onProgress } = {}) {
+export async function cancelStuckInProgressImport(client, importedFileId, { onProgress, userRole = 'admin' } = {}) {
   if (!client || !importedFileId) throw new Error('Brak identyfikatora importu.')
-  onProgress?.('Anulowanie przerwanego importu…')
-  await purgeImportByFileId(client, importedFileId)
-  const { error } = await withImportRetry(() =>
-    client.from('imported_files').delete().eq('id', importedFileId)
+
+  onProgress?.('Sprawdzanie przerwanego importu…')
+  const { count, error: countErr } = await withImportRetry(() =>
+    client.from('operations').select('id', { count: 'exact', head: true }).eq('imported_file_id', importedFileId)
   )
-  if (error) throw error
-  return { ok: true }
+  if (countErr) throw countErr
+
+  if (!count) {
+    onProgress?.('Brak zapisanych dokumentów — usuwam wpis w rejestrze…')
+    const { error } = await withImportRetry(() => client.from('imported_files').delete().eq('id', importedFileId))
+    if (error) throw error
+    return { ok: true, mode: 'empty' }
+  }
+
+  onProgress?.(`Czyszczenie ${Number(count).toLocaleString('pl-PL')} operacji w bazie (RPC)…`)
+  try {
+    const { data, error } = await withImportRetry(() =>
+      client.rpc('delete_import_excel_admin', {
+        p_imported_file_id: importedFileId,
+        p_reason: 'Anulowanie przerwanego importu (status w_trakcie)',
+        p_user_role: userRole || 'admin'
+      })
+    )
+    if (!error) return { ok: true, mode: 'rpc', purge: data }
+    if (!/function.*does not exist/i.test(String(error.message || ''))) throw error
+  } catch (err) {
+    const msg = String(err?.message || err)
+    if (!/function.*does not exist|Tylko administrator|is_app_admin/i.test(msg)) throw err
+  }
+
+  onProgress?.('RPC niedostępne — czyszczenie w trybie awaryjnym (może potrwać)…')
+  await purgeImportDataClientSide(client, importedFileId)
+  const { error: delErr } = await withImportRetry(() => client.from('imported_files').delete().eq('id', importedFileId))
+  if (delErr) {
+    await withImportRetry(() =>
+      client.from('imported_files').update({
+        deleted_at: new Date().toISOString(),
+        deleted_by_role: userRole || 'admin',
+        delete_reason: 'Anulowanie przerwanego importu (w_trakcie)',
+        status: 'usuniety'
+      }).eq('id', importedFileId)
+    )
+  }
+  return { ok: true, mode: 'client' }
 }
 
 export async function prepareImportExcelSave(client, filename, excludeImportId = null, options = {}) {

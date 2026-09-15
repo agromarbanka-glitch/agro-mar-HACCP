@@ -9191,7 +9191,10 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     )) return
     setImportCancelingId(fileId)
     try {
-      await cancelStuckInProgressImport(supabase, fileId, { onProgress: setMessage })
+      await cancelStuckInProgressImport(supabase, fileId, {
+        onProgress: setMessage,
+        userRole: isAdmin(authProfile) ? 'admin' : (authProfile?.role || 'magazynier')
+      })
       importCheckCacheRef.current = null
       invalidateFifoBaseCache()
       await loadImports()
@@ -10464,9 +10467,9 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         <div className="warning inline-warning" style={{ marginBottom: 10 }}>
           <AlertTriangle size={18}/>
           <div>
-            <b>Import „w trakcie”</b> — zapis się nie dokończył (zamknięta karta, timeout, błąd sieci) albo nadal trwa w innej karcie.
-            Duży plik (np. lipiec, 6000+ wierszy) może zapisywać się <b>kilka–kilkanaście minut</b> — nie zamykaj karty, gdy widzisz „Zapisywanie…”.
-            Jeśli nic się nie dzieje: <b>Anuluj</b> przy pliku, potem wczytaj Excel i <b>Zapisz</b> ponownie.
+            <b>Import „w trakcie”</b> — zapis trwa tylko gdy u góry widać <b>„Zapisywanie… postęp”</b> (lipiec ~6000 wierszy: zwykle <b>5–20 min</b>).
+            Po <b>15–20 minutach</b> bez zmiany postępu to <b>przerwany</b> zapis (timeout / zamknięta karta) — kliknij <b>Anuluj</b>, wczytaj Excel i <b>Zapisz</b> ponownie.
+            <b>Anuluj</b> czyści częściowe dane w bazie (RPC); jeśli wisi długo, użyj <b>Usuń</b> (USUN IMPORT).
           </div>
         </div>
       )}
