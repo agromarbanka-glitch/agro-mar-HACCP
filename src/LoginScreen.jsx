@@ -1,12 +1,28 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { ShieldCheck, LogIn } from 'lucide-react'
 import { signIn, formatAuthError } from './authEngine'
+import { getSupabaseProjectHint, probeSupabaseReachable } from './supabaseClient'
 
 export function LoginScreen({ onSuccess, supabaseConfigured }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [connCheck, setConnCheck] = useState({ state: 'pending', message: '' })
+  const projectHint = getSupabaseProjectHint()
+
+  useEffect(() => {
+    if (!supabaseConfigured) return
+    let cancelled = false
+    ;(async () => {
+      const result = await probeSupabaseReachable()
+      if (cancelled) return
+      setConnCheck(result.ok
+        ? { state: 'ok', message: `Połączenie z Supabase OK · projekt ${result.project || projectHint}` }
+        : { state: 'fail', message: result.message })
+    })()
+    return () => { cancelled = true }
+  }, [supabaseConfigured, projectHint])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -49,8 +65,14 @@ export function LoginScreen({ onSuccess, supabaseConfigured }) {
         <label>Hasło
           <input type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} required />
         </label>
+        {projectHint && connCheck.state === 'ok' && (
+          <p className="hint">{connCheck.message}</p>
+        )}
+        {connCheck.state === 'fail' && (
+          <p className="hint danger-text">{connCheck.message}</p>
+        )}
         {error && <p className="hint danger-text">{error}</p>}
-        <button type="submit" disabled={loading}><LogIn size={16} /> {loading ? 'Logowanie…' : 'Zaloguj się'}</button>
+        <button type="submit" disabled={loading || connCheck.state === 'fail'}><LogIn size={16} /> {loading ? 'Logowanie…' : 'Zaloguj się'}</button>
         <p className="hint login-foot">Dostęp tylko dla kont utworzonych przez administratora. Po pierwszym wdrożeniu uruchom migrację SQL v36 i dodaj konto admina w Supabase.</p>
       </form>
     </div>

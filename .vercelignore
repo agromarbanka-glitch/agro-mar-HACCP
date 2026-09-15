@@ -1,0 +1,6 @@
+docs/
+supabase/
+.cursor/
+dist/
+*.md
+README.txt

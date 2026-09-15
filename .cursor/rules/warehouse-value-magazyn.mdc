@@ -21,7 +21,7 @@ Cena netto z Excela: **TAK** (tylko ta zakładka). HACCP: **NIE**.
 
 ## Wersje (stan zatwierdzony)
 
-- Silnik raportu: `EXCEL_REPORT_VERSION` w `monthlyStockValueFromExcel.js` (**2.10**)
+- Silnik raportu: `EXCEL_REPORT_VERSION` w `monthlyStockValueFromExcel.js` (**2.11**)
 - Magazyn Supabase: `WAREHOUSE_VALUE_STORE_VERSION` w `warehouseValueStore.js` (**1.7**)
 
 ## Formuła raportu
@@ -34,7 +34,7 @@ Cena netto z Excela: **TAK** (tylko ta zakładka). HACCP: **NIE**.
 
 1. **Osobne pliki** — np. czerwiec, Lipiec 1–19, Lipiec 20–31; doklejanie, nie zastępowanie.
 2. **dedup_key** musi zawierać **nazwę pliku źródłowego** (`warehouseValueDedupKey` + `sourceFile`) — ten sam `rowNo` w dwóch plikach to **dwa** wiersze.
-3. WZ bez daty w Excelu → data z `resolveStockValueMovementDate` (numer WZ + ewentualnie dzień z kolumny).
+3. WZ `WZ/NNN/MM/RRRR`: data z kolumny Excel (Data wystawienia); bez daty → koniec miesiąca MM z numeru. Nie przesuwaj WZ wstecz do MM z numeru, gdy Excel ma datę w kolejnym miesiącu.
 4. MM pomijane; PZ z dniem w numerze → data z numeru.
 5. Zapis: upsert po `dedup_key`, chunk **250**; pominięte duplikaty OK.
 6. **Nie kasuj czerwca**, jeśli jest OK — usuń tylko złe partie lipca i wgraj ponownie pliki lipca.

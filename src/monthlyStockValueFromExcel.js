@@ -2,7 +2,7 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.8: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per produkt raportu Comarch.
+ * Silnik v2.11: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per produkt raportu Comarch.
  * Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca (np. 30.06).
  * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
@@ -20,7 +20,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.10'
+export const EXCEL_REPORT_VERSION = '2.11'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -84,7 +84,9 @@ function roundMoney(n) {
 
 /** W raporcie Comarch truskawka ze szypułką wchodzi w jedną linię „Truskawka”. */
 const STOCK_VALUE_MERGE_FIFO = {
-  'truskawka z szypulka': 'truskawka'
+  'truskawka z szypulka': 'truskawka',
+  /** W Excelu/Comarch często skrót „Jabłko” = jabłko przemysłowe (osobno: na obierkę). */
+  jablko: 'jablko przemyslowe'
 }
 
 /** Etykiety jak w Comarch (zestawienie ilościowo-wartościowe). */
@@ -96,7 +98,8 @@ const STOCK_VALUE_LABEL_BY_FIFO = {
   'porzeczka kolorowa': 'Porzeczka kolorowa',
   truskawka: 'Truskawka',
   'wisnia klasa i': 'Wiśnia I',
-  'wisnia pw': 'Wiśnia Pw'
+  'wisnia pw': 'Wiśnia Pw',
+  'jablko przemyslowe': 'Jabłko przemysłowe'
 }
 
 function stockValueFifoKey(productName) {
@@ -120,7 +123,8 @@ function displayName(name) {
 
 /**
  * Data ruchu dla raportu magazynowego (nie zmienia importu HACCP).
- * WZ z numerem WZ/NNN/07/2026 i datą wystawienia w sierpniu → lipiec (koniec MM z numeru).
+ * WZ WZ/NNN/MM/RRRR: dzień z „Data wystawienia” w Excelu (jak Comarch).
+ * Gdy brak daty → ostatni dzień miesiąca MM z numeru dokumentu.
  */
 export function resolveStockValueMovementDate(issueDate, documentNo, operation) {
   const resolved = resolveDocumentIssueDate(issueDate, documentNo) || String(issueDate || '').slice(0, 10)
@@ -134,7 +138,6 @@ export function resolveStockValueMovementDate(issueDate, documentNo, operation) 
   const docMonthEnd = `${docYm}-${String(lastDay).padStart(2, '0')}`
 
   if (!resolved) return docMonthEnd
-  if (resolved.slice(0, 7) > docYm) return docMonthEnd
   return resolved
 }
 
@@ -302,11 +305,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       }
     } else if (operation === 'sprzedaz') {
       wzLines += 1
-      const rawDate = line.rawIssueDate || issueDate
       if (
-        rawDate && issueDate !== rawDate
-        && isWzMonthYearDocument(documentNo)
-        && issueDate.slice(0, 7) < rawDate.slice(0, 7)
+        isWzMonthYearDocument(documentNo)
+        && !String(line.rawIssueDate || '').slice(0, 10)
       ) {
         wzClampedToDocMonth += 1
       }
