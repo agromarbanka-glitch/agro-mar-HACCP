@@ -22,8 +22,9 @@ import {
 } from './k03Engine'
 import { allocateK03LotNoRpc, getK03PrefixRules } from './appSettingsEngine'
 import { operationImportKey, diffImportGroupAgainstStored, loadStoredImportOperations } from './importSaveEngine'
+import { previewFifoForSale, persistFifoForSale } from './fifoEngine'
 
-export const K03_WZ_ENGINE_VERSION = '1.6'
+export const K03_WZ_ENGINE_VERSION = '1.7'
 
 function fifoOptionsFromWorkflow(workflow = {}, options = {}) {
   const keys = options.fifoSourceKeys || options.fifo_source_keys || workflow.fifo_source_keys
