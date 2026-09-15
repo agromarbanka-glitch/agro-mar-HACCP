@@ -67,7 +67,7 @@ import { UsersAdminSection } from './UsersAdminSection'
 import { AppSettingsSection } from './AppSettingsSection'
 import { loadAppSettings } from './appSettingsEngine'
 import {
-  getCurrentSession, loadAppProfile, signOut, isAdmin, isMagazynier, canDelete, confirmDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
+  getCurrentSession, loadAppProfile, resolveAuthProfileFromSession, signOut, isAdmin, isMagazynier, canDelete, confirmDelete, canSeeTab, canSeeDocsHubSection, authDisplayName
 } from './authEngine'
 import { auditActor, auditDeleteHaccpDocument, auditDeleteHaccpDocuments, auditDeleteGeneric, auditUpdateHaccpDocument, logAudit } from './auditEngine'
 import { FORMULARZE_CARDS, FORMULARZE_ENGINE_VERSION } from './formularzeEngine'
@@ -293,6 +293,8 @@ function App() {
   const [chamberRows, setChamberRows] = useState([])
   const skipAuth = import.meta.env.VITE_SKIP_AUTH === 'true'
   const [authProfile, setAuthProfile] = useState(skipAuth ? { role: 'admin', display_name: 'Tryb dev', email: 'dev@local', is_active: true } : null)
+  const authProfileRef = useRef(authProfile)
+  authProfileRef.current = authProfile
   const [authSession, setAuthSession] = useState(null)
   const [authReady, setAuthReady] = useState(skipAuth)
   const [haccpBusy, setHaccpBusy] = useState(false)
@@ -7211,12 +7213,21 @@ function App() {
       if (event === 'TOKEN_REFRESHED') return
       setAuthSession(session)
       if (session?.user?.id) {
-        try {
-          const profile = await loadAppProfile(supabase, session.user.id)
-          setAuthProfile(prev => (prev?.auth_user_id === profile?.auth_user_id && prev?.role === profile?.role ? prev : profile))
-          if (profile && isMagazynier(profile)) setActiveTab(t => t === 'dashboard' ? 'kartoteki' : t)
-        } catch {
+        const { profile, shouldSignOut, transientError } = await resolveAuthProfileFromSession(supabase, session, {
+          previousProfile: authProfileRef.current
+        })
+        if (shouldSignOut) {
+          await signOut()
+          setAuthSession(null)
           setAuthProfile(null)
+          loadedForUserRef.current = null
+          return
+        }
+        if (profile) {
+          setAuthProfile(prev => (prev?.auth_user_id === profile.auth_user_id && prev?.role === profile.role ? prev : profile))
+          if (isMagazynier(profile)) setActiveTab(t => t === 'dashboard' ? 'kartoteki' : t)
+        } else if (transientError) {
+          console.warn('Profil tymczasowo niedostępny:', transientError)
         }
       } else {
         setAuthProfile(null)

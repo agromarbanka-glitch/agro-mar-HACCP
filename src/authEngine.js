@@ -5,8 +5,36 @@ import { createClient } from '@supabase/supabase-js'
 import { supabase as mainSupabase, isSupabaseConfigured } from './supabaseClient'
 import { getAppSettings } from './appSettingsEngine'
 
-export const AUTH_ENGINE_VERSION = '1.0'
+export const AUTH_ENGINE_VERSION = '1.1'
 export const AUTH_SESSION_KEY = 'agro-mar-auth-profile-v1'
+
+/** Czytelne komunikaty z Supabase Auth / sieci. */
+export function formatAuthError(err) {
+  const msg = String(err?.message || err || '').trim()
+  const code = String(err?.code || err?.status || '').trim()
+  const lower = msg.toLowerCase()
+
+  if (!msg && !code) return 'Błąd logowania — spróbuj ponownie.'
+  if (/invalid login credentials|invalid_credentials/i.test(msg)) {
+    return 'Nieprawidłowy email lub hasło.'
+  }
+  if (/email not confirmed|email_not_confirmed/i.test(msg)) {
+    return 'Email nie został potwierdzony. W Supabase → Authentication → Users włącz „Confirm email” lub potwierdź konto.'
+  }
+  if (/too many requests|rate limit/i.test(msg)) {
+    return 'Zbyt wiele prób logowania — odczekaj chwilę i spróbuj ponownie.'
+  }
+  if (/fetch failed|network|failed to fetch|networkerror/i.test(lower)) {
+    return 'Brak połączenia z Supabase. Sprawdź internet, adres projektu w .env (VITE_SUPABASE_URL) i czy strona nie blokuje API.'
+  }
+  if (/invalid api key|jwt|anon key/i.test(lower)) {
+    return 'Błędny klucz Supabase (VITE_SUPABASE_ANON_KEY). Skopiuj anon key z Supabase → Project Settings → API.'
+  }
+  if (/infinite recursion|42501|permission denied|row-level security/i.test(lower)) {
+    return 'Błąd uprawnień bazy (RLS). Uruchom w Supabase: LOGOWANIE-KROK-4-fix-rls.sql i LOGOWANIE-SPRAWDZENIE.sql.'
+  }
+  return msg
+}
 
 /** Klient bez trwałej sesji – do tworzenia kont przez admina bez wylogowania. */
 function signupClient() {
@@ -73,11 +101,20 @@ export async function signIn(email, password) {
     email: String(email || '').trim(),
     password: String(password || '')
   })
-  if (error) throw error
-  const profile = await loadAppProfile(mainSupabase, data.user?.id)
+  if (error) throw new Error(formatAuthError(error))
+  let profile
+  try {
+    profile = await loadAppProfile(mainSupabase, data.user?.id)
+  } catch (loadErr) {
+    await mainSupabase.auth.signOut()
+    throw new Error(formatAuthError(loadErr))
+  }
   if (!profile) {
     await mainSupabase.auth.signOut()
-    throw new Error('Konto nie ma dostępu do systemu. Poproś administratora o aktywację.')
+    throw new Error(
+      'Konto istnieje w Supabase Auth, ale nie ma wpisu w app_users (lub konto jest nieaktywne). ' +
+      'Administrator: uruchom LOGOWANIE-KROK-3-admin.sql lub dodaj użytkownika w zakładce Użytkownicy.'
+    )
   }
   return { session: data.session, user: data.user, profile }
 }
@@ -99,8 +136,27 @@ export async function getCurrentSession() {
       return { session: null, profile: null }
     }
     return { session, profile }
-  } catch {
-    return { session, profile: null }
+  } catch (loadErr) {
+    console.error('loadAppProfile', loadErr)
+    await mainSupabase.auth.signOut()
+    return { session: null, profile: null }
+  }
+}
+
+/** Obsługa zdarzeń auth — nie kasuj profilu przy chwilowym błędzie sieci. */
+export async function resolveAuthProfileFromSession(client, session, { previousProfile = null } = {}) {
+  if (!client || !session?.user?.id) return { profile: null, shouldSignOut: true }
+  const uid = session.user.id
+  try {
+    const profile = await loadAppProfile(client, uid)
+    if (!profile) return { profile: null, shouldSignOut: true }
+    return { profile, shouldSignOut: false }
+  } catch (err) {
+    console.error('resolveAuthProfileFromSession', err)
+    if (previousProfile?.auth_user_id === uid) {
+      return { profile: previousProfile, shouldSignOut: false, transientError: formatAuthError(err) }
+    }
+    return { profile: null, shouldSignOut: false, transientError: formatAuthError(err) }
   }
 }
 

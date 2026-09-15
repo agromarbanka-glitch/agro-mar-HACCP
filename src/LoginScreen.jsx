@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { ShieldCheck, LogIn } from 'lucide-react'
-import { signIn } from './authEngine'
+import { signIn, formatAuthError } from './authEngine'
 
 export function LoginScreen({ onSuccess, supabaseConfigured }) {
   const [email, setEmail] = useState('')
@@ -16,7 +16,7 @@ export function LoginScreen({ onSuccess, supabaseConfigured }) {
       const result = await signIn(email, password)
       onSuccess(result)
     } catch (err) {
-      setError(err.message || 'Błąd logowania')
+      setError(formatAuthError(err))
     } finally {
       setLoading(false)
     }
