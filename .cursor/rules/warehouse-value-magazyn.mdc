@@ -21,12 +21,13 @@ Cena netto z Excela: **TAK** (tylko ta zakładka). HACCP: **NIE**.
 
 ## Wersje (stan zatwierdzony)
 
-- Silnik raportu: `EXCEL_REPORT_VERSION` w `monthlyStockValueFromExcel.js` (**2.11**)
+- Silnik raportu: `EXCEL_REPORT_VERSION` w `monthlyStockValueFromExcel.js` (**2.13**)
 - Magazyn Supabase: `WAREHOUSE_VALUE_STORE_VERSION` w `warehouseValueStore.js` (**1.7**)
 
 ## Formuła raportu
 
 - **Ilość końcowa** = Σ PZ − Σ WZ (do daty stanu), nie FIFO partii HACCP.
+- Przy przeliczeniu: **deduplikacja biznesowa** (ten sam nr PZ/WZ + produkt + kg + data = jedna pozycja), nawet jeśli w bazie są 2 wiersze z różnych importów.
 - Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca.
 - Grupowanie produktów jak Comarch (np. Truskawka + Truskawka z szypułką).
 
@@ -34,7 +35,7 @@ Cena netto z Excela: **TAK** (tylko ta zakładka). HACCP: **NIE**.
 
 1. **Osobne pliki** — np. czerwiec, Lipiec 1–19, Lipiec 20–31; doklejanie, nie zastępowanie.
 2. **dedup_key** musi zawierać **nazwę pliku źródłowego** (`warehouseValueDedupKey` + `sourceFile`) — ten sam `rowNo` w dwóch plikach to **dwa** wiersze.
-3. WZ `WZ/NNN/MM/RRRR`: data z kolumny Excel (Data wystawienia); bez daty → koniec miesiąca MM z numeru. Nie przesuwaj WZ wstecz do MM z numeru, gdy Excel ma datę w kolejnym miesiącu.
+3. WZ `WZ/NNN/MM/RRRR`: **miesiąc z numeru**, **dzień z Excela/bazy**; bez daty → koniec MM. WZ z datą po stanie, ale numer w miesiącu stanu → wlicz do Σ WZ (`applyStockValueCutoffToWzDate`).
 4. MM pomijane; PZ z dniem w numerze → data z numeru.
 5. Zapis: upsert po `dedup_key`, chunk **250**; pominięte duplikaty OK.
 6. **Nie kasuj czerwca**, jeśli jest OK — usuń tylko złe partie lipca i wgraj ponownie pliki lipca.

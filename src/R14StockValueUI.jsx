@@ -14,7 +14,8 @@ import {
   buildReportTitle,
   compareStockValueReports,
   computeWarehouseValueMonthStats,
-  auditWarehouseValueImport
+  auditWarehouseValueImport,
+  listStockValueProductMovements
 } from './monthlyStockValueFromExcel'
 import {
   fetchAllWarehouseValueLines,
@@ -442,6 +443,20 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     }
   }
 
+  function showIndustrialAppleLedger() {
+    const ledger = listStockValueProductMovements(excelRows, asOfDate)
+    const dupLines = ledger.duplicates
+      .map(d => `${d.operation === 'sprzedaz' ? 'WZ' : 'PZ'} ${d.documentNo} · ${d.qty} kg · ${d.issueDate}`)
+      .join('\n')
+    setMessage?.(
+      `Jabłko przemysłowe (dedup): ilość końcowa ${ledger.remainingKg.toLocaleString('pl-PL')} kg` +
+      (ledger.duplicates.length
+        ? ` · odrzucono ${ledger.duplicates.length} duplikat(ów):\n${dupLines}`
+        : ' · brak zdublowanych pozycji tego produktu — sprawdź w Comarch pojedynczą linię ~18 kg.')
+    )
+    console.table(ledger.movements)
+  }
+
   function toggleExpand(key) {
     setExpanded(prev => {
       const next = new Set(prev)
@@ -708,7 +723,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           <span>Ilość końcowa: <b>{Number(report.totals?.remaining_kg || 0).toLocaleString('pl-PL')} kg</b> · <b>{formatPlMoney(report.totals?.remaining_value)} zł</b></span>
           {diag && (
             <span className="hint">
-              {diag.pzLines} PZ, {diag.wzLines} WZ w bazie · {diag.linesWithPrice} z ceną
+              {diag.pzLines} PZ, {diag.wzLines} WZ w raporcie · {diag.linesWithPrice} z ceną
+              {diag.excelLinesBeforeDedup > diag.excelLines
+                ? ` · ${diag.reportDedupRemoved} dupl. pozycji (nakład importów)`
+                : ''}
               {diag.wzAfterCutoff > 0 ? ` · ${diag.wzAfterCutoff} WZ po dacie stanu pominięte` : ''}
             </span>
           )}
@@ -750,6 +768,11 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                         )}
                       </td>
                       <td>
+                        {/jabłko przemysłowe|jablko przemyslowe/i.test(row.product_name || '') && (
+                          <button type="button" className="mini secondary" onClick={showIndustrialAppleLedger} title="Duplikaty PZ/WZ i lista ruchów">
+                            Rozlicz kg
+                          </button>
+                        )}
                         {row.lot_lines?.length > 0 && (
                           <button type="button" className="mini secondary" onClick={() => toggleExpand(key)}>
                             {open ? 'Ukryj' : `${row.lot_lines.length} PZ`}

@@ -2,7 +2,7 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.11: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per produkt raportu Comarch.
+ * Silnik v2.13: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per produkt raportu Comarch.
  * Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca (np. 30.06).
  * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
@@ -20,7 +20,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.11'
+export const EXCEL_REPORT_VERSION = '2.13'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -121,24 +121,49 @@ function displayName(name) {
   return stockValueReportProductName(name)
 }
 
+function wzDocMonthBounds(documentNo) {
+  const my = monthYearFromDocumentNo(documentNo)
+  if (!my || !isWzMonthYearDocument(documentNo)) return null
+  const docYm = `${my.year}-${String(my.month).padStart(2, '0')}`
+  const lastDay = new Date(my.year, my.month, 0).getDate()
+  const docMonthEnd = `${docYm}-${String(lastDay).padStart(2, '0')}`
+  return { docYm, lastDay, docMonthEnd }
+}
+
 /**
  * Data ruchu dla raportu magazynowego (nie zmienia importu HACCP).
- * WZ WZ/NNN/MM/RRRR: dzień z „Data wystawienia” w Excelu (jak Comarch).
- * Gdy brak daty → ostatni dzień miesiąca MM z numeru dokumentu.
+ * WZ WZ/NNN/MM/RRRR: miesiąc MM z numeru, dzień z daty w Excelu / bazie (jak Comarch).
+ * Gdy brak daty → ostatni dzień miesiąca MM z numeru.
  */
 export function resolveStockValueMovementDate(issueDate, documentNo, operation) {
   const resolved = resolveDocumentIssueDate(issueDate, documentNo) || String(issueDate || '').slice(0, 10)
   if (operation !== 'sprzedaz') return resolved
 
-  const my = monthYearFromDocumentNo(documentNo)
-  if (!my || !isWzMonthYearDocument(documentNo)) return resolved
+  const bounds = wzDocMonthBounds(documentNo)
+  if (!bounds) return resolved
 
-  const docYm = `${my.year}-${String(my.month).padStart(2, '0')}`
-  const lastDay = new Date(my.year, my.month, 0).getDate()
-  const docMonthEnd = `${docYm}-${String(lastDay).padStart(2, '0')}`
-
+  const { docYm, lastDay, docMonthEnd } = bounds
   if (!resolved) return docMonthEnd
-  return resolved
+
+  const dayNum = Math.min(Math.max(Number(resolved.slice(8, 10)) || 1, 1), lastDay)
+  return `${docYm}-${String(dayNum).padStart(2, '0')}`
+}
+
+/**
+ * WZ po dacie stanu — jeśli numer WZ wskazuje miesiąc objęty stanem, wlicz do Σ WZ (dane w bazie często mają datę z kolejnego miesiąca).
+ */
+export function applyStockValueCutoffToWzDate(moveDate, documentNo, cutoffDate) {
+  const date = String(moveDate || '').slice(0, 10)
+  const cutoff = String(cutoffDate || '').slice(0, 10)
+  if (!date || !cutoff || date <= cutoff) return date
+
+  const bounds = wzDocMonthBounds(documentNo)
+  if (!bounds) return date
+
+  const cutoffYm = cutoff.slice(0, 7)
+  if (bounds.docMonthEnd <= cutoff) return bounds.docMonthEnd
+  if (bounds.docYm === cutoffYm) return cutoff
+  return date
 }
 
 /** Forward-fill tylko dla świeżego Excela — wiersze z Supabase mają już issue_date. */
@@ -165,6 +190,51 @@ function dayBefore(isoDate) {
 function clampStockKg(n) {
   const v = roundKg(n)
   return v < 0 ? 0 : v
+}
+
+/** Klucz biznesowy ruchu (bez nr wiersza Excel / pliku / daty zapisu) — jeden dokument+produkt+kg = jedna pozycja w Σ. */
+function stockValueMovementBusinessKey(line) {
+  return [
+    line.operation,
+    line.documentNo,
+    line.productKey,
+    roundKg(line.qty)
+  ].join('|')
+}
+
+/**
+ * Usuwa duplikaty z nakładających się importów (ten sam dokument+produkt+ilość+data).
+ * W bazie mogą zostać 2 wiersze (różny plik / rowNo), raport liczy raz.
+ */
+export function dedupeStockValueReportLines(lines, { collectDuplicates = false } = {}) {
+  const seen = new Map()
+  const out = []
+  let removed = 0
+  const duplicates = []
+
+  for (const line of lines || []) {
+    const key = stockValueMovementBusinessKey(line)
+    if (seen.has(key)) {
+      removed += 1
+      if (collectDuplicates) {
+        duplicates.push({
+          key,
+          qty: line.qty,
+          documentNo: line.documentNo,
+          operation: line.operation,
+          issueDate: line.issueDate,
+          productName: line.productName,
+          keptLineId: seen.get(key)?.lineId,
+          droppedLineId: line.lineId
+        })
+      }
+      continue
+    }
+    seen.set(key, line)
+    out.push(line)
+  }
+
+  return { lines: out, removed, duplicates }
 }
 
 function normalizeExcelRows(rows) {
@@ -244,7 +314,12 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
   const filled = prepareReportRows(excelRows || [])
-  const lines = normalizeExcelRows(filled)
+  const normalized = normalizeExcelRows(filled)
+  const {
+    lines,
+    removed: reportDedupRemoved,
+    duplicates: reportDuplicates = []
+  } = dedupeStockValueReportLines(normalized, { collectDuplicates: true })
 
   if (!lines.length) {
     return {
@@ -272,7 +347,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   let linesWithPrice = 0
 
   lines.forEach((line) => {
-    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo, rowNo, lineId } = line
+    const { operation, issueDate: rawMoveDate, productName, productKey, qty, unitPriceNet, documentNo, rowNo, lineId } = line
+    const issueDate = operation === 'sprzedaz'
+      ? applyStockValueCutoffToWzDate(rawMoveDate, documentNo, cutoffDate)
+      : rawMoveDate
     const row = ensureRow(periodMap, productKey, productName)
 
     if (operation === 'przyjecie') {
@@ -413,7 +491,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     message += ` Pominięto ${wzAfterCutoff} WZ z datą po ${formatReportTitleDate(cutoffDate)} (nie obniżają stanu na ten dzień).`
   }
   if (wzClampedToDocMonth > 0) {
-    message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
+    message += ` ${wzClampedToDocMonth} WZ bez daty w Excelu — użyto końca miesiąca z numeru dokumentu.`
+  }
+  if (reportDedupRemoved > 0) {
+    message += ` Pominięto ${reportDedupRemoved} zdublowanych pozycji PZ/WZ (ten sam dokument w kilku importach).`
   }
 
   const reportPayload = {
@@ -433,18 +514,71 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       inputRows: (excelRows || []).length,
       filledRows: filled.length,
       excelLines: lines.length,
+      excelLinesBeforeDedup: normalized.length,
+      reportDedupRemoved,
+      reportDuplicatesSample: reportDuplicates.slice(0, 12),
       pzLines,
       wzLines,
       linesWithPrice,
       wzAfterCutoff,
       wzClampedToDocMonth,
       openingCutoff,
-      engine: 'cumulative_pz_minus_wz_v28'
+      engine: 'cumulative_pz_minus_wz_v213'
     },
     message
   }
   reportPayload.reportTitle = buildReportTitle(reportPayload)
   return reportPayload
+}
+
+/**
+ * Lista ruchów jednego produktu (do rozliczenia różnic kg) — po deduplikacji biznesowej.
+ */
+export function listStockValueProductMovements(excelRows, asOfDate, { productMatch = /jabłko przemysłowe|jablko przemyslowe/i } = {}) {
+  const bounds = parseAsOfDate(asOfDate)
+  if (!bounds) return { movements: [], remainingKg: 0, dedupRemoved: 0, duplicates: [] }
+
+  const cutoff = bounds.asOfDate
+  const filled = prepareReportRows(excelRows || [])
+  const normalized = normalizeExcelRows(filled)
+  const { lines, removed, duplicates } = dedupeStockValueReportLines(normalized, { collectDuplicates: true })
+
+  const matches = (line) =>
+    productMatch.test(String(line.productName || ''))
+    || productMatch.test(String(line.productKey || ''))
+
+  let cumPz = 0
+  let cumWz = 0
+  const movements = []
+
+  for (const line of lines.filter(matches)) {
+    const moveDate = line.operation === 'sprzedaz'
+      ? applyStockValueCutoffToWzDate(line.issueDate, line.documentNo, cutoff)
+      : line.issueDate
+    if (moveDate <= cutoff) {
+      if (line.operation === 'przyjecie') cumPz += line.qty
+      else cumWz += line.qty
+    }
+    movements.push({
+      operation: line.operation,
+      documentNo: line.documentNo,
+      issueDate: moveDate,
+      qty: line.qty,
+      lineId: line.lineId
+    })
+  }
+
+  movements.sort((a, b) =>
+    String(a.issueDate).localeCompare(String(b.issueDate))
+    || String(a.documentNo).localeCompare(String(b.documentNo))
+  )
+
+  return {
+    movements,
+    remainingKg: roundKg(cumPz - cumWz),
+    dedupRemoved: removed,
+    duplicates: duplicates.filter(d => productMatch.test(String(d.productName || '')))
+  }
 }
 
 /** Porównanie raportu z pliku vs z bazy — weryfikacja po imporcie. */
