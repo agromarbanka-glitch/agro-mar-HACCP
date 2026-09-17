@@ -1,3 +1,25 @@
+/** PostgREST przy RLS często zwraca 200 bez błędu, ale 0 zaktualizowanych wierszy — traktujemy to jako błąd zapisu. */
+export function throwIfNoHaccpWriteResult(data, error, context = 'Zapis kartoteki') {
+  if (error) {
+    const msg = String(error.message || error)
+    if (/42501|permission denied|row-level security|jwt expired/i.test(msg)) {
+      throw new Error(
+        `${context}: brak uprawnień lub wygasła sesja. Wyloguj się i zaloguj ponownie. ` +
+        'W Supabase uruchom SQL: LOGOWANIE-KROK-5-haccp-rls-authenticated.sql (oraz KROK-4 przy błędzie app_users).'
+      )
+    }
+    throw error
+  }
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) {
+    throw new Error(
+      `${context}: baza nie zapisała zmiany (0 wierszy). ` +
+      'Typowa przyczyna: brak polityki RLS dla roli zalogowanego — uruchom LOGOWANIE-KROK-5 w Supabase i odśwież sesję.'
+    )
+  }
+  return row
+}
+
 /** Wspólne pola SELECT dla listy kartotek (load + batch insert). */
 export const HACCP_DOC_LIST_SELECT =
   'id, document_type, lot_id, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at'

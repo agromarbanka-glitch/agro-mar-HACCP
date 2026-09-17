@@ -55,7 +55,7 @@ import { buildR11SyncPayloads } from './r11Engine'
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import {
-  HACCP_DOCS_LOAD_MAX, HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList
+  HACCP_DOCS_LOAD_MAX, HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList, throwIfNoHaccpWriteResult
 } from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
 import { StockValueReportSection } from './R14StockValueUI'
@@ -2044,9 +2044,9 @@ function App() {
           signed_by_operator: signed || null,
           updated_at: new Date().toISOString()
         }
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-        if (error) throw error
-        const workingDoc = { ...doc, ...payload }
+        const { data: saved, error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id).select(HACCP_DOC_LIST_SELECT).maybeSingle()
+        const row = throwIfNoHaccpWriteResult(saved, error, 'Zapis K04')
+        const workingDoc = { ...doc, ...row }
         setK04Overrides(prev => {
           const next = { ...prev }
           delete next[doc.id]
@@ -3436,8 +3436,8 @@ function App() {
         if (patch.podpis_kontrolujacego !== undefined) payload.signed_by_operator = patch.podpis_kontrolujacego || null
         if (patch.uwagi !== undefined) payload.status = normalizePN(patch.uwagi)
         if (patch.document_date !== undefined) payload.document_date = String(patch.document_date).slice(0, 10)
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-        if (error) throw error
+        const { data: saved, error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id).select(HACCP_DOC_LIST_SELECT).maybeSingle()
+        throwIfNoHaccpWriteResult(saved, error, 'Zapis K02')
         setK02Overrides(prev => {
           const next = { ...prev }
           delete next[doc.id]
@@ -3511,8 +3511,8 @@ function App() {
     if (field === 'podpis_kontrolujacego') payload.signed_by_operator = value || null
     if (field === 'uwagi') payload.status = normalizePN(value)
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-      if (error) throw error
+      const { data: saved, error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id).select(HACCP_DOC_LIST_SELECT).maybeSingle()
+      throwIfNoHaccpWriteResult(saved, error, 'Zapis K02')
       mergeHaccpDoc(doc.id, payload)
     } catch (err) {
       setMessage(`K02: błąd zapisu – ${err.message}`)
@@ -3955,11 +3955,13 @@ function App() {
     if (!confirmed) return
     const nextData = { ...(doc.data || {}), uwagi: newStatus === 'N' ? note : (doc.data?.uwagi || '') }
     try {
-      const { error } = await supabase
+      const { data: saved, error } = await supabase
         .from('haccp_documents')
         .update({ status: newStatus, data: nextData, updated_at: new Date().toISOString() })
         .eq('id', doc.id)
-      if (error) throw error
+        .select(HACCP_DOC_LIST_SELECT)
+        .maybeSingle()
+      throwIfNoHaccpWriteResult(saved, error, 'Zmiana statusu kartoteki')
       await supabase.from('haccp_document_history').insert({
         document_id: doc.id,
         action: 'zmiana_statusu',
@@ -3970,7 +3972,7 @@ function App() {
         changed_by: userRole
       })
       setMessage(`Zmieniono status dokumentu na ${newStatus}.`)
-      await loadHaccpDocs()
+      await loadHaccpDocs({ syncK01: false, skipBusy: true })
     } catch (err) {
       setMessage(`Błąd zmiany statusu: ${err.message}`)
     }
@@ -4073,11 +4075,13 @@ function App() {
       const finalStatus = doc.document_type === 'K06'
         ? (['barwa', 'zapach', 'twardosc_jablko', 'brak_plesni'].some(k => k06Data[k] === 'N') ? 'N' : 'P')
         : newStatus
-      const { error } = await supabase
+      const { data: saved, error } = await supabase
         .from('haccp_documents')
         .update({ data: doc.document_type === 'K06' ? k06Data : nextData, status: finalStatus, updated_at: new Date().toISOString() })
         .eq('id', doc.id)
-      if (error) throw error
+        .select(HACCP_DOC_LIST_SELECT)
+        .maybeSingle()
+      throwIfNoHaccpWriteResult(saved, error, `Edycja ${doc.document_type || 'kartoteki'}`)
       await supabase.from('haccp_document_history').insert({
         document_id: doc.id,
         action: 'edycja_pola',
@@ -4089,7 +4093,7 @@ function App() {
       })
       const updated = { ...doc, data: doc.document_type === 'K06' ? k06Data : nextData, status: finalStatus }
       setSelectedHaccpDoc(updated)
-      await loadHaccpDocs()
+      await loadHaccpDocs({ syncK01: false, skipBusy: true })
       setMessage(`Zapisano zmianę pola: ${label}.`)
     } catch (err) {
       setMessage(`Błąd edycji dokumentu: ${err.message}`)
@@ -4387,8 +4391,8 @@ function App() {
           .eq('id', doc.id)
           .select(HACCP_DOC_LIST_SELECT)
           .maybeSingle()
-        if (error) throw error
-        mergeHaccpDoc(doc.id, saved || payload)
+        const row = throwIfNoHaccpWriteResult(saved, error, 'Podpis K01 (zbiorczo)')
+        mergeHaccpDoc(doc.id, row)
         supabase.from('haccp_document_history').insert({
           document_id: doc.id,
           action: 'wybor_pracownika_zbiorczy',
@@ -9304,10 +9308,12 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
       return
     }
     try {
-      const { error } = await supabase
+      const { data: inserted, error } = await supabase
         .from('haccp_employees')
         .insert({ full_name: name, role_name: 'przyjmujący', is_active: true })
-      if (error) throw error
+        .select('id, full_name, role_name, is_active, created_at')
+        .single()
+      throwIfNoHaccpWriteResult(inserted, error, 'Dodawanie pracownika')
       setNewEmployeeName('')
       await loadEmployees()
       loadAuxMaterials()
@@ -9435,8 +9441,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         .eq('id', doc.id)
         .select(HACCP_DOC_LIST_SELECT)
         .maybeSingle()
-      if (error) throw error
-      if (saved) mergeHaccpDoc(doc.id, saved)
+      const row = throwIfNoHaccpWriteResult(saved, error, 'Podpis kartoteki')
+      mergeHaccpDoc(doc.id, row)
       supabase.from('haccp_document_history').insert({
         document_id: doc.id,
         action: 'wybor_pracownika',
