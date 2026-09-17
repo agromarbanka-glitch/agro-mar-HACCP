@@ -32,7 +32,7 @@ import {
   R00_DEFAULT_GODZINA
 } from './rMonthlyEngine'
 import { getRMonthlyConfig, isRMonthlyReport } from './rMonthlyConfigs'
-import { batchInsertHaccpDocuments } from './haccpLoadHelpers'
+import { batchInsertHaccpDocuments, patchHaccpDocument } from './haccpLoadHelpers'
 import {
   buildR11CalendarRows, r11MagnetsForDoc, r11UwagiForDoc,
   r11MakeColumn, R11_HEADER, resolveR11Columns, buildR11SparseDisplayRows,
@@ -484,16 +484,21 @@ async function saveDoc(supabase, doc, patch, signedBy, loadHaccpDocs, setMessage
     Object.assign(nextData, patch.nested)
     delete nextData.nested
   }
-  const payload = { data: nextData, updated_at: new Date().toISOString() }
+  const payload = { data: nextData }
   if (signedBy !== undefined) payload.signed_by_operator = signedBy
   if (patch.status !== undefined) payload.status = patch.status
   try {
-    const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-    if (error) throw error
-    if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
-    else await loadHaccpDocs()
+    const row = await patchHaccpDocument(supabase, doc.id, payload, `${code}: zapis`)
+    if (mergeHaccpDoc) {
+      mergeHaccpDoc(doc.id, {
+        data: row.data,
+        signed_by_operator: row.signed_by_operator,
+        status: row.status,
+        document_date: row.document_date
+      })
+    }
   } catch (err) {
-    setMessage(`${code}: ${err.message}`)
+    setMessage(err.message || String(err))
   }
 }
 
@@ -517,7 +522,12 @@ export function RMonthlyReportPreview({
   const [newColumnLabel, setNewColumnLabel] = useState('')
   const [newControlDate, setNewControlDate] = useState(new Date().toISOString().slice(0, 10))
   const [r00PickEmployee, setR00PickEmployee] = useState('')
+  const [bulkSignEmployee, setBulkSignEmployee] = useState(defaultEmployee || '')
   const [r11BlankDrafts, setR11BlankDrafts] = useState({})
+
+  useEffect(() => {
+    if (defaultEmployee) setBulkSignEmployee(defaultEmployee)
+  }, [defaultEmployee])
 
   useEffect(() => {
     if (cfg?.layout !== 'single-month' || !singleDoc) return
@@ -531,6 +541,42 @@ export function RMonthlyReportPreview({
   function liveDoc(doc) {
     if (!doc?.id) return doc
     return (haccpDocs || []).find(d => d.id === doc.id) || doc
+  }
+
+  async function persistDocRow(doc, payload, label) {
+    const row = await patchHaccpDocument(supabase, doc.id, payload, label || `${code}: zapis`)
+    if (mergeHaccpDoc) {
+      mergeHaccpDoc(doc.id, {
+        ...payload,
+        data: row.data,
+        signed_by_operator: row.signed_by_operator,
+        status: row.status,
+        document_date: row.document_date ?? payload.document_date
+      })
+    }
+    return row
+  }
+
+  async function applyBulkSignatureAll(employeeName, onlyEmpty = false) {
+    if (!supabase) return
+    const name = String(employeeName || '').trim()
+    if (!name) {
+      setMessage(`${code}: wybierz pracownika do podpisu.`)
+      return
+    }
+    const targets = docs.filter(d => !d.data?.is_shell && (!onlyEmpty || !(d.signed_by_operator || '').trim()))
+    if (!targets.length) {
+      setMessage(onlyEmpty ? `${code}: nie ma pustych podpisów.` : `${code}: brak wierszy do podpisu.`)
+      return
+    }
+    try {
+      for (const doc of targets) {
+        await persistDocRow(doc, { signed_by_operator: name }, `${code}: podpis`)
+      }
+      setMessage(`${code}: ustawiono podpis „${name}” dla ${targets.length} wierszy.`)
+    } catch (err) {
+      setMessage(err.message || String(err))
+    }
   }
 
   const period = String(group.period || '')
@@ -552,15 +598,10 @@ export function RMonthlyReportPreview({
         for (const key of Object.keys(clothing)) {
           if (!nextCols.some(c => c.id === key)) delete clothing[key]
         }
-        const payload = {
-          data: { ...(doc.data || {}), columns: nextCols.map(c => ({ ...c })), clothing },
-          updated_at: new Date().toISOString()
-        }
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-        if (error) throw error
-        if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
+        await persistDocRow(doc, {
+          data: { ...(doc.data || {}), columns: nextCols.map(c => ({ ...c })), clothing }
+        }, 'R00: kolumny')
       }
-      if (!mergeHaccpDoc) await loadHaccpDocs()
     } catch (err) {
       setMessage(`R00: ${err.message}`)
     }
@@ -598,12 +639,8 @@ export function RMonthlyReportPreview({
     try {
       for (const doc of dayDocs) {
         const clothing = { ...(doc.data?.clothing || {}), [colId]: clothingValue }
-        const payload = { data: { ...(doc.data || {}), clothing }, updated_at: new Date().toISOString() }
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-        if (error) throw error
-        if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
+        await persistDocRow(doc, { data: { ...(doc.data || {}), clothing } }, 'R00: odzież')
       }
-      if (!mergeHaccpDoc) await loadHaccpDocs()
       setMessage(`R00: kolumna „${colLabel || 'pracownik'}” — wszędzie ${label} (${dayDocs.length} dni roboczych). Pojedyncze komórki możesz zmienić ręcznie.`)
     } catch (err) {
       setMessage(`R00: ${err.message}`)
@@ -619,10 +656,7 @@ export function RMonthlyReportPreview({
       for (const doc of dayDocs) {
         const cells = { ...(doc.data?.cells || {}) }
         cells[colId] = { ...(cells[colId] || {}), mcd: mcdValue }
-        const payload = { data: { ...(doc.data || {}), cells }, updated_at: new Date().toISOString() }
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-        if (error) throw error
-        if (mergeHaccpDoc) mergeHaccpDoc(doc.id, payload)
+        await persistDocRow(doc, { data: { ...(doc.data || {}), cells } }, `${code}: M/C`)
       }
       setMessage(`${code}: ustawiono ${mcdValue} w kolumnie „${colLabel}" (${dayDocs.length} dni). Możesz zmienić pojedyncze komórki ręcznie.`)
     } catch (err) {
@@ -679,16 +713,11 @@ export function RMonthlyReportPreview({
   async function saveR04ControlDate(doc, date) {
     const current = liveDoc(doc)
     if (!supabase || !current?.id) return
-    const payload = {
-      document_date: date,
-      data: { ...(current.data || {}), control_date: date },
-      updated_at: new Date().toISOString()
-    }
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', current.id)
-      if (error) throw error
-      if (mergeHaccpDoc) mergeHaccpDoc(current.id, payload)
-      else await loadHaccpDocs()
+      await persistDocRow(current, {
+        document_date: date,
+        data: { ...(current.data || {}), control_date: date }
+      }, `${code}: data kontroli`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
     }
@@ -725,15 +754,10 @@ export function RMonthlyReportPreview({
     const next = [...stations, col]
     const readings = { ...(current.data?.readings || {}), [col.id]: defaultR04Reading(cfg) }
     saveRMonthlyColumns(code, next)
-    const payload = {
-      data: { ...(current.data || {}), stations: next, readings },
-      updated_at: new Date().toISOString()
-    }
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', current.id)
-      if (error) throw error
-      if (mergeHaccpDoc) mergeHaccpDoc(current.id, payload)
-      else await loadHaccpDocs()
+      await persistDocRow(current, {
+        data: { ...(current.data || {}), stations: next, readings }
+      }, `${code}: stacja`)
       setMessage(`${code}: dodano ${col.label}.`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
@@ -748,15 +772,10 @@ export function RMonthlyReportPreview({
     const readings = { ...(current.data?.readings || {}) }
     delete readings[stId]
     saveRMonthlyColumns(code, stations)
-    const payload = {
-      data: { ...(current.data || {}), stations, readings },
-      updated_at: new Date().toISOString()
-    }
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', current.id)
-      if (error) throw error
-      if (mergeHaccpDoc) mergeHaccpDoc(current.id, payload)
-      else await loadHaccpDocs()
+      await persistDocRow(current, {
+        data: { ...(current.data || {}), stations, readings }
+      }, `${code}: stacja`)
     } catch (err) {
       setMessage(`${code}: ${err.message}`)
     }
@@ -778,9 +797,22 @@ export function RMonthlyReportPreview({
     </tr></tbody></table>
   )
 
+  const showBulkSign = cfg.signLabel && cfg.layout !== 'single-month' && code !== 'R00' && docs.some(d => !d.data?.is_shell)
   const toolbar = (
     <div className="no-print employee-signature-row" style={{ marginBottom: 10 }}>
       <span className="hint">{cfg.createHint}</span>
+      {showBulkSign && (
+        <div className="k03-bulk-row" style={{ marginTop: 8 }}>
+          <label>{cfg.signLabel} — cała kartoteka
+            <select value={bulkSignEmployee} onChange={e => setBulkSignEmployee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button type="button" className="secondary mini" disabled={!bulkSignEmployee} onClick={() => applyBulkSignatureAll(bulkSignEmployee, false)}>Zastosuj do wszystkich wierszy</button>
+          <button type="button" className="secondary mini" disabled={!bulkSignEmployee} onClick={() => applyBulkSignatureAll(bulkSignEmployee, true)}>Uzupełnij puste</button>
+        </div>
+      )}
       {allowDelete && <button className="secondary danger" onClick={deleteMonth}>Usuń kartotekę</button>}
     </div>
   )
@@ -1082,6 +1114,16 @@ export function RMonthlyReportPreview({
           </label>
           <button type="button" className="secondary mini" onClick={() => addR00ColumnToGroup(newColumnLabel || r00PickEmployee)}>+ Dodaj pracownika</button>
         </div>
+        <div className="k03-bulk-row r00-sign-bulk" style={{ marginTop: 8 }}>
+          <label>Podpis we wszystkich wierszach
+            <select value={bulkSignEmployee} onChange={e => setBulkSignEmployee(e.target.value)}>
+              <option value="">Wybierz pracownika</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button type="button" className="secondary mini" disabled={!bulkSignEmployee} onClick={() => applyBulkSignatureAll(bulkSignEmployee, false)}>Zastosuj do wszystkich wierszy</button>
+          <button type="button" className="secondary mini" disabled={!bulkSignEmployee} onClick={() => applyBulkSignatureAll(bulkSignEmployee, true)}>Uzupełnij puste</button>
+        </div>
       </div>
       <div className="table-wrap r00-table-wrap">
       <table className="r13-table r00-table"><thead>
@@ -1179,13 +1221,8 @@ export function RMonthlyReportPreview({
       try {
         for (const doc of docs) {
           const cal = { ...(doc.data?.calibration || {}), [field]: value }
-          const { error } = await supabase.from('haccp_documents').update({
-            data: { ...(doc.data || {}), calibration: cal },
-            updated_at: new Date().toISOString()
-          }).eq('id', doc.id)
-          if (error) throw error
+          await persistDocRow(doc, { data: { ...(doc.data || {}), calibration: cal } }, `${code}: kalibracja`)
         }
-        await loadHaccpDocs()
       } catch (err) {
         setMessage(`${code}: ${err.message}`)
       }
@@ -1201,13 +1238,10 @@ export function RMonthlyReportPreview({
         for (const doc of docs) {
           const cal = doc.data?.calibration || {}
           const chData = { ...(cal.chambers || {}), [newCol.id]: { ref: '', reading: '', action: doc.data?.is_day_off ? '' : 'P' } }
-          const { error } = await supabase.from('haccp_documents').update({
-            data: { ...(doc.data || {}), chamber_columns: nextCols, calibration: { ...cal, chambers: chData } },
-            updated_at: new Date().toISOString()
-          }).eq('id', doc.id)
-          if (error) throw error
+          await persistDocRow(doc, {
+            data: { ...(doc.data || {}), chamber_columns: nextCols, calibration: { ...cal, chambers: chData } }
+          }, `${code}: chłodnia`)
         }
-        await loadHaccpDocs()
         setMessage(`${code}: dodano ${newCol.label} do kartoteki.`)
       } catch (err) {
         setMessage(`${code}: ${err.message}`)
@@ -1359,13 +1393,10 @@ export function RMonthlyReportPreview({
         for (const doc of docs) {
           const dayOff = doc.data?.is_day_off
           const magnets = { ...r11MagnetsForDoc(doc, magnetCols), [col.id]: dayOff ? '' : '+' }
-          const { error } = await supabase.from('haccp_documents').update({
-            data: { ...(doc.data || {}), magnet_columns: nextCols, magnets },
-            updated_at: new Date().toISOString()
-          }).eq('id', doc.id)
-          if (error) throw error
+          await persistDocRow(doc, {
+            data: { ...(doc.data || {}), magnet_columns: nextCols, magnets }
+          }, `${code}: kolumna`)
         }
-        await loadHaccpDocs()
         setMessage(`${code}: dodano kolumnę „${col.label}” do kartoteki.`)
       } catch (err) {
         setMessage(`${code}: ${err.message}`)
@@ -1446,17 +1477,18 @@ export function RMonthlyReportPreview({
       if (!supabase || !doc?.id || !date) return
       const monthKey = String(date).slice(0, 7)
       const sortOrder = calendarDaysInMonth(monthKey).findIndex(d => d.date === date) + 1
-      const { error } = await supabase.from('haccp_documents').update({
-        document_date: date,
-        data: {
-          ...(doc.data || {}),
-          month_key: monthKey,
-          sort_order: sortOrder || doc.data?.sort_order || 99
-        },
-        updated_at: new Date().toISOString()
-      }).eq('id', doc.id)
-      if (error) setMessage(`R11: ${error.message}`)
-      else await loadHaccpDocs()
+      try {
+        await persistDocRow(doc, {
+          document_date: date,
+          data: {
+            ...(doc.data || {}),
+            month_key: monthKey,
+            sort_order: sortOrder || doc.data?.sort_order || 99
+          }
+        }, 'R11: data')
+      } catch (err) {
+        setMessage(err.message || String(err))
+      }
     }
 
     async function addR11ManualRow(dateStr) {

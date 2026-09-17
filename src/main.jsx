@@ -55,7 +55,7 @@ import { buildR11SyncPayloads } from './r11Engine'
 import { isRMonthlyReport } from './rMonthlyConfigs'
 import { RMonthlyReportSection, RMonthlyReportPreview } from './RMonthlyReportUI'
 import {
-  HACCP_DOCS_LOAD_MAX, HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList, throwIfNoHaccpWriteResult
+  HACCP_DOCS_LOAD_MAX, HACCP_DOC_LIST_SELECT, batchInsertHaccpDocuments, fetchAllHaccpDocuments, mergeHaccpDocs, patchHaccpDocInList, patchHaccpDocument, throwIfNoHaccpWriteResult
 } from './haccpLoadHelpers'
 import { R09TrendSection } from './R09TrendUI'
 import { StockValueReportSection } from './R14StockValueUI'
@@ -2466,16 +2466,18 @@ function App() {
     const columns = r13ColumnsFromDocs([doc])
     const payload = {
       data: nextData,
-      status: r13DocStatus({ ...doc, data: nextData }, columns),
-      updated_at: new Date().toISOString()
+      status: r13DocStatus({ ...doc, data: nextData }, columns)
     }
     if (signedBy !== undefined) payload.signed_by_operator = signedBy
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-      if (error) throw error
-      await loadHaccpDocs()
+      const row = await patchHaccpDocument(supabase, doc.id, payload, 'R13: zapis')
+      mergeHaccpDoc(doc.id, {
+        data: row.data,
+        signed_by_operator: row.signed_by_operator,
+        status: row.status
+      })
     } catch (err) {
-      setMessage(`R13: błąd zapisu – ${err.message}`)
+      setMessage(err.message || `R13: błąd zapisu – ${err.message}`)
     }
   }
 
@@ -2504,16 +2506,15 @@ function App() {
           if (oldChecks[col.id] !== undefined && oldChecks[col.id] !== '') checks[col.id] = oldChecks[col.id]
           else checks[col.id] = sunday ? '' : (fillNewWithP ? 'P' : '')
         }
-        const { error } = await supabase.from('haccp_documents').update({
+        const payload = {
           data: { ...(doc.data || {}), glass_columns: nextColumns, checks },
-          status: r13DocStatus({ ...doc, data: { ...doc.data, checks } }, nextColumns),
-          updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
-        if (error) throw error
+          status: r13DocStatus({ ...doc, data: { ...doc.data, checks } }, nextColumns)
+        }
+        const row = await patchHaccpDocument(supabase, doc.id, payload, 'R13: kolumny')
+        mergeHaccpDoc(doc.id, { data: row.data, status: row.status })
       }
-      await loadHaccpDocs()
     } catch (err) {
-      setMessage(`R13: ${err.message}`)
+      setMessage(err.message || `R13: ${err.message}`)
     }
   }
 
@@ -2552,16 +2553,12 @@ function App() {
     if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów R13.' : 'Brak wpisów R13.'); return }
     try {
       for (const doc of docs) {
-        const { error } = await supabase.from('haccp_documents').update({
-          signed_by_operator: employeeName,
-          updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
-        if (error) throw error
+        const row = await patchHaccpDocument(supabase, doc.id, { signed_by_operator: employeeName }, 'R13: podpis zbiorczy')
+        mergeHaccpDoc(doc.id, { signed_by_operator: row.signed_by_operator })
       }
-      await loadHaccpDocs()
       setMessage(`Ustawiono podpis R13 dla ${docs.length} dni.`)
     } catch (err) {
-      setMessage(`R13: ${err.message}`)
+      setMessage(err.message || `R13: ${err.message}`)
     }
   }
 
@@ -2660,16 +2657,18 @@ function App() {
     if (patch.cleaning) nextData.cleaning = { ...(doc.data?.cleaning || {}), ...patch.cleaning }
     const payload = {
       data: nextData,
-      status: 'P',
-      updated_at: new Date().toISOString()
+      status: 'P'
     }
     if (signedBy !== undefined) payload.signed_by_operator = signedBy
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-      if (error) throw error
-      await loadHaccpDocs()
+      const row = await patchHaccpDocument(supabase, doc.id, payload, 'R01: zapis')
+      mergeHaccpDoc(doc.id, {
+        data: row.data,
+        signed_by_operator: row.signed_by_operator,
+        status: row.status
+      })
     } catch (err) {
-      setMessage(`R01: błąd zapisu – ${err.message}`)
+      setMessage(err.message || `R01: błąd zapisu – ${err.message}`)
     }
   }
 
@@ -2696,15 +2695,13 @@ function App() {
         for (const col of nextColumns) {
           cleaning[col.id] = old[col.id] !== undefined && old[col.id] !== '' ? old[col.id] : (sunday ? '' : ((col.auto_m || col.id === 'pom-przyjecia') ? 'M' : ''))
         }
-        const { error } = await supabase.from('haccp_documents').update({
-          data: { ...(doc.data || {}), room_columns: nextColumns, cleaning },
-          updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
-        if (error) throw error
+        const row = await patchHaccpDocument(supabase, doc.id, {
+          data: { ...(doc.data || {}), room_columns: nextColumns, cleaning }
+        }, 'R01: kolumny')
+        mergeHaccpDoc(doc.id, { data: row.data })
       }
-      await loadHaccpDocs()
     } catch (err) {
-      setMessage(`R01: ${err.message}`)
+      setMessage(err.message || `R01: ${err.message}`)
     }
   }
 
@@ -2742,16 +2739,12 @@ function App() {
     if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów R01.' : 'Brak wpisów R01.'); return }
     try {
       for (const doc of docs) {
-        const { error } = await supabase.from('haccp_documents').update({
-          signed_by_operator: employeeName,
-          updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
-        if (error) throw error
+        const row = await patchHaccpDocument(supabase, doc.id, { signed_by_operator: employeeName }, 'R01: podpis zbiorczy')
+        mergeHaccpDoc(doc.id, { signed_by_operator: row.signed_by_operator })
       }
-      await loadHaccpDocs()
       setMessage(`Ustawiono podpis R01 dla ${docs.length} dni.`)
     } catch (err) {
-      setMessage(`R01: ${err.message}`)
+      setMessage(err.message || `R01: ${err.message}`)
     }
   }
 
@@ -2934,16 +2927,18 @@ function App() {
     if (patch.cleaning) nextData.cleaning = { ...(doc.data?.cleaning || {}), ...patch.cleaning }
     const payload = {
       data: nextData,
-      status: 'P',
-      updated_at: new Date().toISOString()
+      status: 'P'
     }
     if (signedBy !== undefined) payload.signed_by_operator = signedBy
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-      if (error) throw error
-      mergeHaccpDoc(doc.id, payload)
+      const row = await patchHaccpDocument(supabase, doc.id, payload, 'R02: zapis')
+      mergeHaccpDoc(doc.id, {
+        data: row.data,
+        signed_by_operator: row.signed_by_operator,
+        status: row.status
+      })
     } catch (err) {
-      setMessage(`R02: błąd zapisu – ${err.message}`)
+      setMessage(err.message || `R02: błąd zapisu – ${err.message}`)
     }
   }
 
@@ -2965,16 +2960,13 @@ function App() {
         for (const col of nextColumns) {
           cleaning[col.id] = old[col.id] !== undefined && old[col.id] !== '' ? old[col.id] : (sunday ? '' : (col.auto_m ? 'M' : ''))
         }
-        const payload = {
-          data: { ...(doc.data || {}), machine_columns: nextColumns, cleaning },
-          updated_at: new Date().toISOString()
-        }
-        const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-        if (error) throw error
-        mergeHaccpDoc(doc.id, payload)
+        const row = await patchHaccpDocument(supabase, doc.id, {
+          data: { ...(doc.data || {}), machine_columns: nextColumns, cleaning }
+        }, 'R02: kolumny')
+        mergeHaccpDoc(doc.id, { data: row.data })
       }
     } catch (err) {
-      setMessage(`R02: ${err.message}`)
+      setMessage(err.message || `R02: ${err.message}`)
     }
   }
 
@@ -3012,16 +3004,12 @@ function App() {
     if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów R02.' : 'Brak wpisów R02.'); return }
     try {
       for (const doc of docs) {
-        const { error } = await supabase.from('haccp_documents').update({
-          signed_by_operator: employeeName,
-          updated_at: new Date().toISOString()
-        }).eq('id', doc.id)
-        if (error) throw error
-        mergeHaccpDoc(doc.id, { signed_by_operator: employeeName })
+        const row = await patchHaccpDocument(supabase, doc.id, { signed_by_operator: employeeName }, 'R02: podpis zbiorczy')
+        mergeHaccpDoc(doc.id, { signed_by_operator: row.signed_by_operator })
       }
       setMessage(`Ustawiono podpis R02 dla ${docs.length} dni.`)
     } catch (err) {
-      setMessage(`R02: ${err.message}`)
+      setMessage(err.message || `R02: ${err.message}`)
     }
   }
 

@@ -4,7 +4,7 @@
 import { normalizePn } from './haccpFormsEngine'
 import { col, dval, buildPeriodGroups, periodLabel, buildManualMonthlyHtml, buildManualExcelRows } from './haccpDocShared'
 
-export const RAPORTY_ENGINE_VERSION = '1.3'
+export const RAPORTY_ENGINE_VERSION = '1.4'
 
 export const RAPORTY_CARDS = [
   ['R00', 'R00 – Dopuszczenie do pracy', 'Raport dopuszczenia pracowników do pracy', 'register'],

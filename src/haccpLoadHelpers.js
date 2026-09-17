@@ -20,6 +20,23 @@ export function throwIfNoHaccpWriteResult(data, error, context = 'Zapis kartotek
   return row
 }
 
+/** UPDATE haccp_documents z weryfikacją zapisu (RLS / 0 wierszy). */
+export async function patchHaccpDocument(client, docId, payload, context = 'Zapis kartoteki') {
+  if (!client) throw new Error(`${context}: brak połączenia z Supabase.`)
+  if (!docId) throw new Error(`${context}: brak ID dokumentu — odśwież kartotekę.`)
+  const body = {
+    ...payload,
+    updated_at: payload.updated_at || new Date().toISOString()
+  }
+  const { data, error } = await client
+    .from('haccp_documents')
+    .update(body)
+    .eq('id', docId)
+    .select(HACCP_DOC_LIST_SELECT)
+    .maybeSingle()
+  return throwIfNoHaccpWriteResult(data, error, context)
+}
+
 /** Wspólne pola SELECT dla listy kartotek (load + batch insert). */
 export const HACCP_DOC_LIST_SELECT =
   'id, document_type, lot_id, document_date, product_name, lot_no, supplier_name, document_no, chamber_code, qty, status, data, signed_by_operator, signed_by_admin, document_version, created_at'
