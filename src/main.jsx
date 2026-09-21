@@ -6,7 +6,8 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, removeDuplicateK01Documents, cancelStuckInProgressImport, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError, IMPORT_SAVE_ENGINE_VERSION } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers, labelForK03ClassFilter } from './k03Engine'
+import { extractPrintDocumentParts, buildCombinedLandscapePrintHtml, HACCP_BULK_PDF_VERSION } from './haccpBulkPdf'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
@@ -1051,44 +1052,56 @@ function App() {
         </label>
       </div>
 
-      {isK03 && <div className="docs-sidebar-block docs-sidebar-class-filter">
-        <h4>Klasa / asortyment</h4>
+      {(isK03 || docsFilter === 'K01') && <div className="docs-sidebar-block docs-sidebar-class-filter">
+        <h4>{docsFilter === 'K01' ? 'Asortyment surowca (K01)' : 'Klasa / asortyment (K03)'}</h4>
         {(k03AssortmentFilter !== 'all' || docsWorkflowFilter !== 'all' || docsDateFrom || docsDateTo) && (
-          <p className="hint"><button type="button" className="linkish mini" onClick={resetK03SidebarFilters}>Wyczyść filtry K03</button></p>
+          <p className="hint"><button type="button" className="linkish mini" onClick={resetK03SidebarFilters}>Wyczyść filtry {docsFilter}</button></p>
         )}
         <label>Wybierz klasę owocu
           <select className="k03-class-filter-select" value={k03AssortmentFilter} onChange={e => setK03AssortmentFilter(normalizeK03ClassFilterValue(e.target.value))}>
-            <option value="all">Wszystkie klasy ({k03ClassCounts.get('all') || 0})</option>
+            <option value="all">Wszystkie klasy ({kartotekaClassCounts.get('all') || 0})</option>
             {K03_CLASS_FILTER_TREE.map(family => (
               <optgroup key={family.id} label={family.label}>
                 <option value={`group:${family.id}`}>
-                  Cała {family.label} ({k03ClassCounts.get(`group:${family.id}`) || 0})
+                  Cała {family.label} ({kartotekaClassCounts.get(`group:${family.id}`) || 0})
                 </option>
                 {(family.variants || []).map(variant => (
                   <option key={variant.id} value={`variant:${variant.id}`}>
-                    {variant.label} ({k03ClassCounts.get(`variant:${variant.id}`) || 0})
+                    {variant.label} ({kartotekaClassCounts.get(`variant:${variant.id}`) || 0})
                   </option>
                 ))}
               </optgroup>
             ))}
-            {k03ExtraVariants.length > 0 && (
+            {docsFilter === 'K03' && k03ExtraVariants.length > 0 && (
               <optgroup label="Inne w danych">
                 {k03ExtraVariants.map(variant => (
                   <option key={variant.id} value={`variant:${variant.id}`}>
-                    {variant.label} ({k03ClassCounts.get(`variant:${variant.id}`) || 0})
+                    {variant.label} ({kartotekaClassCounts.get(`variant:${variant.id}`) || 0})
                   </option>
                 ))}
               </optgroup>
             )}
           </select>
         </label>
-        <label>Podpis zbiorczy
-          <select value={defaultK03Employee} onChange={e => setDefaultK03Employee(e.target.value)}>
-            <option value="">—</option>
-            {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
-          </select>
-        </label>
-        <button type="button" className="mini secondary" onClick={() => setEmployeeForVisibleK03Forms(defaultK03Employee, true)}>Uzupełnij puste podpisy</button>
+        <button
+          type="button"
+          className="secondary mini"
+          disabled={k03AssortmentFilter === 'all'}
+          onClick={() => docsFilter === 'K01' ? downloadBulkK01PdfByAssortment() : downloadBulkK03PdfByAssortment()}
+          title={k03AssortmentFilter === 'all' ? 'Najpierw wybierz asortyment' : 'Jeden plik PDF — Zapisz jako PDF w oknie druku'}
+        >
+          Pobierz PDF — wszystkie kartoteki
+        </button>
+        <p className="hint">PDF zbiorczy {HACCP_BULK_PDF_VERSION}: podział na warianty asortymentu, jeden zapis w drukarce.</p>
+        {isK03 && <>
+          <label>Podpis zbiorczy
+            <select value={defaultK03Employee} onChange={e => setDefaultK03Employee(e.target.value)}>
+              <option value="">—</option>
+              {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+            </select>
+          </label>
+          <button type="button" className="mini secondary" onClick={() => setEmployeeForVisibleK03Forms(defaultK03Employee, true)}>Uzupełnij puste podpisy</button>
+        </>}
       </div>}
 
       {isK02 && <div className="docs-sidebar-block">
@@ -3544,7 +3557,7 @@ function App() {
     return sourceDocs
       .filter(d => d.document_type === docsFilter)
       .filter(d => {
-        if (docsFilter !== 'K03') return true
+        if (docsFilter !== 'K03' && docsFilter !== 'K01') return true
         const group = d.product_group || d.data?.product_group || productGroupForName(d.product_name || '')
         return matchesK03ClassFilter(d.product_name, group, k03AssortmentFilter)
       })
@@ -3602,6 +3615,22 @@ function App() {
   }, [syntheticK03Docs, wzQueueLines, docsDateFrom, docsDateTo])
 
   const k03AssortmentCounts = k03ClassCounts
+
+  const kartotekaClassCounts = useMemo(() => {
+    if (docsFilter === 'K03') return k03ClassCounts
+    if (docsFilter === 'K01') {
+      const items = (haccpDocs || []).filter(d => d.document_type === 'K01' && matchesDocsDateRange(d.document_date))
+      const counts = new Map([['all', items.length]])
+      for (const d of items) {
+        const group = d.product_group || productGroupForName(d.product_name || '')
+        const variant = normalizeFifoProductKey(d.product_name)
+        counts.set(`group:${group}`, (counts.get(`group:${group}`) || 0) + 1)
+        counts.set(`variant:${variant}`, (counts.get(`variant:${variant}`) || 0) + 1)
+      }
+      return counts
+    }
+    return new Map([['all', 0]])
+  }, [docsFilter, k03ClassCounts, haccpDocs, docsDateFrom, docsDateTo])
 
   const k03YearOptions = useMemo(() => {
     const years = new Set()
@@ -3666,7 +3695,7 @@ function App() {
     const filtersActive = Boolean(
       docsDateFrom || docsDateTo || docsWorkflowFilter !== 'all' ||
       haccpSearch.trim() || haccpStatusFilter !== 'all' ||
-      (docsFilter === 'K03' && k03AssortmentFilter !== 'all')
+      ((docsFilter === 'K03' || docsFilter === 'K01') && k03AssortmentFilter !== 'all')
     )
     return {
       filteredDocs: haccpDocsForFilter.length,
@@ -3830,6 +3859,85 @@ function App() {
     } catch (_) {
       /* informacyjne */
     }
+  }
+
+  function groupDocsByProductLabel(docs) {
+    const map = new Map()
+    for (const doc of docs || []) {
+      const key = normalizeFifoProductKey(doc.product_name) || String(doc.product_name || 'inne').trim()
+      const label = String(doc.product_name || key).trim() || 'Bez nazwy'
+      if (!map.has(key)) map.set(key, { key, label, docs: [] })
+      map.get(key).docs.push(doc)
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label, 'pl'))
+  }
+
+  function downloadBulkK03PdfByAssortment() {
+    if (k03AssortmentFilter === 'all') {
+      setMessage('K03 PDF: wybierz asortyment (np. Cała Malina) z listy w panelu bocznym.')
+      return
+    }
+    const docs = [...haccpDocsForFilter].sort((a, b) =>
+      String(a.document_date || '').localeCompare(String(b.document_date || ''))
+      || String(a.document_no || '').localeCompare(String(b.document_no || ''))
+    )
+    if (!docs.length) {
+      setMessage('K03 PDF: brak kartotek dla wybranego asortymentu i filtrów dat.')
+      return
+    }
+    const assortmentLabel = labelForK03ClassFilter(k03AssortmentFilter, k03ExtraVariants)
+    const subgroups = groupDocsByProductLabel(docs)
+    const sampleParts = extractPrintDocumentParts(buildK03PrintHtml(docs[0]))
+    const sections = subgroups.map(sg => ({
+      heading: subgroups.length > 1 ? `${assortmentLabel} · ${sg.label}` : assortmentLabel,
+      pages: sg.docs.map(d => extractPrintDocumentParts(buildK03PrintHtml(d)).body)
+    }))
+    const dateHint = [docsDateFrom, docsDateTo].filter(Boolean).join(' – ') || 'wszystkie daty w filtrze'
+    const html = buildCombinedLandscapePrintHtml({
+      title: `K03 ${assortmentLabel}`,
+      subtitle: `K03 · ${assortmentLabel} · ${docs.length} kart · ${dateHint}`,
+      styleBlocks: [sampleParts.styles],
+      sections
+    })
+    printHtmlInIframe(html)
+    setMessage(`K03: ${docs.length} kart w jednym wydruku. W oknie drukarki wybierz «Zapisz jako PDF».`)
+  }
+
+  function downloadBulkK01PdfByAssortment() {
+    if (k03AssortmentFilter === 'all') {
+      setMessage('K01 PDF: wybierz asortyment surowca (np. Cała Malina) z listy w panelu bocznym.')
+      return
+    }
+    const groups = haccpMonthlyGroups
+      .filter(g => g.type === 'K01')
+      .sort((a, b) => String(a.period || '').localeCompare(String(b.period || '')) || String(a.product || '').localeCompare(String(b.product || ''), 'pl'))
+    if (!groups.length) {
+      setMessage('K01 PDF: brak kartotek miesięcznych dla wybranego asortymentu.')
+      return
+    }
+    const assortmentLabel = labelForK03ClassFilter(k03AssortmentFilter, k03ExtraVariants)
+    const byProduct = new Map()
+    for (const g of groups) {
+      const label = g.product || 'Bez nazwy'
+      if (!byProduct.has(label)) byProduct.set(label, [])
+      byProduct.get(label).push(g)
+    }
+    const productSections = Array.from(byProduct.entries()).sort((a, b) => a[0].localeCompare(b[0], 'pl'))
+    const sampleParts = extractPrintDocumentParts(buildK01MonthlyHtml(groups[0]))
+    const sections = productSections.map(([productLabel, productGroups]) => ({
+      heading: productSections.length > 1 ? `${assortmentLabel} · ${productLabel}` : assortmentLabel,
+      pages: productGroups.map(g => extractPrintDocumentParts(buildK01MonthlyHtml(g)).body)
+    }))
+    const totalDocs = groups.reduce((n, g) => n + (g.docs?.length || 0), 0)
+    const dateHint = [docsDateFrom, docsDateTo].filter(Boolean).join(' – ') || 'wszystkie daty w filtrze'
+    const html = buildCombinedLandscapePrintHtml({
+      title: `K01 ${assortmentLabel}`,
+      subtitle: `K01 · ${assortmentLabel} · ${groups.length} kartotek miesięcznych · ${totalDocs} wpisów · ${dateHint}`,
+      styleBlocks: [sampleParts.styles],
+      sections
+    })
+    printHtmlInIframe(html)
+    setMessage(`K01: ${groups.length} kartotek (${totalDocs} wpisów) w jednym wydruku. Wybierz «Zapisz jako PDF».`)
   }
 
   function printHtmlInIframe(html) {

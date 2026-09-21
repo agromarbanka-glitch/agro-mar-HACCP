@@ -818,6 +818,27 @@ function k03VariantMatchesFilter(variant, filterVariant) {
   )
 }
 
+/** Etykieta filtra asortymentu (panel K01/K03, PDF zbiorczy). */
+export function labelForK03ClassFilter(filter = 'all', extraVariants = []) {
+  const normalized = normalizeK03ClassFilterValue(filter)
+  if (normalized === 'all') return 'Wszystkie'
+  if (normalized.startsWith('group:')) {
+    const id = normalized.slice(6)
+    const fam = K03_CLASS_FILTER_TREE.find(f => f.id === id)
+    return fam ? `Cała ${fam.label}` : id
+  }
+  if (normalized.startsWith('variant:')) {
+    const id = normalized.slice(8)
+    for (const fam of K03_CLASS_FILTER_TREE) {
+      const v = (fam.variants || []).find(x => x.id === id)
+      if (v) return `${fam.label} – ${v.label}`
+    }
+    const extra = (extraVariants || []).find(x => x.id === id)
+    return extra?.label || id
+  }
+  return String(filter)
+}
+
 export function matchesK03ClassFilter(productName, productGroup = '', filter = 'all') {
   const normalized = normalizeK03ClassFilterValue(filter)
   if (normalized === 'all') return true
