@@ -1207,6 +1207,8 @@ function App() {
         k03_edits: {
           lot_no: mergedDoc.lot_no,
           wz_date: mergedDoc.data?.wz_date || mergedDoc.document_date,
+          production_date: mergedDoc.data?.production_date,
+          live_traps_status: mergedDoc.data?.live_traps_status,
           rawRowPatches: mergedOverride.rawRowPatches || null
         }
       }
@@ -5376,13 +5378,13 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ. Numer partii, datę WZ i nr PZ możesz poprawić ręcznie – zapis po wyjściu z pola.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg. Numer partii, datę WZ i nr PZ możesz poprawić ręcznie – zapis następuje po wyjściu z pola.`}</span>
+          <span className="hint">{doc.frozen ? 'Zamrożony – FIFO nie zmieni przypisanych PZ. Numer partii, datę produkcji i nr PZ możesz poprawić ręcznie – zapis po wyjściu z pola.' : `Jeden formularz K03 = jedna sprzedaż (WZ). Suma PZ = ${paper.rawTotal.toLocaleString('pl-PL')} kg, WZ = ${paper.saleTotal.toLocaleString('pl-PL')} kg. Data produkcji, numer partii i nr PZ możesz poprawić ręcznie – zapis po wyjściu z pola.`}</span>
         </div>
         <table className="k03-head"><tbody><tr><td className="company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b><br/>Wersja I/2024</td><td className="title"><b>Karta K03 - Karta identyfikacji partii produktu</b></td><td className="meta"><b>Rok:</b> {paper.year}<br/><b>Miesiąc:</b> {paper.month}<br/><b>Strona:</b></td></tr></tbody></table>
         <table className="k03-fields"><tbody>
-          <tr><td><b>Nazwa produktu:</b> {paper.productName}</td><td><b>Data sprzedaży (WZ):</b>
-            <input className="cell-input no-print" type="date" defaultValue={paper.wzDate} key={`k03-wz-date-${doc.id}-${paper.wzDate}`} onBlur={e => { if (e.target.value && e.target.value !== paper.wzDate) patchK03Document(doc, { wz_date: e.target.value, document_date: e.target.value }) }} />
-            <span className="print-only">{paper.wzDate}</span>
+          <tr><td><b>Nazwa produktu:</b> {paper.productName}</td><td><b>Data produkcji:</b>
+            <input className="cell-input no-print" type="date" defaultValue={paper.productionDate} key={`k03-prod-date-${doc.id}-${paper.productionDate}`} onBlur={e => { if (e.target.value && e.target.value !== paper.productionDate) patchK03Document(doc, { production_date: e.target.value }) }} />
+            <span className="print-only">{paper.productionDate}</span>
           </td></tr>
           <tr><td><b>Numer WZ:</b> {paper.wzNo}</td><td><b>Ilość WZ (kg):</b> {paper.saleTotal.toLocaleString('pl-PL')}</td></tr>
           <tr><td><b>Nadany numer partii wyrobu gotowego:</b>
@@ -5424,6 +5426,16 @@ function App() {
         </tbody></table>
         {paper.shortage > 0 && <div className="haccp-warning no-print">Brak {paper.shortage.toLocaleString('pl-PL')} kg surowca dostępnego na dzień WZ ({paper.wzDate}). System nie dobiera PZ z datą późniejszą niż WZ.</div>}
         {doc.data?.invalidFuturePz && <div className="haccp-warning no-print">Wykryto PZ z datą późniejszą niż WZ – popraw datę w zakładce PZ / FIFO.</div>}
+        <table className="k03-footer"><tbody>
+          <tr><td className="left"><b>Stan pułapek żywołownych:</b>{' '}
+            <select className="mini-select no-print" value={paper.liveTrapsStatus} onChange={e => patchK03Document(doc, { live_traps_status: e.target.value })}>
+              <option value="P">P</option>
+              <option value="N">N</option>
+            </select>
+            <span className="print-only"><b>{paper.liveTrapsStatus}</b></span>
+          </td></tr>
+        </tbody></table>
+        <p className="k03-traps-legend hint">* <b>P</b> – pułapki puste, stacja w nienaruszonym stanie. ** <b>N</b> – wykryto obecność gryzoni w stacji.</p>
       </div>
     }
 

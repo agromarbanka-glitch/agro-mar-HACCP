@@ -5,7 +5,7 @@
 
 import { getK03PrefixRules, syncK03LotSequences } from './appSettingsEngine'
 
-export const K03_ENGINE_VERSION = '4.3'
+export const K03_ENGINE_VERSION = '4.4'
 
 /** Supabase/PostgREST zwraca max ~1000 wierszy na zapytanie — paginacja po id (jak magazyn wartości). */
 const FETCH_PAGE_SIZE = 1000
@@ -281,6 +281,24 @@ function finalizeK03LotNumbers(forms, productMap, outputLotByKey = new Map()) {
   })
 }
 
+/** Data produkcji partii (przerób → data przerobu; bez przerobu → data WZ). Ręczna wartość w data.production_date / k03_edits. */
+export function resolveK03ProductionDate(doc) {
+  const stored = doc?.data?.k03_edits?.production_date ?? doc?.data?.production_date
+  if (stored) return String(stored).slice(0, 10)
+  const wf = doc?.data?.k03_workflow || {}
+  const mode = wf.mode || (wf.przerob_date ? 'przerob' : '')
+  if (mode === 'przerob') {
+    return String(wf.przerob_date || wf.fifo_cutoff_date || doc?.document_date || '').slice(0, 10)
+  }
+  return String(doc?.data?.wz_date || doc?.document_date || '').slice(0, 10)
+}
+
+/** Stan pułapek żywołownych na K03 — domyślnie P (zgodnie ze wzorem). */
+export function resolveK03LiveTrapsStatus(doc) {
+  const stored = doc?.data?.k03_edits?.live_traps_status ?? doc?.data?.live_traps_status
+  return stored === 'N' ? 'N' : 'P'
+}
+
 export function buildK03PaperData(doc) {
   const rawRows = doc?.data?.rawRows || []
   const saleRow = (doc?.data?.saleRows || [])[0] || {}
@@ -289,6 +307,8 @@ export function buildK03PaperData(doc) {
   const rawTotal = Number(doc?.data?.rawTotal || 0)
   const signed = doc?.signed_by_operator || saleRow.signed_by || ''
   const receiver = formatK03Receiver(doc?.data?.odbiorca || saleRow.receiver || '')
+  const productionDate = resolveK03ProductionDate(doc)
+  const liveTrapsStatus = resolveK03LiveTrapsStatus(doc)
 
   const rows = Array.from({ length: maxRows }).map((_, i) => {
     const r = rawRows[i] || {}
@@ -310,12 +330,14 @@ export function buildK03PaperData(doc) {
   })
 
   return {
-    year: String(doc?.document_date || '').slice(0, 4),
-    month: String(doc?.document_date || '').slice(5, 7),
+    year: String(productionDate || doc?.document_date || '').slice(0, 4),
+    month: String(productionDate || doc?.document_date || '').slice(5, 7),
     productName: doc?.product_name || '',
     lotNo: doc?.lot_no || '',
     wzNo: doc?.document_no || '',
     wzDate: doc?.document_date || '',
+    productionDate,
+    liveTrapsStatus,
     saleTotal,
     rawTotal,
     signed,
@@ -337,7 +359,8 @@ export function buildK03PrintHtml(doc) {
   const warn = paper.shortage > 0
     ? `<div style="font-weight:bold;color:#900;margin-top:6px">UWAGA: brak ${paper.shortage.toLocaleString('pl-PL')} kg surowca dostępnego na dzień WZ.</div>`
     : ''
-  return `<!doctype html><html><head><meta charset="utf-8"><title>K03 ${escapeHtml(paper.wzNo)}</title><style>@page{size:A4 landscape;margin:7mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:3px 2px;text-align:center;vertical-align:middle;font-size:9.5pt;line-height:1.06;word-wrap:break-word;overflow-wrap:anywhere}.company{width:33%;font-weight:bold}.title{width:50%;font-weight:bold}.meta{width:17%;text-align:left}.field td{height:28px;text-align:left;font-size:10pt}.section{font-weight:bold;text-align:center;background:#eee}.sum{font-weight:bold;text-align:right}.col-pz{width:11%}.col-date{width:8%}.col-dost{width:10%}.col-qty{width:7%}.col-wz{width:11%}.col-odb{width:14%}.col-sign{width:10%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja I/2024</td><td class="title">Karta K03 - Karta identyfikacji partii produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(paper.year)}<br><br><b>Miesiąc:</b> ${escapeHtml(paper.month)}<br><br><b>Strona:</b></td></tr></tbody></table><table class="field"><tbody><tr><td><b>Nazwa produktu:</b> ${escapeHtml(paper.productName)}</td><td><b>Data sprzedaży (WZ):</b> ${escapeHtml(paper.wzDate)}</td></tr><tr><td><b>Numer WZ:</b> ${escapeHtml(paper.wzNo)}</td><td><b>Ilość WZ (kg):</b> ${escapeHtml(paper.saleTotal.toLocaleString('pl-PL'))}</td></tr><tr><td><b>Nadany numer partii wyrobu gotowego:</b> ${escapeHtml(paper.lotNo)}</td><td><b>Odbiorca:</b> ${escapeHtml(paper.receiver || '-')}</td></tr></tbody></table><table><thead><tr><th class="section" colspan="5">Dane dotyczące dostaw surowców składających się na partię</th><th style="border-left:3px solid #111" class="section" colspan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th style="border-left:3px solid #111">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>${rows}<tr><td colspan="4" class="sum">Suma surowca:</td><td><b>${escapeHtml(paper.rawTotal.toLocaleString('pl-PL'))}</b></td><td style="border-left:3px solid #111" colspan="4" class="sum">Suma sprzedana:</td><td><b>${escapeHtml(paper.saleTotal.toLocaleString('pl-PL'))}</b></td><td></td></tr></tbody></table>${warn}<script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  const trapsFooter = `<table class="field" style="margin-top:8px"><tbody><tr><td colspan="2"><b>Stan pułapek żywołownych:</b> <b>${escapeHtml(paper.liveTrapsStatus)}</b></td></tr></tbody></table><p style="font-size:9pt;margin-top:4px">* P – pułapki puste, stacja w nienaruszonym stanie. ** N – wykryto obecność gryzoni w stacji.</p>`
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K03 ${escapeHtml(paper.wzNo)}</title><style>@page{size:A4 landscape;margin:7mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:3px 2px;text-align:center;vertical-align:middle;font-size:9.5pt;line-height:1.06;word-wrap:break-word;overflow-wrap:anywhere}.company{width:33%;font-weight:bold}.title{width:50%;font-weight:bold}.meta{width:17%;text-align:left}.field td{height:28px;text-align:left;font-size:10pt}.section{font-weight:bold;text-align:center;background:#eee}.sum{font-weight:bold;text-align:right}.col-pz{width:11%}.col-date{width:8%}.col-dost{width:10%}.col-qty{width:7%}.col-wz{width:11%}.col-odb{width:14%}.col-sign{width:10%}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598<br>Wersja I/2024</td><td class="title">Karta K03 - Karta identyfikacji partii produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(paper.year)}<br><br><b>Miesiąc:</b> ${escapeHtml(paper.month)}<br><br><b>Strona:</b></td></tr></tbody></table><table class="field"><tbody><tr><td><b>Nazwa produktu:</b> ${escapeHtml(paper.productName)}</td><td><b>Data produkcji:</b> ${escapeHtml(paper.productionDate)}</td></tr><tr><td><b>Numer WZ:</b> ${escapeHtml(paper.wzNo)}</td><td><b>Ilość WZ (kg):</b> ${escapeHtml(paper.saleTotal.toLocaleString('pl-PL'))}</td></tr><tr><td><b>Nadany numer partii wyrobu gotowego:</b> ${escapeHtml(paper.lotNo)}</td><td><b>Odbiorca:</b> ${escapeHtml(paper.receiver || '-')}</td></tr></tbody></table><table><thead><tr><th class="section" colspan="5">Dane dotyczące dostaw surowców składających się na partię</th><th style="border-left:3px solid #111" class="section" colspan="6">Dane dotyczące sprzedaży partii gotowego produktu</th></tr><tr><th>Lp.</th><th>Nr faktury / PZ</th><th>Data zakupu</th><th>Dostawca</th><th>Ilość surowca (kg)</th><th style="border-left:3px solid #111">Lp.</th><th>Nr faktury / WZ</th><th>Data</th><th>Odbiorca</th><th>Ilość w kg</th><th>Podpis uzupełniającego wpisy</th></tr></thead><tbody>${rows}<tr><td colspan="4" class="sum">Suma surowca:</td><td><b>${escapeHtml(paper.rawTotal.toLocaleString('pl-PL'))}</b></td><td style="border-left:3px solid #111" colspan="4" class="sum">Suma sprzedana:</td><td><b>${escapeHtml(paper.saleTotal.toLocaleString('pl-PL'))}</b></td><td></td></tr></tbody></table>${trapsFooter}${warn}<script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildK03ExcelRows(doc) {
@@ -345,7 +368,7 @@ export function buildK03ExcelRows(doc) {
   const rows = []
   rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.', '', '', '', '', '', 'Karta K03 - Karta identyfikacji partii produktu', '', '', '', ''])
   rows.push([`Rok: ${paper.year}`, '', '', '', '', `Miesiąc: ${paper.month}`, '', '', '', '', ''])
-  rows.push([`Nazwa produktu: ${paper.productName}`, '', '', '', '', `Data sprzedaży (WZ): ${paper.wzDate}`, '', '', '', '', ''])
+  rows.push([`Nazwa produktu: ${paper.productName}`, '', '', '', '', `Data produkcji: ${paper.productionDate}`, '', '', '', '', ''])
   rows.push([`Numer WZ: ${paper.wzNo}`, '', '', '', '', `Ilość WZ (kg): ${paper.saleTotal}`, '', '', '', '', ''])
   rows.push([`Nadany numer partii wyrobu gotowego: ${paper.lotNo}`, '', '', '', '', `Odbiorca: ${paper.receiver || '-'}`, '', '', '', '', ''])
   rows.push(['Dane dotyczące dostaw surowców składających się na partię', '', '', '', '', 'Dane dotyczące sprzedaży partii gotowego produktu', '', '', '', '', ''])
@@ -369,6 +392,8 @@ export function buildK03ExcelRows(doc) {
   if (paper.shortage > 0) {
     rows.push(['UWAGA', `Brak ${paper.shortage} kg surowca na dzień WZ`, '', '', '', '', '', '', '', '', ''])
   }
+  rows.push(['Stan pułapek żywołownych:', paper.liveTrapsStatus, '', '', '', '', '', '', '', '', ''])
+  rows.push(['* P – pułapki puste; ** N – obecność gryzoni', '', '', '', '', '', '', '', '', '', ''])
   return rows
 }
 
@@ -1489,6 +1514,13 @@ export function applyK03DocEdits(doc, edits = {}) {
     signed_by: signed
   }))
 
+  const productionDate = edits.production_date !== undefined
+    ? String(edits.production_date).slice(0, 10)
+    : (doc.data?.production_date || resolveK03ProductionDate(doc))
+  const liveTrapsStatus = edits.live_traps_status !== undefined
+    ? (edits.live_traps_status === 'N' ? 'N' : 'P')
+    : resolveK03LiveTrapsStatus(doc)
+
   return {
     ...doc,
     lot_no: lotNo,
@@ -1497,6 +1529,8 @@ export function applyK03DocEdits(doc, edits = {}) {
     data: {
       ...doc.data,
       wz_date: wzDate,
+      production_date: productionDate,
+      live_traps_status: liveTrapsStatus,
       rawRows,
       saleRows,
       rawTotal: totals.rawTotal,
@@ -1511,6 +1545,8 @@ export function k03EditsFromSnapshot(snap) {
   return {
     lot_no: stored.lot_no ?? snap.lot_no,
     wz_date: stored.wz_date ?? snap.data?.wz_date ?? snap.document_date,
+    production_date: stored.production_date ?? snap.data?.production_date,
+    live_traps_status: stored.live_traps_status ?? snap.data?.live_traps_status,
     signed_by_operator: snap.signed_by_operator,
     rawRowPatches: stored.rawRowPatches,
     rawRows: stored.rawRows
@@ -1607,8 +1643,12 @@ export async function saveK03Snapshot(client, doc, { freeze = false, userRole = 
       k03_edits: doc.data?.k03_edits || {
         lot_no: doc.lot_no,
         wz_date: doc.data?.wz_date || doc.document_date,
+        production_date: doc.data?.production_date || resolveK03ProductionDate(doc),
+        live_traps_status: doc.data?.live_traps_status || resolveK03LiveTrapsStatus(doc),
         rawRowPatches: doc.data?.k03_edits?.rawRowPatches || null
       },
+      production_date: doc.data?.production_date || resolveK03ProductionDate(doc),
+      live_traps_status: doc.data?.live_traps_status || resolveK03LiveTrapsStatus(doc),
       k03_workflow: doc.data?.k03_workflow
         ? { ...doc.data.k03_workflow, lot_no: doc.lot_no }
         : doc.data?.k03_workflow,
