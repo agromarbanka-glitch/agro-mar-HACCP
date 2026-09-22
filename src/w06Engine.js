@@ -6,7 +6,7 @@ import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
 import * as XLSX from 'xlsx'
 
-export const W06_ENGINE_VERSION = '1.9'
+export const W06_ENGINE_VERSION = '2.0'
 
 /** Domyślny zestaw surowców (lewa kolumna W06) – dopisywany automatycznie. */
 export const W06_DEFAULT_RAW_ITEMS = ['Truskawka', 'Malina', 'Porzeczka', 'Jabłko', 'Wiśnia']
@@ -79,15 +79,41 @@ export function w06CompanyFingerprint(name = '') {
     .trim()
 }
 
-/** Klucz dopasowania tej samej firmy (NIP albo pierwsze słowo nazwy, np. „KORAL …"). */
+/** Klucz dopasowania tej samej firmy – po nazwie (pierwsze słowo ≥4 zn.), NIP tylko gdy brak sensownej nazwy. */
 export function w06DedupeKey(party) {
+  const fp = w06CompanyFingerprint(party?.company_name || party?.supplier_name || party?.name || '')
+  if (fp.length >= 3) {
+    const first = fp.split(' ').filter(Boolean)[0] || fp
+    if (first.length >= 4) return `co:${first}`
+    return `name:${fp.slice(0, 80)}`
+  }
   const nip = normalizeNip(party?.nip)
   if (nip) return `nip:${nip}`
-  const fp = w06CompanyFingerprint(party?.company_name || party?.supplier_name || party?.name || '')
-  if (!fp || fp.length < 3) return ''
-  const first = fp.split(' ').filter(Boolean)[0] || fp
-  if (first.length >= 4) return `co:${first}`
-  return `name:${fp.slice(0, 80)}`
+  return ''
+}
+
+export function w06LooksLikeCompanyName(text, companyHint = '') {
+  const p = w06CompanyFingerprint(text)
+  if (!p || p.length < 4) return false
+  const hint = w06CompanyFingerprint(companyHint)
+  if (hint && (p === hint || p.includes(hint) || hint.includes(p))) return true
+  if (/spzoo|ograniczona odpowiedzialnoscia|spolka akcyjna|\bsa\b/.test(p)) return true
+  if (p.length > 36 && /przedsiebiorstwo|wielobranzow|handlow|produkcyjn|dostawc/.test(p)) return true
+  return false
+}
+
+export function w06SanitizeSupplierProduct(companyName, productName) {
+  const product = String(productName || '').trim()
+  if (!product) return ''
+  if (w06LooksLikeCompanyName(product, companyName)) return ''
+  if (/^\d{10}$/.test(normalizeNip(product))) return ''
+  return product.slice(0, 80)
+}
+
+/** Usuwa z listy surowców wpisy będące nazwą firmy (błędny import). */
+export function w06CleanItemListForSupplier(itemName, companyName) {
+  const kept = w06ParseItemList(itemName).filter(item => !w06LooksLikeCompanyName(item, companyName))
+  return kept.join('; ').slice(0, 160)
 }
 
 export function w06MatchKeyFromDoc(doc) {
@@ -529,12 +555,14 @@ function w06HeaderColumnKind(label) {
   const h = w06NormHeaderLabel(label)
   if (!h) return null
   if (/^(nip|nip firmy|numer nip)$/.test(h) || h.includes('nip')) return 'nip'
+  if (/^owoc|^owoce|owoc$|owoce$/.test(h) || (/nazwa/.test(h) && /owoc|surowiec|towar/.test(h))) return 'product'
   if (
     /dostawca|odbiorca|kontrahent|sprzedawca|nabywca|nazwa firmy|nazwa dostawcy|dane firmy|dostawca\/odbiorca/.test(h) ||
+    (/nazwa/.test(h) && /dostawc|firm|kontrahent/.test(h)) ||
     h === 'firma' ||
     h === 'nazwa'
   ) return 'company'
-  if (/surowiec|towar|produkt|asortyment|material|materia|towar\/produkt|surowiec\/towar|zakres/.test(h)) return 'product'
+  if (/surowiec|towar|produkt|owoc|owoce|asortyment|material|materia|towar\/produkt|surowiec\/towar|zakres/.test(h)) return 'product'
   if (/^adres|siedziba|ulica|miejscowosc|miejscowość/.test(h)) return 'address'
   return null
 }
@@ -625,7 +653,7 @@ function buildSyntheticRowsFromSupplierSheet(sheet) {
         documentNo: ''
       })
     }
-    return { rows: synthetic, dataRows: synthetic.length, detected: true }
+    return { rows: synthetic, dataRows: synthetic.length, detected: true, usedHeader: true }
   }
 
   if (sheetLooksLikeWarehouseExport(sheet)) {
@@ -645,12 +673,24 @@ function buildSyntheticRowsFromSupplierSheet(sheet) {
     let nip = ''
     const lpLike = /^\d{1,4}$/.test(cells[0].replace(/\s/g, ''))
     if (lpLike && cells.length >= 3) {
-      company = cells[1]
-      product = cells[2]
+      const a = cells[1]
+      const b = cells[2]
+      if (w06LooksLikeCompanyName(b) && !w06LooksLikeCompanyName(a)) {
+        company = b
+        product = w06SanitizeSupplierProduct(b, a)
+      } else {
+        company = a
+        product = w06SanitizeSupplierProduct(a, b)
+      }
       if (cells.length >= 4) nip = normalizeNip(cells[3])
     } else if (cells.length >= 2) {
-      company = cells[0]
-      product = cells[1]
+      if (w06LooksLikeCompanyName(cells[0]) || !w06LooksLikeCompanyName(cells[1])) {
+        company = cells[0]
+        product = w06SanitizeSupplierProduct(cells[0], cells[1])
+      } else {
+        company = cells[1]
+        product = w06SanitizeSupplierProduct(cells[1], cells[0])
+      }
       if (cells.length >= 3 && /^\d{10}$/.test(normalizeNip(cells[2]))) nip = normalizeNip(cells[2])
     }
     if (!company || isAgromarParty(company, nip)) continue
@@ -666,18 +706,30 @@ function buildSyntheticRowsFromSupplierSheet(sheet) {
   }
 
   const detected = synthetic.length > 0
-  return { rows: synthetic, dataRows: synthetic.length, detected }
+  return { rows: synthetic, dataRows: synthetic.length, detected, usedHeader: false }
+}
+
+function scoreW06SupplierSheetAttempt(attempt) {
+  if (!attempt?.rows?.length) return -1
+  let score = attempt.rows.length
+  if (attempt.usedHeader) score += 500_000
+  return score
 }
 
 /** Lista dostawców (.xls/.xlsx) – kolumny Firma/Dostawca + Towar/Surowiec (bez PZ/WZ). */
 export function parseW06SupplierListWorkbook(buffer, fileName = '') {
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
-  let best = { rows: [], dataRows: 0, detected: false }
+  let best = { rows: [], dataRows: 0, detected: false, usedHeader: false }
+  let bestScore = -1
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName]
     if (!sheet) continue
     const attempt = buildSyntheticRowsFromSupplierSheet(sheet)
-    if (attempt.rows.length > best.rows.length) best = attempt
+    const score = scoreW06SupplierSheetAttempt(attempt)
+    if (score > bestScore) {
+      best = attempt
+      bestScore = score
+    }
   }
   if (!best.rows.length) {
     return {
@@ -689,7 +741,10 @@ export function parseW06SupplierListWorkbook(buffer, fileName = '') {
     }
   }
   const beforeDedupe = best.rows.length
-  const parsed = parseW06PartiesFromExcelRows(best.rows, fileName)
+  const parsed = parseW06PartiesFromExcelRows(best.rows, fileName, { supplierList: true })
+  for (const party of parsed.parties) {
+    party.item_name = w06ApplyDefaultRawItems('', party.supplier_kind || 'raw', party.company_name)
+  }
   const dupesInFile = Math.max(0, beforeDedupe - parsed.parties.length)
   parsed.preview = buildW06ExcelPreview(best.rows, parsed.parties, {
     dataRows: best.dataRows,
@@ -706,7 +761,7 @@ export function dedupeW06PartiesBatch(parties) {
 }
 
 /** Grupuje wiersze Excela (PZ/WZ) w unikalnych kontrahentów z asortymentem. */
-export function parseW06PartiesFromExcelRows(rows, fileName = '') {
+export function parseW06PartiesFromExcelRows(rows, fileName = '', { supplierList = false } = {}) {
   const byKey = new Map()
 
   for (const row of rows || []) {
@@ -719,7 +774,9 @@ export function parseW06PartiesFromExcelRows(rows, fileName = '') {
     const dedupeKey = w06DedupeKey({ company_name: name, nip })
     if (!dedupeKey) continue
 
-    const product = String(row.productName || '').trim()
+    const product = supplierList
+      ? ''
+      : w06SanitizeSupplierProduct(name, row.productName)
     const existing = byKey.get(dedupeKey)
 
     if (existing) {
@@ -939,11 +996,11 @@ export function w06RemoveItemName(current, toRemove) {
     .slice(0, 160)
 }
 
-export function w06ApplyDefaultRawItems(itemName, supplierKind = 'raw') {
+export function w06ApplyDefaultRawItems(itemName, supplierKind = 'raw', companyName = '') {
   if (supplierKind === 'recipient' || supplierKind === 'aux') {
-    return String(itemName || '').trim().slice(0, 160)
+    return w06CleanItemListForSupplier(itemName, companyName).slice(0, 160)
   }
-  let cur = String(itemName || '').trim()
+  let cur = w06CleanItemListForSupplier(itemName, companyName)
   for (const fruit of W06_DEFAULT_RAW_ITEMS) {
     cur = w06MergeItemNames(cur, fruit)
   }
@@ -1002,7 +1059,7 @@ export function planW06DuplicateRepairs(docs) {
       if (!nip && d.data?.nip) nip = d.data.nip
     }
     const kind = w06KindPartitionKey(keep)
-    item_name = w06ApplyDefaultRawItems(item_name, kind)
+    item_name = w06ApplyDefaultRawItems(item_name, kind, company_name)
     const company_name = w06LongestCompanyName(group)
     const address = keep.data?.address || group.map(d => d.data?.address).find(Boolean) || ''
     const supplier_name = address ? `${company_name}, ${address}` : company_name
@@ -1034,7 +1091,7 @@ export function buildW06InsertPayload(party) {
     supplier_name: party.supplier_name || party.company_name || '',
     nip: party.nip || '',
     address: party.address || '',
-    item_name: w06ApplyDefaultRawItems(party.item_name || '', data.supplier_kind),
+    item_name: w06ApplyDefaultRawItems(party.item_name || '', data.supplier_kind, data.company_name),
     source_doc_kind: party.source_doc_kind || '',
     source_filename: party.source_filename || '',
     dedupe_key,

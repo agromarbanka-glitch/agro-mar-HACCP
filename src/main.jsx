@@ -52,7 +52,7 @@ import {
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, dedupeW06PartiesBatch, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
   w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine, w06MergeItemNames, w06ParseItemList,
-  w06RemoveItemName, w06ApplyDefaultRawItems, planW06DuplicateRepairs
+  w06RemoveItemName, w06ApplyDefaultRawItems, w06CleanItemListForSupplier, planW06DuplicateRepairs
 } from './w06Engine'
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
 import { buildR11SyncPayloads } from './r11Engine'
@@ -6309,7 +6309,9 @@ function App() {
     for (const doc of w06) {
       const kind = doc.data?.supplier_kind || 'raw'
       if (kind === 'recipient' || kind === 'aux') continue
-      const nextItem = w06ApplyDefaultRawItems(w06ItemLine(doc), kind)
+      const company = doc.data?.company_name || doc.data?.supplier_name || ''
+      const scrubbed = w06CleanItemListForSupplier(w06ItemLine(doc), company)
+      const nextItem = w06ApplyDefaultRawItems(scrubbed, kind, company)
       if (nextItem === w06ItemLine(doc)) continue
       const nextData = { ...(doc.data || {}), item_name: nextItem }
       await persistW06DocData(doc, nextData)
@@ -6319,22 +6321,33 @@ function App() {
     return n
   }
 
+  async function removeW06DocsBySourceFile(fileName, { silent = false } = {}) {
+    if (!supabase || !fileName) return 0
+    const all = await fetchAllHaccpDocuments(supabase)
+    const toDelete = (all || []).filter(d => d.document_type === 'W06' && d.data?.source_filename === fileName)
+    if (!toDelete.length) return 0
+    if (!silent && !ensureCanDelete()) return 0
+    for (const doc of toDelete) {
+      const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+      if (error) throw error
+    }
+    await loadHaccpDocs({ skipBusy: true })
+    return toDelete.length
+  }
+
   async function deleteW06ImportBatch(fileName) {
     if (!supabase || !fileName) return
     if (!ensureCanDelete()) return
-    const toDelete = (haccpDocs || []).filter(d => d.document_type === 'W06' && d.data?.source_filename === fileName)
+    const all = await fetchAllHaccpDocuments(supabase)
+    const toDelete = (all || []).filter(d => d.document_type === 'W06' && d.data?.source_filename === fileName)
     if (!toDelete.length) {
       setMessage(`W06: brak wpisów z pliku „${fileName}".`)
       return
     }
     if (!confirmDelete(`${toDelete.length} wpis(ów) z importu pliku:\n„${fileName}"`)) return
     try {
-      for (const doc of toDelete) {
-        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
-        if (error) throw error
-      }
-      await loadHaccpDocs()
-      setMessage(`W06: usunięto ${toDelete.length} wpisów z importu „${fileName}".`)
+      const n = await removeW06DocsBySourceFile(fileName, { silent: true })
+      setMessage(`W06: usunięto ${n} wpisów z importu „${fileName}".`)
     } catch (err) {
       setMessage(`W06: błąd usuwania importu – ${err?.message || String(err)}`)
     }
@@ -6352,13 +6365,14 @@ function App() {
     setW06PdfPreview('')
     setMessage(`W06: odczytuję ${files.length} plik(ów)…`)
     try {
-      const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
       const parsedParties = []
       let previewText = ''
       const unreadable = []
       const noParty = []
+      let replacedFromFiles = 0
       for (const file of files) {
         try {
+          replacedFromFiles += await removeW06DocsBySourceFile(file.name, { silent: true })
           const isExcel = isW06ExcelFile(file)
           const result = isExcel ? await parseW06FromExcelFile(file) : await parseW06FromPdfFile(file)
           if (!previewText && result.text) previewText = String(result.text).slice(0, 2500)
@@ -6391,12 +6405,14 @@ function App() {
         setW06PdfInputKey(k => k + 1)
         return
       }
-      const { added, skipped } = await importW06StagedParties(uniqueParties, existing)
+      const existingNow = (await fetchAllHaccpDocuments(supabase)).filter(d => d.document_type === 'W06')
+      const { added, skipped } = await importW06StagedParties(uniqueParties, existingNow)
       const repair = await repairW06DuplicateDocs()
       const defaultsN = await applyW06DefaultRawItemsToAll()
       setW06PdfInputKey(k => k + 1)
       if (added > 0) {
         let msg = `W06: automatycznie dodano ${added} kontrahentów do wykazu`
+        if (replacedFromFiles) msg += ` (zastąpiono wcześniejszy import: usunięto ${replacedFromFiles} starych wpisów)`
         if (dupesInFiles.length) msg += `, usunięto ${dupesInFiles.length} duplikatów w pliku`
         if (skipped) msg += `, pominięto ${skipped} już na liście`
         if (repair.removed) msg += `, scalono ${repair.removed} duplikatów w bazie`
