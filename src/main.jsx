@@ -31,10 +31,11 @@ import {
   defaultR01Cleaning, normalizeMcd, mergeR01ColumnsWithDefaults, r01MissingDefaultColumnLabels
 } from './r01Engine'
 import {
-  R02_ENGINE_VERSION, R02_HEADER, R02_MCD_OPTIONS, loadR02Columns, saveR02Columns, buildR02MonthPayloads,
+  R02_ENGINE_VERSION, R02_HEADER, R02_MCD_OPTIONS, R02_WANNA_ZASYPOWA_ID, loadR02Columns, saveR02Columns, buildR02MonthPayloads,
   buildR02PeriodGroups, buildR02PrintHtml, buildR02ExcelRows, sortR02Docs, r02ColumnsFromDocs, r02CleaningForDoc,
   r02McdDisplay, formatR02PlDate, buildR02CalendarRows, buildR02SingleDayPayload, r02MakeColumn,
-  defaultR02Cleaning, normalizeMcd as normalizeR02Mcd
+  defaultR02Cleaning, buildR02K03ProductionDatesByDay, applyR02WannaAutoToPayload, r02WannaAutoForRowDate,
+  normalizeR02CellValue, normalizeMcd as normalizeR02Mcd
 } from './r02Engine'
 import {
   R13_ENGINE_VERSION, R13_HEADER, loadR13Columns, saveR13Columns, buildR13MonthPayloads, buildR13PeriodGroups,
@@ -678,6 +679,22 @@ function App() {
 
 
   const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
+
+  const r02WannaK03Sources = useMemo(() => {
+    const byId = new Map()
+    for (const d of haccpDocs || []) {
+      if (d.document_type === 'K03') byId.set(d.id, d)
+    }
+    for (const d of syntheticK03Docs || []) {
+      byId.set(d.id, d)
+    }
+    return Array.from(byId.values())
+  }, [haccpDocs, syntheticK03Docs])
+
+  const r02WannaK03ByDate = useMemo(
+    () => buildR02K03ProductionDatesByDay(r02WannaK03Sources),
+    [r02WannaK03Sources]
+  )
 
   const k04PulpK03Sources = useMemo(
     () => normalizeK03DocsForK04Pulp(syntheticK03Docs, haccpDocs),
@@ -3083,8 +3100,8 @@ function App() {
 
   async function setR02MachineMcd(doc, columnId, value, columns) {
     const cols = columns || r02ColumnsFromDocs([doc])
-    const cleaning = r02CleaningForDoc(doc, cols)
-    await saveR02Cell(doc, { cleaning: { ...cleaning, [columnId]: normalizeR02Mcd(value) } })
+    const cleaning = r02CleaningForDoc(doc, cols, { k03ProdByDate: r02WannaK03ByDate })
+    await saveR02Cell(doc, { cleaning: { ...cleaning, [columnId]: normalizeR02CellValue(columnId, value) } })
   }
 
   async function updateR02DocsColumns(group, nextColumns) {
@@ -3165,7 +3182,8 @@ function App() {
     }
     const existing = (haccpDocs || []).filter(d => d.document_type === 'R02' && d.data?.month_key === yearMonth)
     if (existing.length && !window.confirm(`Kartoteka R02 za ${yearMonth} już istnieje (${existing.length} wpisów). Utworzyć ponownie (doda kolejne dni)?`)) return
-    const payloads = buildR02MonthPayloads(yearMonth, defaultR02Employee, r02ColumnDefs)
+    let payloads = buildR02MonthPayloads(yearMonth, defaultR02Employee, r02ColumnDefs)
+    payloads = payloads.map(p => applyR02WannaAutoToPayload(p, r02WannaK03ByDate))
     if (!payloads.length) {
       setMessage('R02: brak dni w wybranym miesiącu.')
       return
@@ -3231,7 +3249,8 @@ function App() {
     const yearMonth = group.period
     const columns = group.columns || r02ColumnsFromDocs(group.docs)
     const sunday = isSundayDate(date)
-    const payload = buildR02SingleDayPayload(yearMonth, date, columns, defaultR02Employee || sortR02Docs(group.docs)[0]?.signed_by_operator || '', sunday)
+    let payload = buildR02SingleDayPayload(yearMonth, date, columns, defaultR02Employee || sortR02Docs(group.docs)[0]?.signed_by_operator || '', sunday)
+    payload = applyR02WannaAutoToPayload(payload, r02WannaK03ByDate)
     try {
       const { data, error } = await supabase.from('haccp_documents').insert(payload).select(HACCP_DOC_LIST_SELECT).single()
       if (error) throw error
@@ -4475,7 +4494,7 @@ function App() {
       : group.type === 'W06'
         ? buildW06PrintHtml(group.docs || [], escapeHtml)
       : group.type === 'R02'
-        ? buildR02PrintHtml(group, escapeHtml)
+        ? buildR02PrintHtml({ ...group, k03ProdByDate: r02WannaK03ByDate }, escapeHtml)
       : group.type === 'R01'
         ? buildR01PrintHtml(group, escapeHtml)
       : group.type === 'R13'
@@ -4526,7 +4545,7 @@ function App() {
     } else if (group.type === 'W06') {
       rows.push(...buildW06ExcelRows(docs))
     } else if (group.type === 'R02') {
-      rows.push(...buildR02ExcelRows(group))
+      rows.push(...buildR02ExcelRows({ ...group, k03ProdByDate: r02WannaK03ByDate }))
     } else if (group.type === 'R01') {
       rows.push(...buildR01ExcelRows(group))
     } else if (group.type === 'R13') {
@@ -5384,9 +5403,20 @@ function App() {
       const columns = group.columns || r02ColumnsFromDocs(r02Docs)
       const calendar = buildR02CalendarRows(period, r02Docs)
       const renderMcdCell = (doc, col) => {
-        const cleaning = r02CleaningForDoc(doc, columns)
+        const cleaning = r02CleaningForDoc(doc, columns, { k03ProdByDate: r02WannaK03ByDate })
         const val = cleaning[col.id] || ''
         const display = r02McdDisplay(val)
+        if (col.id === R02_WANNA_ZASYPOWA_ID) {
+          const auto = r02WannaAutoForRowDate(doc.document_date, r02WannaK03ByDate)
+          const optionValues = [...new Set([val, auto, ...R02_MCD_OPTIONS].filter(v => v !== undefined && v !== null && String(v).trim() !== ''))]
+          return <td key={col.id}>
+            <select className="mini-select no-print" value={val} onChange={e => setR02MachineMcd(doc, col.id, e.target.value, columns)}>
+              <option value="">—</option>
+              {optionValues.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+            <span className="print-only">{display}</span>
+          </td>
+        }
         return <td key={col.id}>
           <select className="mini-select no-print" value={val} onChange={e => setR02MachineMcd(doc, col.id, e.target.value, columns)}>
             {R02_MCD_OPTIONS.map(o => <option key={o || 'empty'} value={o}>{o || '—'}</option>)}
@@ -5405,7 +5435,7 @@ function App() {
           <button className="secondary" onClick={() => setEmployeeForVisibleR02Group(group, defaultR02Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => setEmployeeForVisibleR02Group(group, defaultR02Employee, true)}>Uzupełnij puste</button>
           {isAdmin(authProfile) && <button className="secondary danger" onClick={() => deleteR02Month(group)}>Usuń kartotekę</button>}
-          <span className="hint">Niedziele na różowo – domyślnie puste, uzupełnij ręcznie M/C/D przy każdej maszynie.</span>
+          <span className="hint">Niedziele na różowo – domyślnie puste, uzupełnij ręcznie M/C/D przy każdej maszynie. Wanna zasypowa: data produkcji z K03 (decyzja przerób) w dniu produkcji.</span>
         </div>
         {isAdmin(authProfile) && <div className="no-print r13-columns-panel">
           <b>Maszyny / urządzenia w tej kartotece:</b>

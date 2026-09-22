@@ -3,8 +3,10 @@
  * Układ 1:1 ze wzorem Word; niedziele puste (czerwone), edytowalne ręcznie.
  */
 import { calendarDaysInMonth, isSundayDate } from './r13Engine'
+import { resolveK03ProductionDate } from './k03Engine'
 
-export const R02_ENGINE_VERSION = '1.0'
+export const R02_ENGINE_VERSION = '1.1'
+export const R02_WANNA_ZASYPOWA_ID = 'wanna-zasypowa'
 export const R02_COLUMNS_STORAGE = 'agro-mar-r02-columns-v1'
 
 export const R02_HEADER = {
@@ -58,6 +60,62 @@ export function normalizeMcd(value) {
   return v.replace(/\s+/g, '').replace(/[^MCD/]/g, '')
 }
 
+export function isR02WannaDateValue(value) {
+  return /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(String(value || '').trim())
+}
+
+/** Wanna zasypowa: data produkcji (dd.mm.rrrr) albo M/C/D jak pozostałe maszyny. */
+export function normalizeR02CellValue(columnId, value) {
+  const raw = String(value ?? '').trim()
+  if (columnId === R02_WANNA_ZASYPOWA_ID && isR02WannaDateValue(raw)) return raw
+  return normalizeMcd(value)
+}
+
+export function k03IsPulpPrzerob(k03) {
+  const wf = k03?.data?.k03_workflow || {}
+  const mode = wf.mode || (wf.przerob_date ? 'przerob' : '')
+  return mode === 'przerob'
+}
+
+/** Mapa: dzień produkcji (ISO) → data do wpisu w wannie zasypowej (pl-PL). */
+export function buildR02K03ProductionDatesByDay(k03Forms = []) {
+  const byDate = new Map()
+  for (const k03 of k03Forms || []) {
+    if (!k03IsPulpPrzerob(k03)) continue
+    const iso = String(resolveK03ProductionDate(k03) || '').slice(0, 10)
+    if (!iso) continue
+    const pl = formatR02PlDate(iso)
+    const prev = byDate.get(iso)
+    if (!prev) byDate.set(iso, pl)
+    else if (!prev.split(', ').includes(pl)) byDate.set(iso, `${prev}, ${pl}`)
+  }
+  return byDate
+}
+
+export function r02WannaAutoForRowDate(documentDate, k03ProdByDate) {
+  if (!k03ProdByDate?.get) return ''
+  const day = String(documentDate || '').slice(0, 10)
+  return k03ProdByDate.get(day) || ''
+}
+
+export function applyR02WannaAutoToPayload(payload, k03ProdByDate) {
+  if (!payload?.data?.cleaning || !k03ProdByDate?.get) return payload
+  if (payload.data.is_day_off) return payload
+  const day = String(payload.document_date || '').slice(0, 10)
+  const auto = k03ProdByDate.get(day)
+  if (!auto) return payload
+  const key = R02_WANNA_ZASYPOWA_ID
+  const cur = String(payload.data.cleaning[key] || '').trim()
+  if (cur) return payload
+  return {
+    ...payload,
+    data: {
+      ...payload.data,
+      cleaning: { ...payload.data.cleaning, [key]: auto }
+    }
+  }
+}
+
 export function defaultR02Cleaning(columns, sunday = false) {
   const cleaning = {}
   for (const col of columns || []) {
@@ -89,22 +147,36 @@ export function r02ColumnsFromDocs(docs, fallback = loadR02Columns()) {
   return fallback.map(c => ({ ...c }))
 }
 
-export function r02CleaningForDoc(doc, columns) {
+export function r02CleaningForDoc(doc, columns, options = {}) {
+  const k03ProdByDate = options.k03ProdByDate
   const raw = { ...(doc?.data?.cleaning || {}) }
   if (!Object.keys(raw).length && doc?.data?.cleaning_agent) {
     const cols = columns || []
     const cleaning = defaultR02Cleaning(cols, doc?.data?.is_day_off)
-    if (cols[0]) cleaning[cols[0].id] = normalizeMcd(doc.data.cleaning_agent)
-    return cleaning
+    if (cols[0]) cleaning[cols[0].id] = normalizeR02CellValue(cols[0].id, doc.data.cleaning_agent)
+    return applyR02WannaAutoToCleaning(doc, cleaning, columns, k03ProdByDate)
   }
   const cleaning = {}
   for (const col of columns || []) {
-    cleaning[col.id] = normalizeMcd(raw[col.id])
+    cleaning[col.id] = normalizeR02CellValue(col.id, raw[col.id])
   }
-  return cleaning
+  return applyR02WannaAutoToCleaning(doc, cleaning, columns, k03ProdByDate)
+}
+
+function applyR02WannaAutoToCleaning(doc, cleaning, columns, k03ProdByDate) {
+  if (!k03ProdByDate || doc?.data?.is_day_off) return cleaning
+  const hasWanna = (columns || []).some(c => c.id === R02_WANNA_ZASYPOWA_ID)
+  if (!hasWanna) return cleaning
+  const key = R02_WANNA_ZASYPOWA_ID
+  const stored = String(cleaning[key] || '').trim()
+  if (stored) return cleaning
+  const auto = r02WannaAutoForRowDate(doc?.document_date, k03ProdByDate)
+  if (!auto) return cleaning
+  return { ...cleaning, [key]: auto }
 }
 
 export function r02McdDisplay(value) {
+  if (isR02WannaDateValue(value)) return String(value).trim()
   const v = normalizeMcd(value)
   return v || '—'
 }
@@ -212,7 +284,7 @@ export function buildR02PrintHtml(group, escapeHtml) {
       const emptyCells = columns.map(() => '<td>—</td>').join('')
       return `<tr class="${offCls}"><td>${row.lp}</td><td>${escapeHtml(formatR02PlDate(row.date))}</td>${emptyCells}<td>—</td></tr>`
     }
-    const cleaning = r02CleaningForDoc(doc, columns)
+    const cleaning = r02CleaningForDoc(doc, columns, { k03ProdByDate: group.k03ProdByDate })
     const cells = columns.map(col => `<td>${escapeHtml(r02McdDisplay(cleaning[col.id]))}</td>`).join('')
     return `<tr class="${offCls}">
       <td>${row.lp}</td>
@@ -267,7 +339,7 @@ export function buildR02ExcelRows(group) {
       rows.push([row.lp, formatR02PlDate(row.date), ...columns.map(() => '—'), ''])
       return
     }
-    const cleaning = r02CleaningForDoc(doc, columns)
+    const cleaning = r02CleaningForDoc(doc, columns, { k03ProdByDate: group.k03ProdByDate })
     rows.push([
       row.lp,
       formatR02PlDate(doc.document_date) + (row.isSunday ? ' (dzień wolny)' : ''),
