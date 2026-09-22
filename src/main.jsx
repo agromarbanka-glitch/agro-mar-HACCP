@@ -49,7 +49,7 @@ import {
 } from './w03Engine'
 import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
-  parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
+  parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, dedupeW06PartiesBatch, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   partyToW06NewRow, W06_PARTY_LABELS, W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
   w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine
 } from './w06Engine'
@@ -6321,34 +6321,40 @@ function App() {
         }
       }
       setW06PdfPreview(previewText || (unreadable.length ? 'Nie udało się odczytać danych – sprawdź kolumny: Rodzaj, Dostawca/Odbiorca, Produkt/Towar.' : ''))
-      if (!parsedParties.length) {
+      const { added: uniqueParties, skipped: dupesInFiles } = dedupeW06PartiesBatch(parsedParties)
+      if (!uniqueParties.length) {
         if (unreadable.length) {
           setMessage(`W06: brak kontrahentów (${unreadable.join(', ')}). Użyj Excela z kolumnami Dostawca i Towar lub dodaj ręcznie.`)
         } else if (noParty.length) {
           setMessage(`W06: odczytano plik, ale nie rozpoznano kontrahentów w: ${noParty.join('; ')}. Sprawdź podgląd poniżej.`)
+        } else if (parsedParties.length && dupesInFiles.length) {
+          setMessage(`W06: w pliku rozpoznano ${parsedParties.length} wierszy – wszystkie to duplikaty tej samej firmy (pozostawiono ${uniqueParties.length} unikalnych).`)
         } else {
           setMessage('W06: brak danych do dodania.')
         }
         setW06PdfInputKey(k => k + 1)
         return
       }
-      setW06PdfStagedParties(parsedParties)
-      const firstRow = partyToW06NewRow(parsedParties[0])
+      setW06PdfStagedParties(uniqueParties)
+      const firstRow = partyToW06NewRow(uniqueParties[0])
       if (firstRow) setW06NewRow(firstRow)
 
-      const { added, skipped } = await importW06StagedParties(parsedParties, existing)
+      const { added, skipped } = await importW06StagedParties(uniqueParties, existing)
       setW06PdfInputKey(k => k + 1)
       if (added > 0) {
         setW06PdfStagedParties(prev => {
-          const keys = new Set(filterNewW06Parties(existing, parsedParties).added.map(p => p.dedupe_key))
+          const keys = new Set(filterNewW06Parties(existing, uniqueParties).added.map(p => p.dedupe_key))
           return prev.filter(p => !keys.has(p.dedupe_key || w06DedupeKey(p)))
         })
         let msg = `W06: dodano ${added} kontrahentów do wykazu`
-        if (skipped) msg += `, pominięto ${skipped} duplikatów`
-        if (parsedParties.length > added) msg += `. Rozpoznano łącznie ${parsedParties.length} firm`
+        if (dupesInFiles.length) msg += `, usunięto ${dupesInFiles.length} duplikatów w pliku`
+        if (skipped) msg += `, pominięto ${skipped} już na liście`
+        if (uniqueParties.length > added) msg += `. Unikalnych w pliku: ${uniqueParties.length}`
         setMessage(msg + '.')
       } else {
-        setMessage(`W06: rozpoznano ${parsedParties.length} firm – wszystkie są już na liście. Możesz edytować poniżej lub kliknąć „Dodaj rozpoznane firmy".`)
+        let msg = `W06: rozpoznano ${uniqueParties.length} unikalnych firm – wszystkie są już na liście.`
+        if (dupesInFiles.length) msg += ` Usunięto ${dupesInFiles.length} duplikatów w pliku.`
+        setMessage(msg + ' Możesz edytować poniżej lub kliknąć „Dodaj rozpoznane firmy".')
       }
       if (unreadable.length) setMessage(prev => `${prev} Nieczytelne pliki: ${unreadable.length}.`)
       if (noParty.length) setMessage(prev => `${prev} Pliki bez kontrahenta: ${noParty.length}.`)
@@ -6550,10 +6556,10 @@ function App() {
     return <>
       <div className="card inner-card no-print">
         <h3>Import Excel / PDF – PZ (dostawcy) i WZ (odbiorcy)</h3>
-        <p className="hint">Wgraj <b>Excel</b> (zalecane – kolumny Dostawca/Odbiorca i Towar/Produkt) lub PDF. Program doda <b>unikalnych</b> kontrahentów z asortymentem – bez duplikatów.</p>
-        <label className="full-width">Pliki Excel (.xlsx) lub PDF
+        <p className="hint">Wgraj <b>Excel</b> (.xls / .xlsx – lista dostawców lub rejestr PZ/WZ) albo PDF. Program scala wiersze tej samej firmy i pomija duplikaty już zapisane w W06.</p>
+        <label className="full-width">Pliki Excel (.xls, .xlsx) lub PDF
           <input key={w06PdfInputKey} type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/pdf,.pdf" multiple disabled={w06PdfImporting} onChange={handleW06ImportFiles} />
-          <span className="hint">Excel: eksport rejestru PZ/WZ z Subiekta/Comarch (Rodzaj, Dostawca/Odbiorca, Produkt/Towar). PDF: dokumenty z tekstem.</span>
+          <span className="hint">Lista dostawców: kolumny <b>Dostawca/Firma</b>, opcjonalnie <b>Towar/Surowiec</b> i NIP. Eksport magazynu: Rodzaj, Dostawca/Odbiorca, Produkt/Towar. PDF: dokumenty z tekstem.</span>
         </label>
         {w06PdfImporting && <p className="hint">Trwa odczyt pliku…</p>}
         {w06PdfFileName && !w06PdfImporting && <p className="hint">Wybrany plik: <b>{w06PdfFileName}</b></p>}

@@ -4,8 +4,9 @@
 import { extractPdfData, isReadablePdfText, rebuildTextFromItems } from './pdfImportEngine.js'
 import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
+import * as XLSX from 'xlsx'
 
-export const W06_ENGINE_VERSION = '1.6'
+export const W06_ENGINE_VERSION = '1.7'
 export const AGRO_MAR_NIP = '7171839598'
 export const W06_MIN_ROWS = 20
 
@@ -464,12 +465,208 @@ export async function parseW06FromPdfFile(file) {
   return { text: usableText, unreadable: false, pdfError: null, party: parsed.parties[0] || null, ...parsed }
 }
 
-function buildW06ExcelPreview(rows, parties) {
-  const head = `Wierszy w Excelu: ${rows.length}, unikalnych kontrahentów: ${parties.length}\n`
-  const sample = rows.slice(0, 12).map(r =>
-    `${r.documentType || '?'} ${r.documentNo || ''} | ${r.contractorName || '—'} | ${r.productName || '—'}`
-  ).join('\n')
+function buildW06ExcelPreview(rows, parties, { dataRows = null, dupesInFile = 0 } = {}) {
+  const dupNote = dupesInFile > 0 ? `, usunięto duplikatów w pliku: ${dupesInFile}` : ''
+  const head =
+    dataRows != null
+      ? `Wierszy danych: ${dataRows}, unikalnych kontrahentów: ${parties.length}${dupNote}\n`
+      : `Wierszy w Excelu: ${rows.length}, unikalnych kontrahentów: ${parties.length}${dupNote}\n`
+  const sample = rows.slice(0, 12).map(r => {
+    if (r.documentType || r.documentNo) {
+      return `${r.documentType || '?'} ${r.documentNo || ''} | ${r.contractorName || '—'} | ${r.productName || '—'}`
+    }
+    return `${r.contractorName || '—'} | ${r.productName || '—'}${r.nip ? ` | NIP ${r.nip}` : ''}`
+  }).join('\n')
   return head + sample
+}
+
+function w06NormHeaderLabel(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/\s+/g, ' ')
+}
+
+function w06HeaderColumnKind(label) {
+  const h = w06NormHeaderLabel(label)
+  if (!h) return null
+  if (/^(nip|nip firmy|numer nip)$/.test(h) || h.includes('nip')) return 'nip'
+  if (
+    /dostawca|odbiorca|kontrahent|sprzedawca|nabywca|nazwa firmy|nazwa dostawcy|dane firmy|dostawca\/odbiorca/.test(h) ||
+    h === 'firma' ||
+    h === 'nazwa'
+  ) return 'company'
+  if (/surowiec|towar|produkt|asortyment|material|materia|towar\/produkt|surowiec\/towar|zakres/.test(h)) return 'product'
+  if (/^adres|siedziba|ulica|miejscowosc|miejscowość/.test(h)) return 'address'
+  return null
+}
+
+function mapW06SupplierHeaderRow(row) {
+  const cols = { company: -1, product: -1, nip: -1, address: -1 }
+  for (let idx = 0; idx < (row || []).length; idx++) {
+    const kind = w06HeaderColumnKind(row[idx])
+    if (kind && cols[kind] < 0) cols[kind] = idx
+  }
+  return cols.company >= 0 ? cols : null
+}
+
+function w06SheetRowStrings(row) {
+  return (row || []).map(c => String(c ?? '').trim())
+}
+
+function w06CellAt(row, index) {
+  if (index < 0) return ''
+  return String(row?.[index] ?? '').trim()
+}
+
+function isW06SupplierListTitleRow(cells) {
+  const joined = cells.filter(Boolean).join(' ').toLowerCase()
+  if (!joined) return true
+  if (/wykaz|lista\s+dostaw|kwalifikowan|w06|dostawców|dostawcow/.test(joined) && cells.filter(Boolean).length <= 3) return true
+  return false
+}
+
+function isW06LikelyWarehouseHeader(cols) {
+  return cols.document >= 0 || cols.qty >= 0
+}
+
+function mapW06WarehouseHeaderRow(row) {
+  const cols = { document: -1, qty: -1 }
+  for (let idx = 0; idx < (row || []).length; idx++) {
+    const h = w06NormHeaderLabel(row[idx])
+    if (!h) continue
+    if (/rodzaj|typ dokumentu|dokument/.test(h)) cols.document = idx
+    if (/ilość|ilosc|qty|quantity/.test(h)) cols.qty = idx
+  }
+  return cols
+}
+
+function sheetLooksLikeWarehouseExport(sheet) {
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+  for (let i = 0; i < Math.min(matrix.length, 20); i++) {
+    const line = w06SheetRowStrings(matrix[i]).join(' ').toUpperCase()
+    if (/\bRODZAJ\b|\bILOŚĆ\b|\bILOSC\b|\bDATA WYSTAWIENIA\b/.test(line)) return true
+    if (/\b(PZ|WZ|MM)[\/\s]\d/.test(line)) return true
+  }
+  return false
+}
+
+function buildSyntheticRowsFromSupplierSheet(sheet) {
+  const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+  if (!matrix.length) return { rows: [], dataRows: 0, detected: false }
+
+  let headerIdx = -1
+  let cols = null
+  for (let i = 0; i < Math.min(matrix.length, 25); i++) {
+    const mapped = mapW06SupplierHeaderRow(matrix[i])
+    if (!mapped) continue
+    const wh = mapW06WarehouseHeaderRow(matrix[i])
+    if (isW06LikelyWarehouseHeader(wh) && wh.qty >= 0) continue
+    headerIdx = i
+    cols = mapped
+    break
+  }
+
+  const synthetic = []
+  if (headerIdx >= 0 && cols) {
+    for (let i = headerIdx + 1; i < matrix.length; i++) {
+      const row = matrix[i]
+      const company = w06CellAt(row, cols.company)
+      const product = w06CellAt(row, cols.product)
+      const nip = normalizeNip(w06CellAt(row, cols.nip))
+      const address = w06CellAt(row, cols.address)
+      if (!company && !product && !nip) continue
+      if (isW06SupplierListTitleRow(w06SheetRowStrings(row))) continue
+      if (!company || isAgromarParty(company, nip)) continue
+      synthetic.push({
+        contractorName: company,
+        productName: product,
+        nip,
+        address,
+        documentType: 'Lista',
+        documentNo: ''
+      })
+    }
+    return { rows: synthetic, dataRows: synthetic.length, detected: true }
+  }
+
+  if (sheetLooksLikeWarehouseExport(sheet)) {
+    return { rows: [], dataRows: 0, detected: false }
+  }
+
+  for (let i = 0; i < matrix.length; i++) {
+    const cells = w06SheetRowStrings(matrix[i]).filter(c => c !== '')
+    if (cells.length < 2) continue
+    if (isW06SupplierListTitleRow(cells)) continue
+    const headerish = cells.join(' ').toLowerCase()
+    if (/^lp\.?\s/.test(headerish) || (cells[0].toLowerCase() === 'lp' && cells.length >= 2)) continue
+    if (/dostawca|firma|surowiec|towar|kontrahent|nip/.test(headerish) && cells.length <= 6) continue
+
+    let company = ''
+    let product = ''
+    let nip = ''
+    const lpLike = /^\d{1,4}$/.test(cells[0].replace(/\s/g, ''))
+    if (lpLike && cells.length >= 3) {
+      company = cells[1]
+      product = cells[2]
+      if (cells.length >= 4) nip = normalizeNip(cells[3])
+    } else if (cells.length >= 2) {
+      company = cells[0]
+      product = cells[1]
+      if (cells.length >= 3 && /^\d{10}$/.test(normalizeNip(cells[2]))) nip = normalizeNip(cells[2])
+    }
+    if (!company || isAgromarParty(company, nip)) continue
+    if (/^(razem|suma|ogółem|ogolem)$/i.test(company)) continue
+    synthetic.push({
+      contractorName: company,
+      productName: product,
+      nip,
+      address: '',
+      documentType: 'Lista',
+      documentNo: ''
+    })
+  }
+
+  const detected = synthetic.length > 0
+  return { rows: synthetic, dataRows: synthetic.length, detected }
+}
+
+/** Lista dostawców (.xls/.xlsx) – kolumny Firma/Dostawca + Towar/Surowiec (bez PZ/WZ). */
+export function parseW06SupplierListWorkbook(buffer, fileName = '') {
+  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
+  let best = { rows: [], dataRows: 0, detected: false }
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    if (!sheet) continue
+    const attempt = buildSyntheticRowsFromSupplierSheet(sheet)
+    if (attempt.rows.length > best.rows.length) best = attempt
+  }
+  if (!best.rows.length) {
+    return {
+      kind: 'excel-suppliers',
+      parties: [],
+      preview: 'Wierszy danych: 0, unikalnych kontrahentów: 0\n(brak rozpoznanych kolumn – oczekiwane: Dostawca/Firma i opcjonalnie Towar/Surowiec, NIP)',
+      rowCount: 0,
+      detected: best.detected
+    }
+  }
+  const beforeDedupe = best.rows.length
+  const parsed = parseW06PartiesFromExcelRows(best.rows, fileName)
+  const dupesInFile = Math.max(0, beforeDedupe - parsed.parties.length)
+  parsed.preview = buildW06ExcelPreview(best.rows, parsed.parties, {
+    dataRows: best.dataRows,
+    dupesInFile
+  })
+  parsed.kind = 'excel-suppliers'
+  parsed.detected = true
+  return parsed
+}
+
+/** Usuwa duplikaty w partii (np. wiele wierszy tej samej firmy w pliku). */
+export function dedupeW06PartiesBatch(parties) {
+  return filterNewW06Parties([], parties || [])
 }
 
 /** Grupuje wiersze Excela (PZ/WZ) w unikalnych kontrahentów z asortymentem. */
@@ -503,7 +700,7 @@ export function parseW06PartiesFromExcelRows(rows, fileName = '') {
       company_name: name.slice(0, 200),
       supplier_name: name.slice(0, 200),
       nip,
-      address: '',
+      address: String(row.address || '').trim().slice(0, 240),
       item_name: product.slice(0, 160),
       supplier_kind: partyType === 'recipient' ? 'recipient' : 'raw',
       source_doc_kind: docKind === 'unknown' ? String(row.documentType || 'Excel').slice(0, 12) : docKind,
@@ -575,11 +772,46 @@ export function listW06ImportBatches(docs) {
 }
 
 export async function parseW06FromExcelFile(file) {
+  const buffer = await file.arrayBuffer()
+  const supplierList = parseW06SupplierListWorkbook(buffer, file.name)
+  if (supplierList.parties?.length) {
+    return {
+      text: supplierList.preview,
+      unreadable: false,
+      parties: supplierList.parties,
+      party: supplierList.parties[0] || null,
+      rowCount: supplierList.rowCount,
+      kind: supplierList.kind
+    }
+  }
+
   const { rows } = await readAgromarExcel(file)
   const enriched = enrichContractorsByDocument(rows)
   const parsed = parseW06PartiesFromExcelRows(enriched, file.name)
+  if (parsed.parties.length) {
+    return {
+      text: parsed.preview,
+      unreadable: false,
+      parties: parsed.parties,
+      party: parsed.parties[0] || null,
+      rowCount: parsed.rowCount,
+      kind: parsed.kind
+    }
+  }
+
+  if (supplierList.detected) {
+    return {
+      text: supplierList.preview,
+      unreadable: true,
+      parties: [],
+      party: null,
+      rowCount: 0,
+      kind: supplierList.kind
+    }
+  }
+
   return {
-    text: parsed.preview,
+    text: parsed.preview || supplierList.preview,
     unreadable: !parsed.parties.length,
     parties: parsed.parties,
     party: parsed.parties[0] || null,
