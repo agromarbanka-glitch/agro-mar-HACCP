@@ -6382,7 +6382,8 @@ function App() {
             unreadable.push(`${file.name}${isExcel ? ' (brak kontrahentów w Excelu)' : ''}${result.pdfError ? ` (${result.pdfError})` : ''}`)
             continue
           }
-          const fromFile = result.parties?.length ? result.parties : (result.party ? [result.party] : [])
+          const fromFile = (result.parties?.length ? result.parties : (result.party ? [result.party] : []))
+            .map(p => ({ ...p, source_filename: p.source_filename || file.name }))
           if (fromFile.length) {
             parsedParties.push(...fromFile)
           } else {
@@ -6670,7 +6671,7 @@ function App() {
   }
 
   function renderW06Section() {
-    const w06Docs = sortW06Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W06'))
+    const w06Docs = sortW06Docs((haccpDocs || []).filter(d => d.document_type === 'W06'))
     const w06ImportBatches = listW06ImportBatches(w06Docs)
     return <>
       <div className="card inner-card no-print">

@@ -6,7 +6,7 @@ import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
 import * as XLSX from 'xlsx'
 
-export const W06_ENGINE_VERSION = '2.1'
+export const W06_ENGINE_VERSION = '2.2'
 
 /** Domyślny zestaw surowców (lewa kolumna W06) – dopisywany automatycznie. */
 export const W06_DEFAULT_RAW_ITEMS = ['Truskawka', 'Malina', 'Porzeczka', 'Jabłko', 'Wiśnia']
@@ -113,10 +113,23 @@ export function w06CanonicalCompanyKey(name = '') {
 export function w06DedupeKey(party) {
   const name = party?.company_name || party?.supplier_name || party?.name || ''
   const canon = w06CanonicalCompanyKey(name)
-  if (canon.length >= 3) return `k:${canon}`
+  if (canon.length >= 2) return `k:${canon}`
   const nip = normalizeNip(party?.nip)
   if (nip) return `nip:${nip}`
   return ''
+}
+
+export function finalizeW06SupplierParty(party, fileName = '') {
+  const p = w06PartyFromAny(party)
+  if (!p.company_name) return null
+  p.supplier_name = p.supplier_name || p.company_name
+  p.supplier_kind = p.supplier_kind || 'raw'
+  p.party_type = p.party_type || 'supplier'
+  p.source_doc_kind = p.source_doc_kind || 'Lista'
+  p.source_filename = fileName || p.source_filename || ''
+  p.dedupe_key = w06DedupeKey(p)
+  p.item_name = w06StandardRawItemLine()
+  return p
 }
 
 export function w06SameSupplierIdentity(a, b) {
@@ -175,7 +188,7 @@ export function collapseW06PartiesByIdentity(parties = []) {
     }
     if (!target) {
       p.dedupe_key = w06DedupeKey(p)
-      p.item_name = w06EnforceRawItemLine('', p.company_name, p.supplier_kind || 'raw')
+      p.item_name = w06StandardRawItemLine()
       merged.push(p)
       continue
     }
@@ -186,7 +199,7 @@ export function collapseW06PartiesByIdentity(parties = []) {
     if (!target.nip && p.nip) target.nip = p.nip
     if (p.source_filename && !target.source_filename) target.source_filename = p.source_filename
     target.dedupe_key = w06DedupeKey(target)
-    target.item_name = w06EnforceRawItemLine(target.item_name, target.company_name, target.supplier_kind || 'raw')
+    target.item_name = w06StandardRawItemLine()
   }
   return merged
 }
@@ -868,7 +881,22 @@ export function parseW06SupplierListWorkbook(buffer, fileName = '') {
   }
   const beforeDedupe = best.rows.length
   const parsed = parseW06PartiesFromExcelRows(best.rows, fileName, { supplierList: true })
-  parsed.parties = collapseW06PartiesByIdentity(parsed.parties)
+  const beforeCollapse = parsed.parties || []
+  let collapsed = collapseW06PartiesByIdentity(beforeCollapse)
+  if (!collapsed.length && beforeCollapse.length) collapsed = beforeCollapse
+  if (!collapsed.length && best.rows.length) {
+    collapsed = collapseW06PartiesByIdentity(
+      best.rows
+        .map(r => finalizeW06SupplierParty({
+          company_name: r.contractorName,
+          supplier_name: r.contractorName,
+          nip: r.nip,
+          address: r.address
+        }, fileName))
+        .filter(Boolean)
+    )
+  }
+  parsed.parties = collapsed.map(p => finalizeW06SupplierParty(p, fileName)).filter(Boolean)
   const dupesInFile = Math.max(0, beforeDedupe - parsed.parties.length)
   parsed.preview = buildW06ExcelPreview(best.rows, parsed.parties, {
     dataRows: best.dataRows,
@@ -914,13 +942,14 @@ export function parseW06PartiesFromExcelRows(rows, fileName = '', { supplierList
       continue
     }
 
+    const itemForRow = supplierList ? w06StandardRawItemLine() : product.slice(0, 160)
     byKey.set(dedupeKey, {
       party_type: partyType,
       company_name: name.slice(0, 200),
       supplier_name: name.slice(0, 200),
       nip,
       address: String(row.address || '').trim().slice(0, 240),
-      item_name: product.slice(0, 160),
+      item_name: itemForRow,
       supplier_kind: partyType === 'recipient' ? 'recipient' : 'raw',
       source_doc_kind: docKind === 'unknown' ? String(row.documentType || 'Excel').slice(0, 12) : docKind,
       source_filename: fileName,
