@@ -249,7 +249,7 @@ export function normalizeK04Data(data = {}, signedBy = '') {
     pulpa_auto: d.pulpa_auto && typeof d.pulpa_auto === 'object' ? { ...d.pulpa_auto } : {},
     k04_custom_column_defs: resolveK04CustomColumnDefs([{ data: d }]),
     ...k04CustomColumnValuesFromData(d),
-    podpis_kontrolujacego: signedBy || d.podpis_kontrolujacego || '',
+    podpis_kontrolujacego: d.podpis_kontrolujacego ?? signedBy ?? '',
     uwagi: normalizePn(d.uwagi || 'P'),
     produkty: d.produkty || '',
     product_group: d.product_group || '',
@@ -1200,7 +1200,9 @@ export function buildManualK04BlankDoc(period, manualId, seed = {}, overrides = 
 
 export function buildK04InsertPayload(doc) {
   const live = doc.data ? applyK04Override(doc, {}) : doc
-  const d = normalizeK04Data(live.data || {}, live.signed_by_operator)
+  const signed = live.data?.podpis_kontrolujacego ?? live.signed_by_operator ?? ''
+  const d = normalizeK04Data(live.data || {}, signed)
+  d.podpis_kontrolujacego = signed
   if (!d.month_key && live.document_date) d.month_key = String(live.document_date).slice(0, 7)
   return {
     document_type: 'K04',

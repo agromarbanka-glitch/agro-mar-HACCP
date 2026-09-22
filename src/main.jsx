@@ -2027,6 +2027,17 @@ function App() {
     setMessage(`Ustawiono podpis dla ${docs.length} formularzy K03. Możesz zmienić pojedynczy formularz w edycji.`)
   }
 
+  function mergeK04SavedIntoSelection(oldDoc, savedRow) {
+    if (!savedRow?.id) return
+    mergeHaccpDoc(savedRow.id, savedRow)
+    const stable = k04StableKey(oldDoc)
+    setSelectedHaccpDoc(prev => {
+      if (!prev?.groupPreview || prev.group?.type !== 'K04') return prev
+      const docs = (prev.group.docs || []).map(d => (k04StableKey(d) === stable ? savedRow : d))
+      return { ...prev, group: { ...prev.group, docs } }
+    })
+  }
+
   function setK04Override(doc, field, value) {
     if (!doc?.id) return
     setK04Overrides(prev => ({
@@ -2046,14 +2057,17 @@ function App() {
       return null
     }
     try {
-      const live = getLiveK04Doc(doc, { [doc.id]: { ...(k04Overrides[doc.id] || {}), ...patch } })
+      const ov = { ...(k04Overrides[doc.id] || {}), ...patch }
+      const live = getLiveK04Doc(doc, { [doc.id]: ov })
+      const mergedRaw = { ...(doc.data || {}), ...ov }
+      const signed = patch.podpis_kontrolujacego !== undefined
+        ? patch.podpis_kontrolujacego
+        : (mergedRaw.podpis_kontrolujacego ?? live.signed_by_operator ?? doc.signed_by_operator ?? '')
 
       if (isPersistedHaccpDoc(doc)) {
-        const nextData = normalizeK04Data({ ...(doc.data || {}), ...(k04Overrides[doc.id] || {}), ...patch }, live.signed_by_operator)
+        const nextData = normalizeK04Data(mergedRaw, signed)
+        nextData.podpis_kontrolujacego = signed
         const status = formNormalizePn(nextData.uwagi) === 'N' ? 'N' : 'P'
-        const signed = patch.podpis_kontrolujacego !== undefined
-          ? patch.podpis_kontrolujacego
-          : (live.signed_by_operator || nextData.podpis_kontrolujacego || doc.signed_by_operator || '')
         const payload = {
           data: nextData,
           status,
@@ -2063,14 +2077,14 @@ function App() {
         }
         const { data: saved, error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id).select(HACCP_DOC_LIST_SELECT).maybeSingle()
         const row = throwIfNoHaccpWriteResult(saved, error, 'Zapis K04')
-        const workingDoc = { ...doc, ...row }
+        const workingDoc = { ...doc, ...row, data: row.data || nextData, signed_by_operator: row.signed_by_operator ?? signed ?? null }
         setK04Overrides(prev => {
           const next = { ...prev }
           delete next[doc.id]
           return next
         })
         setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id))
-        mergeHaccpDoc(doc.id, workingDoc)
+        mergeK04SavedIntoSelection(doc, workingDoc)
         return workingDoc
       }
 
@@ -2079,9 +2093,10 @@ function App() {
         const existing = (haccpDocs || []).find(d =>
           d.document_type === 'K04' && isPersistedHaccpDoc(d) && k04StableKey(d) === stableKey
         )
-        if (existing) return saveK04DocumentField(existing, { ...(k04Overrides[doc.id] || {}), ...patch })
-        const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK04InsertPayload(live)).select('*').single()
-        if (error) throw error
+        if (existing) return saveK04DocumentField(existing, ov)
+        const insertLive = getLiveK04Doc(live, { [live.id]: { ...ov, podpis_kontrolujacego: signed } })
+        const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK04InsertPayload(insertLive)).select(HACCP_DOC_LIST_SELECT).single()
+        const row = throwIfNoHaccpWriteResult(inserted, error, 'Zapis K04')
         setK04Overrides(prev => {
           const next = { ...prev }
           delete next[doc.id]
@@ -2090,13 +2105,14 @@ function App() {
         setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id))
         setK04HiddenKeys(prev => {
           const next = new Set(prev)
-          next.delete(k04StableKey(live))
+          next.delete(stableKey)
           return next
         })
-        mergeHaccpDoc(inserted.id, inserted)
-        return inserted
+        mergeK04SavedIntoSelection(doc, row)
+        return row
       }
-      return live
+      setMessage('K04: nie rozpoznano wiersza do zapisu (odśwież kartotekę).')
+      return null
     } catch (err) {
       setMessage(`K04: błąd zapisu – ${err.message}`)
       return null
@@ -2510,13 +2526,32 @@ function App() {
   }
 
   async function setEmployeeForVisibleK04Group(group, employeeName, onlyEmpty = false) {
-    if (!group || !employeeName) return
-    const docs = (group.docs || []).filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_kontrolujacego))
-    if (!docs.length) { setMessage(onlyEmpty ? 'Nie ma pustych podpisów K04.' : 'Brak wpisów K04.'); return }
-    for (const doc of docs) {
-      await saveK04DocumentField(doc, { podpis_kontrolujacego: employeeName })
+    if (!group) return
+    const name = String(employeeName || '').trim()
+    if (!name) {
+      setMessage('K04: wybierz pracownika z listy, potem „Zastosuj do wszystkich” lub „Uzupełnij puste”.')
+      return
     }
-    setMessage(`Ustawiono podpis K04 dla ${docs.length} wpisów.`)
+    if (!supabase) {
+      setMessage('Brak bazy – zapis podpisu K04 wymaga Supabase.')
+      return
+    }
+    const period = group.period
+    const sourceDocs = period
+      ? dedupeK04Docs(mergedK04Docs.filter(d => String(d.document_date || '').slice(0, 7) === period))
+      : dedupeK04Docs(group.docs || [])
+    const docs = sourceDocs.filter(d => !onlyEmpty || !(d.signed_by_operator || d.data?.podpis_kontrolujacego))
+    if (!docs.length) {
+      setMessage(onlyEmpty ? 'K04: nie ma pustych podpisów w tej kartotece.' : 'K04: brak wierszy w tej kartotece.')
+      return
+    }
+    if (!onlyEmpty && !window.confirm(`Ustawić podpis „${name}” dla ${docs.length} wierszy K04 w tej kartotece?`)) return
+    let ok = 0
+    for (const doc of docs) {
+      const saved = await saveK04DocumentField(doc, { podpis_kontrolujacego: name })
+      if (saved) ok++
+    }
+    setMessage(ok ? `K04: zapisano podpis „${name}” w ${ok} z ${docs.length} wierszy.` : 'K04: nie udało się zapisać podpisu — sprawdź połączenie z bazą.')
   }
 
   async function setEmployeeForVisibleK07Group(group, employeeName, onlyEmpty = false) {
@@ -4507,6 +4542,18 @@ function App() {
         docs: freshDocs
       }
     }
+    if (opened.type === 'K04') {
+      const period = opened.period
+      const freshDocs = dedupeK04Docs(
+        mergedK04Docs.filter(d => String(d.document_date || '').slice(0, 7) === period)
+      )
+      return {
+        ...(haccpMonthlyGroups.find(g => g.type === 'K04' && g.period === period) || opened),
+        ...opened,
+        period,
+        docs: freshDocs
+      }
+    }
     const freshById = new Map((haccpDocs || []).map(d => [d.id, d]))
     const mergedDocs = (opened.docs || []).map(d => freshById.get(d.id) || d)
     const freshMeta = haccpMonthlyGroups.find(g => g.key === opened.key)
@@ -4735,8 +4782,8 @@ function App() {
               {employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
             </select>
           </label>
-          <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
-          <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
+          <button className="secondary" disabled={!defaultK04Employee} onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
+          <button className="secondary" disabled={!defaultK04Employee} onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
         </div>
         <div className="no-print k04-columns-toolbar" style={{ marginBottom: '10px' }}>
           <b>Dodatkowe kolumny (cała kartoteka):</b>
@@ -4791,30 +4838,37 @@ function App() {
               const temp1 = live.data?.temperatura_chlodnia_1 ?? ''
               const temp2 = live.data?.temperatura_chlodnia_2 ?? ''
               const signed = live.data?.podpis_kontrolujacego || live.signed_by_operator || ''
+              const signOptions = employeeSelectOptions(signed, employees)
               const uwagi = formNormalizePn(live.data?.uwagi || 'P')
               const produktyHint = live.data?.produkty ? ` · ${live.data.produkty}` : ''
               return (
                 <tr key={live.id}>
                   <td>
-                    <input className="cell-input no-print" type="date" value={live.document_date || ''} onChange={e => setK04Override(live, 'document_date', e.target.value)} />
+                    <input className="cell-input no-print" type="date" value={live.document_date || ''} onChange={e => setK04Override(doc, 'document_date', e.target.value)} />
                     <span className="print-only">{live.document_date}{produktyHint ? <small>{produktyHint}</small> : null}</span>
                   </td>
-                  <td><input className="cell-input no-print" value={godzina} onChange={e => setK04Override(live, 'godzina', e.target.value)} placeholder="09:15" /><span className="print-only">{godzina}</span></td>
-                  <td><input className="cell-input no-print" value={temp1} onChange={e => setK04Override(live, 'temperatura_chlodnia_1', e.target.value)} placeholder="°C" /><span className="print-only">{temp1}</span></td>
-                  <td><input className="cell-input no-print" value={temp2} onChange={e => setK04Override(live, 'temperatura_chlodnia_2', e.target.value)} placeholder="°C" /><span className="print-only">{temp2}</span></td>
+                  <td><input className="cell-input no-print" value={godzina} onChange={e => setK04Override(doc, 'godzina', e.target.value)} placeholder="09:15" /><span className="print-only">{godzina}</span></td>
+                  <td><input className="cell-input no-print" value={temp1} onChange={e => setK04Override(doc, 'temperatura_chlodnia_1', e.target.value)} placeholder="°C" /><span className="print-only">{temp1}</span></td>
+                  <td><input className="cell-input no-print" value={temp2} onChange={e => setK04Override(doc, 'temperatura_chlodnia_2', e.target.value)} placeholder="°C" /><span className="print-only">{temp2}</span></td>
                   {[1, 2, 3, 4].map(n => {
                     const key = k04PulpaTankField(n)
                     const pulpTemp = live.data?.[key] ?? ''
                     return (
                       <td key={key} className="col-pulp">
-                        <input className="cell-input no-print k04-pulp-input" value={pulpTemp} onChange={e => setK04Override(live, key, e.target.value)} placeholder="°C" />
+                        <input className="cell-input no-print k04-pulp-input" value={pulpTemp} onChange={e => setK04Override(doc, key, e.target.value)} placeholder="°C" />
                         <span className="print-only">{pulpTemp}</span>
                       </td>
                     )
                   })}
-                  {k04ExtraColumnCells(live.data, (key, val) => setK04Override(live, key, val))}
-                  <td><select className="mini-select no-print" value={signed} onChange={e => setK04Override(live, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
-                  <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(live, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
+                  {k04ExtraColumnCells(live.data, (key, val) => setK04Override(doc, key, val))}
+                  <td className="col-sign">
+                    <select className="mini-select no-print" value={signed} onChange={e => void setK04Override(doc, 'podpis_kontrolujacego', e.target.value)}>
+                      <option value="">Wybierz</option>
+                      {signOptions.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}
+                    </select>
+                    <span className="print-only">{signed}</span>
+                  </td>
+                  <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(doc, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
                   <td className="col-actions no-print">
                     <KartotekaRowDeleteButton active={k04DeletePending === live.id} onRequest={() => setK04DeletePending(live.id)} onConfirm={() => void deleteK04Row(live)} onCancel={() => setK04DeletePending(null)} />
                   </td>
