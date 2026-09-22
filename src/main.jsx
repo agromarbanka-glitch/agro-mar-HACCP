@@ -11,7 +11,7 @@ import { extractPrintDocumentParts, buildCombinedLandscapePrintHtml, HACCP_BULK_
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth,
@@ -414,6 +414,8 @@ function App() {
     }
   })
   const [defaultK04Employee, setDefaultK04Employee] = useState('')
+  const [k04NewColumnLabel, setK04NewColumnLabel] = useState('')
+  const [k04ExtraColumnDefsByPeriod, setK04ExtraColumnDefsByPeriod] = useState({})
   const [defaultR13Employee, setDefaultR13Employee] = useState('')
   const [r13NewMonth, setR13NewMonth] = useState(new Date().toISOString().slice(0, 7))
   const [r13ColumnDefs, setR13ColumnDefs] = useState(() => loadR13Columns())
@@ -2178,6 +2180,52 @@ function App() {
     const idx = afterIndex !== null && afterIndex !== undefined ? afterIndex : kartotekaEndAfterIndex(docs)
     insertKartotekaRowAt(group, idx, k04DefaultDraft(period))
     setMessage('K04: dodano pusty wiersz – uzupełnij kolumny i kliknij Zapisz.')
+  }
+
+  async function syncK04CustomColumnDefs(group, nextDefs) {
+    if (!supabase) {
+      setMessage('Brak bazy – zapis układu kolumn K04 wymaga Supabase.')
+      return 0
+    }
+    const period = group?.period
+    const docs = dedupeK04Docs([...(group?.docs || [])].sort(k04DocSort))
+    if (!docs.length) {
+      setMessage('K04: brak wiersów w tej kartotece — najpierw utwórz miesiąc lub zapisz wiersze.')
+      return 0
+    }
+    let saved = 0
+    for (const doc of docs) {
+      const row = await saveK04DocumentField(doc, { k04_custom_column_defs: nextDefs })
+      if (row) saved++
+    }
+    if (period) setK04ExtraColumnDefsByPeriod(prev => ({ ...prev, [period]: nextDefs }))
+    return saved
+  }
+
+  async function addK04CustomColumn(group, label) {
+    const text = String(label || '').trim()
+    if (!text) return
+    const period = group?.period
+    const docs = dedupeK04Docs([...(group?.docs || [])].sort(k04DocSort))
+    const stored = resolveK04CustomColumnDefs(docs)
+    const current = (period && k04ExtraColumnDefsByPeriod[period]) || stored
+    const col = { id: String(Date.now()), label: text }
+    const n = await syncK04CustomColumnDefs(group, [...current, col])
+    setK04NewColumnLabel('')
+    setMessage(n ? `K04: dodano kolumnę „${text}” (zapis ${n} wierszy).` : `K04: dodano kolumnę „${text}” lokalnie — zapis nie powiódł się.`)
+  }
+
+  async function removeK04CustomColumn(group, columnId) {
+    const period = group?.period
+    const docs = dedupeK04Docs([...(group?.docs || [])].sort(k04DocSort))
+    const stored = resolveK04CustomColumnDefs(docs)
+    const current = (period && k04ExtraColumnDefsByPeriod[period]) || stored
+    const removed = current.find(c => c.id === columnId)
+    const next = current.filter(c => c.id !== columnId)
+    if (!removed) return
+    if (!confirmDelete(`Kolumnę K04 „${removed.label}”.`)) return
+    const n = await syncK04CustomColumnDefs(group, next)
+    setMessage(n ? `K04: usunięto kolumnę „${removed.label}”.` : 'K04: usunięto kolumnę lokalnie.')
   }
 
   function addK07ManualRow(group, afterIndex = null) {
@@ -4660,7 +4708,23 @@ function App() {
       const period = group.period
       const periodDocs = dedupeK04Docs([...docs].sort(k04DocSort))
       const groupKey = kartotekaGroupRowKey(group)
-      const k04ColSpan = 12
+      const k04ExtraCols = k04ExtraColumnDefsByPeriod[period] ?? resolveK04CustomColumnDefs(periodDocs)
+      const k04ColSpan = 10 + k04ExtraCols.length + 1
+
+      const k04ExtraColumnCells = (dataObj, onChange) => k04ExtraCols.map(col => {
+        const key = k04CustomColumnField(col.id)
+        const val = dataObj?.[key] ?? ''
+        return (
+          <td key={col.id} className="col-k04-extra">
+            {onChange ? (
+              <>
+                <input className="cell-input no-print k04-pulp-input" value={val} onChange={e => onChange(key, e.target.value)} placeholder="°C" />
+                <span className="print-only">{val}</span>
+              </>
+            ) : val}
+          </td>
+        )
+      })
 
       return <div className="monthly-paper k02-original k04-original">
         <div className="no-print employee-signature-row" style={{ marginBottom: '10px', flexWrap: 'wrap', gap: '10px' }}>
@@ -4673,6 +4737,23 @@ function App() {
           </label>
           <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
+        </div>
+        <div className="no-print k04-columns-toolbar" style={{ marginBottom: '10px' }}>
+          <b>Dodatkowe kolumny (cała kartoteka):</b>
+          {k04ExtraCols.length > 0 && (
+            <div className="k04-columns-list">
+              {k04ExtraCols.map(col => (
+                <span key={col.id} className="k04-column-chip">
+                  {col.label}
+                  <button type="button" className="mini danger" title="Usuń kolumnę" onClick={() => void removeK04CustomColumn(group, col.id)}>×</button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="k04-add-column-row">
+            <input value={k04NewColumnLabel} onChange={e => setK04NewColumnLabel(e.target.value)} placeholder="Opis kolumny, np. Zbiornik nr 5 [°C]" onKeyDown={e => { if (e.key === 'Enter' && k04NewColumnLabel.trim()) void addK04CustomColumn(group, k04NewColumnLabel) }} />
+            <button type="button" className="secondary" disabled={!k04NewColumnLabel.trim()} onClick={() => void addK04CustomColumn(group, k04NewColumnLabel)}>+ Dodaj kolumnę</button>
+          </div>
         </div>
         <table className="k02-head k04-head"><tbody>
           <tr>
@@ -4688,13 +4769,15 @@ function App() {
             <td className="k02-version">{K04_FORM_META.version}</td>
           </tr>
         </tbody></table>
-        <table className="k02-table k04-table"><thead><tr>
-          <th>Data</th><th>Godzina</th>
-          <th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 1 [°C]</th>
-          <th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 2 [°C]</th>
-          <th>Zbiornik na pulpę nr 1<br/>[°C]</th><th>Zbiornik na pulpę nr 2<br/>[°C]</th>
-          <th>Zbiornik na pulpę nr 3<br/>[°C]</th><th>Zbiornik na pulpę nr 4<br/>[°C]</th>
-          <th>Podpis<br/>osoby kontrolującej</th><th>Uwagi<br/>(P/N)*</th><th className="no-print">Akcje</th>
+        <div className="k04-table-scroll">
+        <table className="k04-table"><thead><tr>
+          <th className="col-date">Data</th><th className="col-time">Godzina</th>
+          <th className="col-chlod">Temperatura<br/>w chłodni produktu gotowego<br/>nr 1 [°C]</th>
+          <th className="col-chlod">Temperatura<br/>w chłodni produktu gotowego<br/>nr 2 [°C]</th>
+          <th className="col-pulp">Zbiornik na pulpę nr 1<br/>[°C]</th><th className="col-pulp">Zbiornik na pulpę nr 2<br/>[°C]</th>
+          <th className="col-pulp">Zbiornik na pulpę nr 3<br/>[°C]</th><th className="col-pulp">Zbiornik na pulpę nr 4<br/>[°C]</th>
+          {k04ExtraCols.map(col => <th key={col.id} className="col-k04-extra">{col.label}</th>)}
+          <th className="col-sign">Podpis<br/>osoby kontrolującej</th><th className="col-pn">Uwagi<br/>(P/N)*</th><th className="no-print col-actions">Akcje</th>
         </tr></thead><tbody>
           {renderKartotekaTableBody({
             docs: periodDocs,
@@ -4723,12 +4806,13 @@ function App() {
                     const key = k04PulpaTankField(n)
                     const pulpTemp = live.data?.[key] ?? ''
                     return (
-                      <td key={key}>
+                      <td key={key} className="col-pulp">
                         <input className="cell-input no-print k04-pulp-input" value={pulpTemp} onChange={e => setK04Override(live, key, e.target.value)} placeholder="°C" />
                         <span className="print-only">{pulpTemp}</span>
                       </td>
                     )
                   })}
+                  {k04ExtraColumnCells(live.data, (key, val) => setK04Override(live, key, val))}
                   <td><select className="mini-select no-print" value={signed} onChange={e => setK04Override(live, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
                   <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(live, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
                   <td className="col-actions no-print">
@@ -4761,7 +4845,15 @@ function App() {
                   {[1, 2, 3, 4].map(n => {
                     const key = k04PulpaTankField(n)
                     return (
-                      <td key={key}>
+                      <td key={key} className="col-pulp">
+                        <input className="cell-input no-print k04-pulp-input" value={draft[key] || ''} onChange={e => patchDraft({ [key]: e.target.value })} placeholder="°C" />
+                      </td>
+                    )
+                  })}
+                  {k04ExtraCols.map(col => {
+                    const key = k04CustomColumnField(col.id)
+                    return (
+                      <td key={col.id} className="col-k04-extra">
                         <input className="cell-input no-print k04-pulp-input" value={draft[key] || ''} onChange={e => patchDraft({ [key]: e.target.value })} placeholder="°C" />
                       </td>
                     )
@@ -4777,8 +4869,9 @@ function App() {
             }
           })}
         </tbody></table>
+        </div>
         {periodDocs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: w tym dniu magazynowano różne asortymenty – sprawdź wpisy.</div>}
-        <p className="hint no-print">K04: temperatura w zbiornikach na pulpę (0…−1°C) uzupełnia się automatycznie od daty produkcji K03 do daty WZ. Najedź na dolną krawędź wiersza – „+” wstawia pusty wiersz.</p>
+        <p className="hint no-print">K04: widoczne są 4 zbiorniki na pulpę (przewiń tabelę w poziomie, jeśli ekran jest wąski). Temperatura 0…−1°C uzupełnia się od daty produkcji K03 do WZ. Dodatkowe kolumny — pole powyżej tabeli.</p>
       </div>
     }
 
