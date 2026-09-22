@@ -256,6 +256,11 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
 
 /* v26.1 - K02 odwzorowanie wzoru papierowego */
 .k02-original,.k04-original,.k06-original,.k07-original{font-family:"Times New Roman",serif;color:#111;background:#fff;padding:12px;max-width:1220px;overflow:auto}
+.k04-original{max-width:1320px}
+.k04-original .k04-table th,.k04-original .k04-table td{font-size:11px;padding:2px 3px;line-height:1.08}
+.k04-original .k04-pulp-input,.k04-original .k04-table .cell-input{max-width:52px;font-size:11px;padding:2px 4px}
+.k04-original .k04-head .k02-title{font-size:13px;line-height:1.25}
+.k04-original .k04-head .k02-note{font-size:11px;line-height:1.2;text-align:left}
 .k02-original table,.k04-original table,.k06-original table,.k07-original table{width:100%;border-collapse:collapse;table-layout:fixed;margin:0}
 .k02-original td,.k02-original th,.k04-original td,.k04-original th,.k06-original td,.k06-original th,.k07-original td,.k07-original th{border:1px solid #111;text-align:center;vertical-align:middle;padding:4px 5px;font-size:14px;line-height:1.12;background:#fff;color:#111;font-weight:400}
 .k02-original th,.k04-original th,.k06-original th,.k07-original th{font-weight:700}

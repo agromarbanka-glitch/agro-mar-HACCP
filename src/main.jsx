@@ -11,7 +11,7 @@ import { extractPrintDocumentParts, buildCombinedLandscapePrintHtml, HACCP_BULK_
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth,
@@ -579,7 +579,7 @@ function App() {
     ['K01.1', 'K01.1 – Przyjęcie materiałów pomocniczych', 'Faktury zakupowe, opakowania i materiały pomocnicze'],
     ['K02', 'K02 – Magazynowanie surowca (CP2)', 'Komory surowca, temperatury i status P/N'],
     ['K03', 'K03 – Identyfikacja partii produktu', 'PZ użyte do konkretnego WZ, zgodnie z FIFO'],
-    ['K04', 'K04 – Magazynowanie produktu gotowego (CP3/CCP1)', 'Produkty gotowe, pulpy i komory/beczki'],
+    ['K04', 'K04 – Magazynowanie produktu gotowego (CCP2)', 'Chłodnie produktu gotowego i zbiorniki na pulpę'],
     ['K04.1', 'K04.1 – Magazynowanie podczas transportu', 'Kontrola temperatury i opakowania w transporcie'],
     ['K05', 'K05 – Towary wycofane', 'Rejestr wycofań partii i działań korygujących'],
     ['K06', 'K06 – Ocena jakości produktu', 'Ocena sensoryczna partii gotowej / po produkcji'],
@@ -2133,7 +2133,7 @@ function App() {
   }
 
   function k04DefaultDraft(period) {
-    return {
+    const draft = {
       document_date: `${period}-01`,
       godzina: '',
       temperatura_chlodnia_1: '',
@@ -2141,6 +2141,8 @@ function App() {
       podpis_kontrolujacego: '',
       uwagi: 'P'
     }
+    for (let n = 1; n <= 4; n++) draft[k04PulpaTankField(n)] = ''
+    return draft
   }
 
   function k07DefaultDraft(period) {
@@ -4657,9 +4659,8 @@ function App() {
     if (group.type === 'K04') {
       const period = group.period
       const periodDocs = dedupeK04Docs([...docs].sort(k04DocSort))
-      const chamber = group.chamber || 'CP3'
       const groupKey = kartotekaGroupRowKey(group)
-      const k04ColSpan = 7
+      const k04ColSpan = 12
 
       return <div className="monthly-paper k02-original k04-original">
         <div className="no-print employee-signature-row" style={{ marginBottom: '10px', flexWrap: 'wrap', gap: '10px' }}>
@@ -4673,18 +4674,28 @@ function App() {
           <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, false)}>Zastosuj do wszystkich</button>
           <button className="secondary" onClick={() => void setEmployeeForVisibleK04Group(group, defaultK04Employee, true)}>Uzupełnij puste</button>
         </div>
-        <table className="k02-head"><tbody>
+        <table className="k02-head k04-head"><tbody>
           <tr>
-            <td className="k02-company" rowSpan="2"><b>AGRO-MAR<br/>MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
-            <td className="k02-title"><b>Karta K04 - Karta kontroli parametrów<br/>magazynowania produktów gotowych (CP3)</b></td>
-            <td className="k02-meta"><b>Rok:</b> {group.period.slice(0, 4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5, 7)}<br/><b>Komora:</b> {chamber}</td>
+            <td className="k02-company" rowSpan={3}><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
+            <td className="k02-title" colSpan={5}><b>{K04_FORM_META.title}</b></td>
+            <td className="k02-meta" rowSpan={2}><b>Rok:</b> {group.period.slice(0, 4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5, 7)}<br/><br/><b>Strona:</b></td>
           </tr>
           <tr>
-            <td className="k02-note">- Temp. CP3: jabłko na obierkę/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C.<br/><b>Jabłko przemysłowe nie jest magazynowane</b> – prosto do sprzedaży (K04.1).</td>
-            <td className="k02-version">Wersja I/2024</td>
+            <td className="k02-note" colSpan={5}>{K04_FORM_META.tempNotes.map((line, i) => <React.Fragment key={i}>{i ? <br/> : null}{line}</React.Fragment>)}</td>
+          </tr>
+          <tr>
+            <td colSpan={5}></td>
+            <td className="k02-version">{K04_FORM_META.version}</td>
           </tr>
         </tbody></table>
-        <table className="k02-table"><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>nr 1 [°C]</th><th>Temperatura<br/>nr 2 [°C]</th><th>Podpis osoby<br/>kontrolującej</th><th>Uwagi<br/>(P/N)*</th><th className="no-print">Akcje</th></tr></thead><tbody>
+        <table className="k02-table k04-table"><thead><tr>
+          <th>Data</th><th>Godzina</th>
+          <th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 1 [°C]</th>
+          <th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 2 [°C]</th>
+          <th>Zbiornik na pulpę nr 1<br/>[°C]</th><th>Zbiornik na pulpę nr 2<br/>[°C]</th>
+          <th>Zbiornik na pulpę nr 3<br/>[°C]</th><th>Zbiornik na pulpę nr 4<br/>[°C]</th>
+          <th>Podpis<br/>osoby kontrolującej</th><th>Uwagi<br/>(P/N)*</th><th className="no-print">Akcje</th>
+        </tr></thead><tbody>
           {renderKartotekaTableBody({
             docs: periodDocs,
             groupKey,
@@ -4708,6 +4719,16 @@ function App() {
                   <td><input className="cell-input no-print" value={godzina} onChange={e => setK04Override(live, 'godzina', e.target.value)} placeholder="09:15" /><span className="print-only">{godzina}</span></td>
                   <td><input className="cell-input no-print" value={temp1} onChange={e => setK04Override(live, 'temperatura_chlodnia_1', e.target.value)} placeholder="°C" /><span className="print-only">{temp1}</span></td>
                   <td><input className="cell-input no-print" value={temp2} onChange={e => setK04Override(live, 'temperatura_chlodnia_2', e.target.value)} placeholder="°C" /><span className="print-only">{temp2}</span></td>
+                  {[1, 2, 3, 4].map(n => {
+                    const key = k04PulpaTankField(n)
+                    const pulpTemp = live.data?.[key] ?? ''
+                    return (
+                      <td key={key}>
+                        <input className="cell-input no-print k04-pulp-input" value={pulpTemp} onChange={e => setK04Override(live, key, e.target.value)} placeholder="°C" />
+                        <span className="print-only">{pulpTemp}</span>
+                      </td>
+                    )
+                  })}
                   <td><select className="mini-select no-print" value={signed} onChange={e => setK04Override(live, 'podpis_kontrolujacego', e.target.value)}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select><span className="print-only">{signed}</span></td>
                   <td className={uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={uwagi} onChange={e => setK04Override(live, 'uwagi', e.target.value)}><option value="P">P</option><option value="N">N</option></select><span className="print-only">{uwagi}</span></td>
                   <td className="col-actions no-print">
@@ -4737,6 +4758,14 @@ function App() {
                   <td><input className="cell-input no-print" value={draft.godzina} onChange={e => patchDraft({ godzina: e.target.value })} placeholder="09:15" /></td>
                   <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_1} onChange={e => patchDraft({ temperatura_chlodnia_1: e.target.value })} placeholder="°C" /></td>
                   <td><input className="cell-input no-print" value={draft.temperatura_chlodnia_2} onChange={e => patchDraft({ temperatura_chlodnia_2: e.target.value })} placeholder="°C" /></td>
+                  {[1, 2, 3, 4].map(n => {
+                    const key = k04PulpaTankField(n)
+                    return (
+                      <td key={key}>
+                        <input className="cell-input no-print k04-pulp-input" value={draft[key] || ''} onChange={e => patchDraft({ [key]: e.target.value })} placeholder="°C" />
+                      </td>
+                    )
+                  })}
                   <td><select className="mini-select no-print" value={draft.podpis_kontrolujacego} onChange={e => patchDraft({ podpis_kontrolujacego: e.target.value })}><option value="">Wybierz</option>{employees.map(emp => <option key={emp.id} value={emp.full_name}>{emp.full_name}</option>)}</select></td>
                   <td className={draft.uwagi === 'N' ? 'pn-n' : ''}><select className="mini-select no-print" value={draft.uwagi} onChange={e => patchDraft({ uwagi: e.target.value })}><option value="P">P</option><option value="N">N</option></select></td>
                   <td className="col-actions no-print">
@@ -4749,7 +4778,7 @@ function App() {
           })}
         </tbody></table>
         {periodDocs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: w tym dniu magazynowano różne asortymenty – sprawdź wpisy.</div>}
-        <p className="hint no-print">K04: najedź na dolną krawędź wiersza – mały „+” wstawia pusty wiersz. Usuń w kolumnie Akcje.</p>
+        <p className="hint no-print">K04: temperatura w zbiornikach na pulpę (0…−1°C) uzupełnia się automatycznie od daty produkcji K03 do daty WZ. Najedź na dolną krawędź wiersza – „+” wstawia pusty wiersz.</p>
       </div>
     }
 

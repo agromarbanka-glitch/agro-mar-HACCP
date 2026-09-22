@@ -1,9 +1,27 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '2.1'
+export const HACCP_FORMS_VERSION = '2.2'
 
 import { calendarDaysInMonth } from './r13Engine'
+import { resolveK03ProductionDate } from './k03Engine'
+
+/** Układ papierowy K04 (CCP2) — zgodnie z kartą Word I/2024. */
+export const K04_FORM_META = {
+  title: 'Karta K04 - Karta kontroli parametrów magazynowania produktów gotowych (CCP2)',
+  version: 'Wersja I/2024',
+  tempNotes: [
+    '- Temp. w chłodniach/zbiornikach na pulpę docelowo: 2-3°C (±1°C). – GRUPA I (jabłka, gruszki),',
+    '-4 - -2 °C (±1°C) – GRUPA I (truskawki)',
+    '0-1 °C – GRUPA III (maliny, porzeczki czarne i czerwone)'
+  ]
+}
+
+export const K04_PULPA_TANK_COUNT = 4
+
+export function k04PulpaTankField(n) {
+  return `temperatura_zbiornik_pulpa_${n}`
+}
 
 function normalizeText(value) {
   return String(value || '')
@@ -169,6 +187,10 @@ function applyK04Override(doc, ov = {}) {
   if (Object.prototype.hasOwnProperty.call(ov, 'godzina')) data.godzina = ov.godzina
   if (Object.prototype.hasOwnProperty.call(ov, 'temperatura_chlodnia_1')) data.temperatura_chlodnia_1 = ov.temperatura_chlodnia_1
   if (Object.prototype.hasOwnProperty.call(ov, 'temperatura_chlodnia_2')) data.temperatura_chlodnia_2 = ov.temperatura_chlodnia_2
+  for (let n = 1; n <= K04_PULPA_TANK_COUNT; n++) {
+    const key = k04PulpaTankField(n)
+    if (Object.prototype.hasOwnProperty.call(ov, key)) data[key] = ov[key]
+  }
   if (Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego')) data.podpis_kontrolujacego = ov.podpis_kontrolujacego
   if (Object.prototype.hasOwnProperty.call(ov, 'uwagi')) data.uwagi = ov.uwagi
   return {
@@ -182,10 +204,17 @@ function applyK04Override(doc, ov = {}) {
 
 export function normalizeK04Data(data = {}, signedBy = '') {
   const d = data || {}
+  const pulp = {}
+  for (let n = 1; n <= K04_PULPA_TANK_COUNT; n++) {
+    const key = k04PulpaTankField(n)
+    pulp[key] = d[key] ?? ''
+  }
   return {
     godzina: d.godzina ?? '',
     temperatura_chlodnia_1: d.temperatura_chlodnia_1 ?? '',
     temperatura_chlodnia_2: d.temperatura_chlodnia_2 ?? '',
+    ...pulp,
+    pulpa_auto: d.pulpa_auto && typeof d.pulpa_auto === 'object' ? { ...d.pulpa_auto } : {},
     podpis_kontrolujacego: signedBy || d.podpis_kontrolujacego || '',
     uwagi: normalizePn(d.uwagi || 'P'),
     produkty: d.produkty || '',
@@ -220,6 +249,9 @@ export function scoreK04Doc(doc) {
   if (doc?.data?.godzina) s += 5
   if (doc?.signed_by_operator || doc?.data?.podpis_kontrolujacego) s += 5
   if (doc?.data?.temperatura_chlodnia_1) s += 2
+  for (let n = 1; n <= K04_PULPA_TANK_COUNT; n++) {
+    if (doc?.data?.[k04PulpaTankField(n)]) s += 1
+  }
   return s
 }
 
@@ -711,6 +743,55 @@ export function getLiveK06Doc(doc, overrides = {}) {
   return applyK06Override(doc, ov)
 }
 
+function isPulpProductName(productName = '') {
+  return normalizeText(productName).includes('pulpa')
+}
+
+/** Losowa temperatura 0…-1 °C (deterministyczna od seed — ten sam dzień/K03 daje ten sam wynik). */
+export function k04RandomPulpTankTempC(seed = '') {
+  let h = 0
+  const s = String(seed)
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h) + s.charCodeAt(i)
+  const step = Math.abs(h) % 11
+  return String(-step / 10)
+}
+
+function preferredPulpTankForK03(k03) {
+  const key = String(k03?.id || k03?.document_no || k03?.lot_no || 'k03')
+  let h = 0
+  for (let i = 0; i < key.length; i++) h = ((h << 5) - h) + key.charCodeAt(i)
+  return (Math.abs(h) % K04_PULPA_TANK_COUNT) + 1
+}
+
+function applyK03PulpTankTemperatures(dailyEntries, k03Forms = []) {
+  for (const k03 of k03Forms || []) {
+    if (!k03?.product_name || !isPulpProductName(k03.product_name)) continue
+    const prodDate = resolveK03ProductionDate(k03)
+    const saleDate = String(k03.data?.wz_date || k03.document_date || '').slice(0, 10)
+    if (!prodDate || !saleDate || prodDate > saleDate) continue
+    const k03Key = String(k03.id || k03.document_no || k03.lot_no || '')
+    const preferred = preferredPulpTankForK03(k03)
+    for (const date of dateRangeInclusive(prodDate, saleDate)) {
+      const id = `K04-${date.slice(0, 7)}-${date}`
+      const entry = dailyEntries.get(id)
+      if (!entry) continue
+      const auto = { ...(entry.data.pulpa_auto || {}) }
+      const occupied = new Set(Object.keys(auto).map(Number))
+      let tank = preferred
+      if (occupied.has(tank) && auto[tank] !== k03Key) {
+        tank = [1, 2, 3, 4].find(t => !occupied.has(t) || auto[t] === k03Key) || preferred
+      }
+      const field = k04PulpaTankField(tank)
+      const manual = entry.data[field] && !auto[tank]
+      if (manual) continue
+      entry.data[field] = k04RandomPulpTankTempC(`${k03Key}|${date}|zb${tank}`)
+      auto[tank] = k03Key
+      entry.data.pulpa_auto = auto
+      if (!entry.data.auto_source) entry.data.auto_source = 'k03_pulpa'
+    }
+  }
+}
+
 function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGroup, productName, lot, start, end, lotId = null }) {
   const temp = k04TempForProductName(productName)
   for (const date of dateRangeInclusive(start, end)) {
@@ -813,11 +894,7 @@ export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}, k03Fo
     const productGroup = k03.product_group || k03.data?.product_group || productGroupForName(productName)
     if (isDirectToSaleProduct(productName, productGroup)) continue
     const wzDate = String(k03.data?.wz_date || k03.document_date || '').slice(0, 10)
-    const start = String(
-      k03.data?.k03_workflow?.przerob_date ||
-      k03.data?.k03_workflow?.fifo_cutoff_date ||
-      wzDate
-    ).slice(0, 10)
+    const start = resolveK03ProductionDate(k03)
     if (!start || !wzDate) continue
     const matchedLot = (lots || []).find(l => l.lot_no && k03.lot_no && l.lot_no === k03.lot_no)
     const chamberCode = matchedLot?.chamber?.code || 'CP3'
@@ -831,6 +908,8 @@ export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}, k03Fo
       lotId: matchedLot?.id || null
     })
   }
+
+  applyK03PulpTankTemperatures(dailyEntries, k03Forms)
 
   return dedupeK04Docs(Array.from(dailyEntries.values()).map(doc => {
     const mixedKey = `${doc.chamber_code}|${doc.document_date}`
@@ -1069,6 +1148,10 @@ export function buildManualK04BlankDoc(period, manualId, seed = {}, overrides = 
       godzina: seed.godzina || '',
       temperatura_chlodnia_1: seed.temperatura_chlodnia_1 ?? '',
       temperatura_chlodnia_2: seed.temperatura_chlodnia_2 ?? '',
+      ...Object.fromEntries(Array.from({ length: K04_PULPA_TANK_COUNT }, (_, i) => {
+        const key = k04PulpaTankField(i + 1)
+        return [key, seed[key] ?? '']
+      })),
       podpis_kontrolujacego: seed.podpis_kontrolujacego || '',
       uwagi: seed.uwagi || 'P',
       month_key: period,
@@ -1132,26 +1215,23 @@ export function getLiveK07Doc(doc, overrides) {
   return applyK07Override(doc, overrides?.[doc?.id] || {})
 }
 
-function k04TempNote(productName = '', chamberCode = '') {
-  if (normalizeText(chamberCode).startsWith('ccp')) {
-    return '- Temp. w beczkach CCP1 (pulpa): ok. -18°C (±2°C).'
-  }
-  return `- Temp. CP3: jabłko na obierkę/gruszki 2°C, truskawki -2°C, maliny/porzeczki 0°C. Jabłko przemysłowe nie jest magazynowane – jedzie prosto do sprzedaży (K04.1).`
+function k04PrintRowCells(doc, escapeHtml) {
+  const d = doc.data || {}
+  const pulp = [1, 2, 3, 4].map(n => `<td>${escapeHtml(d[k04PulpaTankField(n)] || '')}</td>`).join('')
+  return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(d.godzina || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_1 || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_2 || '')}</td>${pulp}<td>${escapeHtml(doc.signed_by_operator || d.podpis_kontrolujacego || '')}</td><td>${normalizePn(d.uwagi || 'P')}</td></tr>`
 }
 
 export function buildK04MonthlyHtml(group, escapeHtml) {
   const docs = dedupeK04Docs(group.docs || [])
   const year = (group.period || docs[0]?.document_date || '').slice(0, 4)
   const month = (group.period || docs[0]?.document_date || '').slice(5, 7)
-  const chamber = group.chamber || docs[0]?.chamber_code || 'CP3'
-  const productLabel = docs.map(d => d.data?.produkty).filter(Boolean).join(', ') || 'według wpisów w tabeli'
-  const rows = docs.map(doc => {
-    const d = doc.data || {}
-    return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td>${escapeHtml(d.godzina || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_1 || '')}</td><td>${escapeHtml(d.temperatura_chlodnia_2 || '')}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis_kontrolujacego || '')}</td><td>${normalizePn(d.uwagi || 'P')}</td></tr>`
-  }).join('')
-  const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
-  const note = k04TempNote('', chamber)
-  return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(group.period || '')}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:11pt;line-height:1.12}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.5}.meta{width:25%;text-align:left;vertical-align:top}.temp-note{text-align:left;font-size:11pt;line-height:1.15;padding-left:8px}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR<br>MARIUSZ BAŃKA<br>SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K04 - Karta kontroli parametrów<br>magazynowania produktów gotowych (CP3)</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Komora:</b> ${escapeHtml(chamber)}</td></tr><tr><td class="temp-note">${note}</td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br>nr 1 [°C]</th><th>Temperatura<br>nr 2 [°C]</th><th>Podpis osoby<br>kontrolującej</th><th>Uwagi<br>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  const notes = K04_FORM_META.tempNotes.map(l => escapeHtml(l)).join('<br/>')
+  const rows = docs.map(doc => k04PrintRowCells(doc, escapeHtml)).join('')
+  const blankCols = 10
+  const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () =>
+    `<tr class="blank-row">${Array.from({ length: blankCols }).map(() => '<td></td>').join('')}</tr>`
+  ).join('')
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(group.period || '')}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:3px 2px;text-align:center;vertical-align:middle;font-size:10pt;line-height:1.1}.company{width:33%;font-weight:bold;line-height:1.12;text-align:center}.title{width:44%;font-weight:bold;line-height:1.35;text-align:center}.meta{width:17%;text-align:left;vertical-align:top;font-size:10pt}.temp-note{text-align:left;font-size:10pt;line-height:1.2;padding:4px 6px}.blank-row td{height:20px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="3"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td class="title" colspan="5"><b>${escapeHtml(K04_FORM_META.title)}</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br/><br/><b>Miesiąc:</b> ${escapeHtml(month)}<br/><br/><b>Strona:</b></td></tr><tr><td class="temp-note" colspan="5">${notes}</td></tr><tr><td colspan="5"></td><td class="meta" style="text-align:center">${escapeHtml(K04_FORM_META.version)}</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 2 [°C]</th><th>Zbiornik na pulpę nr 1<br/>[°C]</th><th>Zbiornik na pulpę nr 2<br/>[°C]</th><th>Zbiornik na pulpę nr 3<br/>[°C]</th><th>Zbiornik na pulpę nr 4<br/>[°C]</th><th>Podpis<br/>osoby kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildK06MonthlyHtml(group, escapeHtml) {
@@ -1299,11 +1379,21 @@ export function buildK04ExcelRows(group) {
   const docs = dedupeK04Docs(group.docs || [])
   const rows = []
   rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
-  rows.push(['Karta K04 - magazynowanie produktów gotowych (CP3)', '', '', '', '', `Okres: ${group.period || ''}`])
-  rows.push(['Data', 'Godzina', 'Temperatura nr 1 [°C]', 'Temperatura nr 2 [°C]', 'Podpis', 'Uwagi (P/N)'])
+  rows.push([K04_FORM_META.title, '', '', '', '', '', '', '', '', `Okres: ${group.period || ''}`])
+  rows.push([
+    'Data', 'Godzina',
+    'Chłodnia gotowego nr 1 [°C]', 'Chłodnia gotowego nr 2 [°C]',
+    'Zbiornik pulpę nr 1 [°C]', 'Zbiornik pulpę nr 2 [°C]', 'Zbiornik pulpę nr 3 [°C]', 'Zbiornik pulpę nr 4 [°C]',
+    'Podpis', 'Uwagi (P/N)'
+  ])
   for (const doc of docs) {
     const d = doc.data || {}
-    rows.push([doc.document_date || '', d.godzina || '', d.temperatura_chlodnia_1 || '', d.temperatura_chlodnia_2 || '', doc.signed_by_operator || d.podpis_kontrolujacego || '', normalizePn(d.uwagi || 'P')])
+    rows.push([
+      doc.document_date || '', d.godzina || '',
+      d.temperatura_chlodnia_1 || '', d.temperatura_chlodnia_2 || '',
+      d[k04PulpaTankField(1)] || '', d[k04PulpaTankField(2)] || '', d[k04PulpaTankField(3)] || '', d[k04PulpaTankField(4)] || '',
+      doc.signed_by_operator || d.podpis_kontrolujacego || '', normalizePn(d.uwagi || 'P')
+    ])
   }
   return rows
 }
