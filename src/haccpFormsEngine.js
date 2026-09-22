@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '2.3'
+export const HACCP_FORMS_VERSION = '2.4'
 
 import { calendarDaysInMonth } from './r13Engine'
 import { resolveK03ProductionDate } from './k03Engine'
@@ -781,7 +781,7 @@ function isPulpProductName(productName = '') {
   return normalizeText(productName).includes('pulpa')
 }
 
-/** Losowa temperatura 0…-1 °C (deterministyczna od seed — ten sam dzień/K03 daje ten sam wynik). */
+/** Losowa temperatura 0…-1 °C (deterministyczna od seed — ten sam dzień/partia daje ten sam wynik). */
 export function k04RandomPulpTankTempC(seed = '') {
   let h = 0
   const s = String(seed)
@@ -790,40 +790,187 @@ export function k04RandomPulpTankTempC(seed = '') {
   return String(-step / 10)
 }
 
-function preferredPulpTankForK03(k03) {
-  const key = String(k03?.id || k03?.document_no || k03?.lot_no || 'k03')
-  let h = 0
-  for (let i = 0; i < key.length; i++) h = ((h << 5) - h) + key.charCodeAt(i)
-  return (Math.abs(h) % K04_PULPA_TANK_COUNT) + 1
+function k03PulpBatchKey(k03) {
+  return String(
+    k03?.lot_no ||
+    k03?.data?.k03_workflow?.lot_no ||
+    k03?.document_no ||
+    k03?.id ||
+    ''
+  ).trim()
 }
 
-function applyK03PulpTankTemperatures(dailyEntries, k03Forms = []) {
-  for (const k03 of k03Forms || []) {
+function collectPulpK03Batches(k03Forms = []) {
+  const batches = []
+  for (const k03 of k03Forms) {
     if (!k03?.product_name || !isPulpProductName(k03.product_name)) continue
     const prodDate = resolveK03ProductionDate(k03)
     const saleDate = String(k03.data?.wz_date || k03.document_date || '').slice(0, 10)
     if (!prodDate || !saleDate || prodDate > saleDate) continue
-    const k03Key = String(k03.id || k03.document_no || k03.lot_no || '')
-    const preferred = preferredPulpTankForK03(k03)
-    for (const date of dateRangeInclusive(prodDate, saleDate)) {
-      const id = `K04-${date.slice(0, 7)}-${date}`
-      const entry = dailyEntries.get(id)
-      if (!entry) continue
-      const auto = { ...(entry.data.pulpa_auto || {}) }
-      const occupied = new Set(Object.keys(auto).map(Number))
-      let tank = preferred
-      if (occupied.has(tank) && auto[tank] !== k03Key) {
-        tank = [1, 2, 3, 4].find(t => !occupied.has(t) || auto[t] === k03Key) || preferred
+    const k03Key = k03PulpBatchKey(k03)
+    if (!k03Key) continue
+    batches.push({
+      k03,
+      k03Key,
+      prodDate,
+      saleDate,
+      lotLabel: String(k03.lot_no || k03.document_no || k03Key).trim(),
+      productName: k03.product_name
+    })
+  }
+  batches.sort((a, b) =>
+    a.prodDate.localeCompare(b.prodDate) ||
+    a.lotLabel.localeCompare(b.lotLabel, 'pl') ||
+    a.k03Key.localeCompare(b.k03Key, 'pl'))
+  return batches
+}
+
+/** Jedna partia → jeden zbiornik (1–4); nakładające się partie → kolejny wolny zbiornik. */
+function assignPulpTankByBatch(batches) {
+  const batchTank = new Map()
+  const dayTankHolder = new Map()
+
+  function dayMap(date) {
+    if (!dayTankHolder.has(date)) dayTankHolder.set(date, {})
+    return dayTankHolder.get(date)
+  }
+
+  function tankFreeForBatch(tank, batch) {
+    for (const date of dateRangeInclusive(batch.prodDate, batch.saleDate)) {
+      const holder = dayMap(date)[tank]
+      if (holder && holder !== batch.k03Key) return false
+    }
+    return true
+  }
+
+  for (const batch of batches) {
+    let tank = batchTank.get(batch.k03Key)
+    if (!tank) {
+      tank = [1, 2, 3, 4].find(t => tankFreeForBatch(t, batch)) || null
+      if (!tank) {
+        batch.tankOverflow = true
+        tank = 4
       }
-      const field = k04PulpaTankField(tank)
-      const manual = entry.data[field] && !auto[tank]
-      if (manual) continue
-      entry.data[field] = k04RandomPulpTankTempC(`${k03Key}|${date}|zb${tank}`)
-      auto[tank] = k03Key
-      entry.data.pulpa_auto = auto
-      if (!entry.data.auto_source) entry.data.auto_source = 'k03_pulpa'
+      batchTank.set(batch.k03Key, tank)
+    }
+    batch.tank = tank
+    for (const date of dateRangeInclusive(batch.prodDate, batch.saleDate)) {
+      dayMap(date)[tank] = batch.k03Key
     }
   }
+  return batches
+}
+
+function k04DailyEntryId(date) {
+  return `K04-${date.slice(0, 7)}-${date}`
+}
+
+function ensureK04DailyEntryForPulpa(dailyEntries, date, batch) {
+  const id = k04DailyEntryId(date)
+  if (dailyEntries.has(id)) return dailyEntries.get(id)
+  const period = date.slice(0, 7)
+  const entry = {
+    id,
+    synthetic: true,
+    document_type: 'K04',
+    document_date: date,
+    product_name: 'CP3 – magazyn produktów gotowych',
+    lot_no: batch.lotLabel || '',
+    document_no: `K04/${period}/${date}`,
+    chamber_code: 'CP3',
+    qty: 0,
+    status: 'P',
+    data: {
+      godzina: '09:15',
+      temperatura_chlodnia_1: k04TempForProductName(batch.productName),
+      temperatura_chlodnia_2: k04TempForProductName(batch.productName),
+      podpis_kontrolujacego: '',
+      uwagi: 'P',
+      produkty: batch.productName,
+      month_key: period,
+      auto_source: 'k03_pulpa',
+      k03_pulpa_lot: batch.lotLabel
+    },
+    signed_by_operator: '',
+    document_version: 'I/2024',
+    created_at: date
+  }
+  dailyEntries.set(id, entry)
+  return entry
+}
+
+function applyK03PulpTankTemperatures(dailyEntries, k03Forms = []) {
+  const batches = assignPulpTankByBatch(collectPulpK03Batches(k03Forms))
+  for (const batch of batches) {
+    const tank = batch.tank
+    if (!tank) continue
+    const field = k04PulpaTankField(tank)
+    for (const date of dateRangeInclusive(batch.prodDate, batch.saleDate)) {
+      const entry = ensureK04DailyEntryForPulpa(dailyEntries, date, batch)
+      if (!entry?.data) continue
+      const auto = { ...(entry.data.pulpa_auto || {}) }
+      if (entry.data[field] && !auto[tank]) continue
+      entry.data[field] = k04RandomPulpTankTempC(`${batch.k03Key}|${date}|t${tank}`)
+      auto[tank] = batch.k03Key
+      entry.data.pulpa_auto = auto
+      entry.data.pulpa_tank_by_lot = { ...(entry.data.pulpa_tank_by_lot || {}), [batch.k03Key]: tank }
+      if (batch.tankOverflow) entry.data.pulpa_tank_overflow = true
+      if (!entry.data.auto_source || entry.data.auto_source === 'trace') entry.data.auto_source = 'k03_pulpa'
+      const tag = batch.lotLabel
+      if (tag) {
+        const produkty = String(entry.data.produkty || '')
+        if (!normalizeText(produkty).includes(normalizeText(tag))) {
+          entry.data.produkty = produkty ? `${produkty}, ${tag}` : `${batch.productName} (${tag})`
+        }
+      }
+    }
+  }
+}
+
+/** Uzupełnia zbiorniki na pulpę także na wierszach K04 z bazy (kartoteka miesięczna), bez nadpisywania ręcznych wpisów. */
+export function enrichK04DocsPulpFromK03(docs = [], k03Forms = []) {
+  if (!docs?.length || !k03Forms?.length) return docs
+  const dailyEntries = new Map()
+  for (const doc of docs) {
+    const date = String(doc.document_date || '').slice(0, 10)
+    if (!date) continue
+    dailyEntries.set(k04DailyEntryId(date), {
+      ...doc,
+      data: { ...(doc.data || {}) }
+    })
+  }
+  applyK03PulpTankTemperatures(dailyEntries, k03Forms)
+  return docs.map(doc => {
+    const date = String(doc.document_date || '').slice(0, 10)
+    const enriched = dailyEntries.get(k04DailyEntryId(date))
+    if (!enriched?.data) return doc
+    const mergedData = { ...(doc.data || {}) }
+    let changed = false
+    for (let t = 1; t <= K04_PULPA_TANK_COUNT; t++) {
+      const key = k04PulpaTankField(t)
+      const wasManual = mergedData[key] && !mergedData.pulpa_auto?.[t]
+      if (wasManual) continue
+      const nextVal = enriched.data[key]
+      if (nextVal !== undefined && nextVal !== mergedData[key]) {
+        mergedData[key] = nextVal
+        changed = true
+      }
+    }
+    if (enriched.data.pulpa_auto && Object.keys(enriched.data.pulpa_auto).length) {
+      mergedData.pulpa_auto = { ...(mergedData.pulpa_auto || {}), ...enriched.data.pulpa_auto }
+      changed = true
+    }
+    if (enriched.data.pulpa_tank_by_lot) {
+      mergedData.pulpa_tank_by_lot = { ...(mergedData.pulpa_tank_by_lot || {}), ...enriched.data.pulpa_tank_by_lot }
+      changed = true
+    }
+    if (enriched.data.pulpa_tank_overflow) mergedData.pulpa_tank_overflow = true
+    if (enriched.data.produkty && enriched.data.produkty !== mergedData.produkty) {
+      mergedData.produkty = enriched.data.produkty
+      changed = true
+    }
+    return changed ? { ...doc, data: mergedData } : doc
+  })
 }
 
 function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGroup, productName, lot, start, end, lotId = null }) {
