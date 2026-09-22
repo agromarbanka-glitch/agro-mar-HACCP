@@ -11,7 +11,7 @@ import { extractPrintDocumentParts, buildCombinedLandscapePrintHtml, HACCP_BULK_
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, normalizeK03DocsForK04Pulp, buildK04PulpAutoByDate, applyK04PulpAutoToDoc, enrichK04DocsPulpFromK03, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, normalizeK03DocsForK04Pulp, buildK04PulpAutoByDate, applyK04PulpAutoToDoc, enrichK04DocsPulpFromK03, findPersistedK04DocForDay, k04OverridesForDoc, scrubLegacyK04Labels, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth,
@@ -381,7 +381,15 @@ function App() {
   const [k04ManualExtra, setK04ManualExtra] = useState([])
   const [kartotekaPendingRows, setKartotekaPendingRows] = useState({})
   const [k04DeletePending, setK04DeletePending] = useState(null)
-  const [k04HiddenKeys, setK04HiddenKeys] = useState(() => new Set())
+  const K04_HIDDEN_STORAGE_KEY = 'agro-mar-k04-hidden-v1'
+  const [k04HiddenKeys, setK04HiddenKeys] = useState(() => {
+    try {
+      const raw = localStorage.getItem(K04_HIDDEN_STORAGE_KEY)
+      return new Set(JSON.parse(raw || '[]'))
+    } catch {
+      return new Set()
+    }
+  })
   const [k04NewMonth, setK04NewMonth] = useState(new Date().toISOString().slice(0, 7))
   const [k06Overrides, setK06Overrides] = useState({})
   const [k06DeletePending, setK06DeletePending] = useState(null)
@@ -581,7 +589,7 @@ function App() {
     ['K01.1', 'K01.1 – Przyjęcie materiałów pomocniczych', 'Faktury zakupowe, opakowania i materiały pomocnicze'],
     ['K02', 'K02 – Magazynowanie surowca (CP2)', 'Komory surowca, temperatury i status P/N'],
     ['K03', 'K03 – Identyfikacja partii produktu', 'PZ użyte do konkretnego WZ, zgodnie z FIFO'],
-    ['K04', 'K04 – Magazynowanie produktu gotowego (CCP2)', 'Chłodnie produktu gotowego i zbiorniki na pulpę'],
+    ['K04', 'K04 – Magazynowanie produktu gotowego (CP2)', 'Chłodnie produktu gotowego i zbiorniki na pulpę'],
     ['K04.1', 'K04.1 – Magazynowanie podczas transportu', 'Kontrola temperatury i opakowania w transporcie'],
     ['K05', 'K05 – Towary wycofane', 'Rejestr wycofań partii i działań korygujących'],
     ['K06', 'K06 – Ocena jakości produktu', 'Ocena sensoryczna partii gotowej / po produkcji'],
@@ -691,28 +699,40 @@ function App() {
     () => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides, k04PulpK03Sources),
     [formsTraceContext, k04Overrides, k04PulpK03Sources]
   )
+  const k04RelatedDocsPool = useMemo(() => [
+    ...(haccpDocs || []).filter(d => d.document_type === 'K04'),
+    ...(syntheticK04Docs || []),
+    ...k04ManualExtra
+  ], [haccpDocs, syntheticK04Docs, k04ManualExtra])
   const mergedK04Docs = useMemo(() => {
     const isK04Db = (doc) => doc?.id && !doc.synthetic && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(doc.id))
     const fromDb = (haccpDocs || []).filter(d =>
       d.document_type === 'K04' && !k04HiddenKeys.has(k04StableKey(d))
     )
     const synthetic = (syntheticK04Docs || []).filter(d => !k04HiddenKeys.has(k04StableKey(d)))
+    const pool = [...fromDb, ...synthetic, ...k04ManualExtra]
+    const liveFor = (d) => getLiveK04Doc(d, k04Overrides, pool)
     const byKey = new Map()
     const prefer = (existing, candidate) => {
       if (!existing) return candidate
+      const exLive = liveFor(existing)
+      const candLive = liveFor(candidate)
+      const exScore = scoreK04Doc(exLive)
+      const candScore = scoreK04Doc(candLive)
+      if (candScore !== exScore) return candScore > exScore ? candLive : exLive
       const exDb = isK04Db(existing)
       const candDb = isK04Db(candidate)
-      if (candDb && !exDb) return candidate
-      if (exDb && !candDb) return existing
-      return scoreK04Doc(candidate) >= scoreK04Doc(existing) ? candidate : existing
+      if (candDb && !exDb) return candLive
+      if (exDb && !candDb) return exLive
+      return candScore >= exScore ? candLive : exLive
     }
     for (const d of [...fromDb, ...synthetic]) {
-      const live = getLiveK04Doc(d, k04Overrides)
+      const live = liveFor(d)
       byKey.set(k04StableKey(live), prefer(byKey.get(k04StableKey(live)), live))
     }
     for (const d of k04ManualExtra) {
       if (!k04HiddenKeys.has(k04StableKey(d))) {
-        byKey.set(k04StableKey(d), getLiveK04Doc(d, k04Overrides))
+        byKey.set(k04StableKey(d), liveFor(d))
       }
     }
     const merged = dedupeK04Docs(Array.from(byKey.values()))
@@ -2040,7 +2060,7 @@ function App() {
 
   function mergeK04SavedIntoSelection(oldDoc, savedRow) {
     if (!savedRow?.id) return
-    mergeHaccpDoc(savedRow.id, savedRow)
+    mergeHaccpDocsBatch([savedRow])
     const stable = k04StableKey(oldDoc)
     setSelectedHaccpDoc(prev => {
       if (!prev?.groupPreview || prev.group?.type !== 'K04') return prev
@@ -2051,15 +2071,19 @@ function App() {
 
   function setK04Override(doc, field, value) {
     if (!doc?.id) return
+    const patch = { [field]: value }
+    if (field === 'temperatura_chlodnia_1' || field === 'temperatura_chlodnia_2') {
+      patch.chlodnia_manual = true
+    }
     setK04Overrides(prev => ({
       ...prev,
       [doc.id]: {
         ...(prev[doc.id] || {}),
-        [field]: value,
+        ...patch,
         uwagi: field === 'uwagi' ? formNormalizePn(value) : (prev[doc.id]?.uwagi ?? doc.data?.uwagi ?? 'P')
       }
     }))
-    void saveK04DocumentField(doc, { [field]: value })
+    void saveK04DocumentField(doc, patch)
   }
 
   async function saveK04DocumentField(doc, patch = {}) {
@@ -2068,44 +2092,48 @@ function App() {
       return null
     }
     try {
-      const ov = { ...(k04Overrides[doc.id] || {}), ...patch }
-      const live = getLiveK04Doc(doc, { [doc.id]: ov })
-      const mergedRaw = { ...(doc.data || {}), ...ov }
+      const persisted = findPersistedK04DocForDay(doc, haccpDocs)
+      const target = persisted || doc
+      const ov = {
+        ...k04OverridesForDoc(doc, k04Overrides, k04RelatedDocsPool),
+        ...patch
+      }
+      const live = getLiveK04Doc(target, { [target.id]: ov }, k04RelatedDocsPool)
+      const mergedRaw = { ...(target.data || {}), ...(doc.data || {}), ...ov }
       const signed = patch.podpis_kontrolujacego !== undefined
         ? patch.podpis_kontrolujacego
         : (mergedRaw.podpis_kontrolujacego ?? live.signed_by_operator ?? doc.signed_by_operator ?? '')
 
-      if (isPersistedHaccpDoc(doc)) {
+      if (isPersistedHaccpDoc(target)) {
         const nextData = normalizeK04Data(mergedRaw, signed)
         nextData.podpis_kontrolujacego = signed
         const status = formNormalizePn(nextData.uwagi) === 'N' ? 'N' : 'P'
         const payload = {
           data: nextData,
           status,
-          document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : (live.document_date || doc.document_date),
+          document_date: patch.document_date !== undefined ? String(patch.document_date).slice(0, 10) : (live.document_date || target.document_date),
           signed_by_operator: signed || null,
           updated_at: new Date().toISOString()
         }
-        const { data: saved, error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id).select(HACCP_DOC_LIST_SELECT).maybeSingle()
+        const { data: saved, error } = await supabase.from('haccp_documents').update(payload).eq('id', target.id).select(HACCP_DOC_LIST_SELECT).maybeSingle()
         const row = throwIfNoHaccpWriteResult(saved, error, 'Zapis K04')
-        const workingDoc = { ...doc, ...row, data: row.data || nextData, signed_by_operator: row.signed_by_operator ?? signed ?? null }
+        const workingDoc = { ...target, ...row, data: row.data || nextData, signed_by_operator: row.signed_by_operator ?? signed ?? null }
         setK04Overrides(prev => {
           const next = { ...prev }
           delete next[doc.id]
+          delete next[target.id]
           return next
         })
-        setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id))
+        setK04ManualExtra(prev => prev.filter(d => d.id !== doc.id && d.id !== target.id))
         mergeK04SavedIntoSelection(doc, workingDoc)
         return workingDoc
       }
 
-      if (isSyntheticK04Doc(doc)) {
+      if (isSyntheticK04Doc(doc) || isSyntheticK04Doc(target)) {
         const stableKey = k04StableKey(live)
-        const existing = (haccpDocs || []).find(d =>
-          d.document_type === 'K04' && isPersistedHaccpDoc(d) && k04StableKey(d) === stableKey
-        )
+        const existing = findPersistedK04DocForDay(doc, haccpDocs)
         if (existing) return saveK04DocumentField(existing, ov)
-        const insertLive = getLiveK04Doc(live, { [live.id]: { ...ov, podpis_kontrolujacego: signed } })
+        const insertLive = getLiveK04Doc(live, { [live.id]: { ...ov, podpis_kontrolujacego: signed } }, k04RelatedDocsPool)
         const { data: inserted, error } = await supabase.from('haccp_documents').insert(buildK04InsertPayload(insertLive)).select(HACCP_DOC_LIST_SELECT).single()
         const row = throwIfNoHaccpWriteResult(inserted, error, 'Zapis K04')
         setK04Overrides(prev => {
@@ -4825,11 +4853,11 @@ function App() {
         <table className="k02-head k04-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan={3}><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
-            <td className="k02-title" colSpan={5}><b>{K04_FORM_META.title}</b></td>
+            <td className="k02-title" colSpan={5}><b>{scrubLegacyK04Labels(K04_FORM_META.title)}</b></td>
             <td className="k02-meta" rowSpan={2}><b>Rok:</b> {group.period.slice(0, 4)}<br/><br/><b>Miesiąc:</b> {group.period.slice(5, 7)}<br/><br/><b>Strona:</b></td>
           </tr>
           <tr>
-            <td className="k02-note" colSpan={5}>{K04_FORM_META.tempNotes.map((line, i) => <React.Fragment key={i}>{i ? <br/> : null}{line}</React.Fragment>)}</td>
+            <td className="k02-note" colSpan={5}>{K04_FORM_META.tempNotes.map((line, i) => <React.Fragment key={i}>{i ? <br/> : null}{scrubLegacyK04Labels(line)}</React.Fragment>)}</td>
           </tr>
           <tr>
             <td colSpan={5}></td>
@@ -4853,7 +4881,7 @@ function App() {
             colSpan: k04ColSpan,
             onInsertAt: (afterIndex) => addK04ManualRow(group, afterIndex),
             renderDocRow: (doc) => {
-              const live = applyK04PulpAutoToDoc(getLiveK04Doc(doc, k04Overrides), k04PulpAutoByDate)
+              const live = applyK04PulpAutoToDoc(getLiveK04Doc(doc, k04Overrides, k04RelatedDocsPool), k04PulpAutoByDate)
               const godzina = live.data?.godzina ?? ''
               const temp1 = live.data?.temperatura_chlodnia_1 ?? ''
               const temp2 = live.data?.temperatura_chlodnia_2 ?? ''
@@ -6739,7 +6767,7 @@ function App() {
                 <button className="mini secondary" onClick={() => setSelectedHaccpDoc({ groupPreview: true, group: g })}><Eye size={14}/> Otwórz</button>
                 <button className="mini secondary" onClick={() => printHaccpGroup(g)}><Printer size={14}/></button>
                 <button className="mini secondary" onClick={() => exportHaccpGroupExcel(g)}>XLS</button>
-                {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && (
+                {isAdmin(authProfile) && (
                   <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy}><Trash2 size={14}/> Usuń</button>
                 )}
               </td>
@@ -7587,7 +7615,20 @@ function App() {
     if (!supabase || !group?.docs?.length) return
     if (!ensureCanDelete()) return
     const deletable = group.docs.filter(isPersistedHaccpDoc)
+    const k04StableKeys = group.type === 'K04' ? group.docs.map(d => k04StableKey(d)) : []
     if (!deletable.length) {
+      if (group.type === 'K04') {
+        const label = kartotekaGroupLabel(group)
+        if (!confirmDelete(`Kartotekę K04${label ? `: ${label}` : ''} (${group.docs.length} wpisów auto z magazynu/K03).\n\nWpis zostanie ukryty w aplikacji (bez rekordów w bazie do skasowania).`)) return
+        setK04HiddenKeys(prev => {
+          const next = new Set([...prev, ...k04StableKeys])
+          try { localStorage.setItem(K04_HIDDEN_STORAGE_KEY, JSON.stringify([...next])) } catch { /* ignore */ }
+          return next
+        })
+        setSelectedHaccpDoc(null)
+        setMessage(`K04: ukryto kartotekę za ${group.period || 'okres'} (${group.docs.length} dni).`)
+        return
+      }
       setMessage(`${group.type}: ta kartoteka jest generowana automatycznie z magazynu (partie/FIFO). Usuń import Excel lub partie w Magazynie – wpisy znikną same.`)
       return
     }
@@ -7602,6 +7643,13 @@ function App() {
     try {
       await auditDeleteHaccpDocuments(supabase, deletable, getAuditActor(), `${group.type} ${label || group.period || ''}`.trim())
       mergeHaccpDocsBatch([], deletable.map(d => d.id))
+      if (group.type === 'K04' && k04StableKeys.length) {
+        setK04HiddenKeys(prev => {
+          const next = new Set([...prev, ...k04StableKeys])
+          try { localStorage.setItem(K04_HIDDEN_STORAGE_KEY, JSON.stringify([...next])) } catch { /* ignore */ }
+          return next
+        })
+      }
       if (group.type === 'K03') await loadK03TraceData()
       setSelectedHaccpDoc(null)
       setMessage(`${group.type}: usunięto kartotekę (${deletable.length} wpisów) – zapis w Historii.`)
@@ -11469,7 +11517,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
                       <b>{k01GroupTotalKg(g).toLocaleString('pl-PL')} kg</b>
                     </span>
                   )}
-                  {isAdmin(authProfile) && g.docs.some(isPersistedHaccpDoc) && <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy} title="Usuń kartotekę (Historia)"><Trash2 size={14}/> Usuń</button>}
+                  {isAdmin(authProfile) && (docsFilter === 'K04' ? g.docs.length > 0 : g.docs.some(isPersistedHaccpDoc)) && <button className="mini danger" onClick={() => deleteKartotekaGroup(g)} disabled={haccpBusy} title="Usuń kartotekę (Historia)"><Trash2 size={14}/> Usuń</button>}
                 </td>
               </tr>
             })}</tbody>

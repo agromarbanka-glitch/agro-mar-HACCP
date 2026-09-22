@@ -1,20 +1,27 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '2.5'
+export const HACCP_FORMS_VERSION = '2.7'
 
 import { calendarDaysInMonth } from './r13Engine'
 import { resolveK03ProductionDate } from './k03Engine'
 
-/** Układ papierowy K04 (CCP2) — zgodnie z kartą Word I/2024. */
+/** Układ papierowy K04 (CP2) — zgodnie z kartą Word I/2024. */
 export const K04_FORM_META = {
-  title: 'Karta K04 - Karta kontroli parametrów magazynowania produktów gotowych (CCP2)',
+  title: 'Karta K04 - Karta kontroli parametrów magazynowania produktów gotowych (CP2)',
   version: 'Wersja I/2024',
   tempNotes: [
-    '- Temp. w chłodniach/zbiornikach na pulpę docelowo: 2-3°C (±1°C). – GRUPA I (jabłka, gruszki),',
+    '- Temp. w chłodniach produktu gotowego docelowo: 2-3°C (±1°C). – GRUPA I (jabłka, gruszki),',
     '-4 - -2 °C (±1°C) – GRUPA I (truskawki)',
-    '0-1 °C – GRUPA III (maliny, porzeczki czarne i czerwone)'
+    '0-1 °C – GRUPA III (maliny, porzeczki czarne i czerwone — produkt gotowy w chłodni)',
+    '-2 °C (±3°C) – malina pulpa (zbiorniki na pulpę)'
   ]
+}
+
+export function scrubLegacyK04Labels(text = '') {
+  return String(text || '')
+    .replace(/CCP2/g, 'CP2')
+    .replace(/2\s*[-–]\s*3\s*°?\s*C[^–\n]*malina\s+pulpa/gi, '-2 °C (±3°C) – malina pulpa (zbiorniki na pulpę)')
 }
 
 export const K04_PULPA_TANK_COUNT = 4
@@ -225,6 +232,10 @@ function applyK04Override(doc, ov = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(ov, 'podpis_kontrolujacego')) data.podpis_kontrolujacego = ov.podpis_kontrolujacego
   if (Object.prototype.hasOwnProperty.call(ov, 'uwagi')) data.uwagi = ov.uwagi
+  if (Object.prototype.hasOwnProperty.call(ov, 'chlodnia_manual')) data.chlodnia_manual = Boolean(ov.chlodnia_manual)
+  if (ov.temperatura_chlodnia_1 !== undefined || ov.temperatura_chlodnia_2 !== undefined) {
+    if (ov.chlodnia_manual !== false) data.chlodnia_manual = true
+  }
   return {
     ...doc,
     document_date: Object.prototype.hasOwnProperty.call(ov, 'document_date') ? ov.document_date : doc.document_date,
@@ -256,6 +267,7 @@ export function normalizeK04Data(data = {}, signedBy = '') {
     month_key: d.month_key || '',
     sort_order: Number(d.sort_order || 0),
     manual_month: Boolean(d.manual_month),
+    chlodnia_manual: Boolean(d.chlodnia_manual),
     auto_source: d.auto_source || '',
     lot_ids: Array.isArray(d.lot_ids) ? d.lot_ids : []
   }
@@ -283,6 +295,7 @@ export function scoreK04Doc(doc) {
   if (doc?.data?.godzina) s += 5
   if (doc?.signed_by_operator || doc?.data?.podpis_kontrolujacego) s += 5
   if (doc?.data?.temperatura_chlodnia_1) s += 2
+  if (doc?.data?.chlodnia_manual) s += 35
   for (let n = 1; n <= K04_PULPA_TANK_COUNT; n++) {
     if (doc?.data?.[k04PulpaTankField(n)]) s += 1
   }
@@ -1045,6 +1058,21 @@ export function enrichK04DocsPulpFromK03(docs = [], k03Forms = []) {
   return docs.map(doc => applyK04PulpAutoToDoc(doc, pulpByDate))
 }
 
+/** Wiersz z bazy po tym samym dniu co wpis syntetyczny K04 (do zapisu ręcznych pomiarów). */
+export function findPersistedK04DocForDay(doc, haccpDocs = []) {
+  if (!doc) return null
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(doc.id || '')) && !doc.synthetic) {
+    return doc
+  }
+  const stable = k04StableKey(doc)
+  return (haccpDocs || []).find(d =>
+    d?.document_type === 'K04' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(d.id || '')) &&
+    !d.synthetic &&
+    k04StableKey(d) === stable
+  ) || null
+}
+
 function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGroup, productName, lot, start, end, lotId = null }) {
   const temp = k04TempForProductName(productName)
   for (const date of dateRangeInclusive(start, end)) {
@@ -1164,12 +1192,13 @@ export function buildSyntheticK04DocsFromTrace(trace = {}, overrides = {}, k03Fo
 
   applyK03PulpTankTemperatures(dailyEntries, k03Forms)
 
-  return dedupeK04Docs(Array.from(dailyEntries.values()).map(doc => {
+  const pool = Array.from(dailyEntries.values())
+  return dedupeK04Docs(pool.map(doc => {
     const mixedKey = `${doc.chamber_code}|${doc.document_date}`
     if (mixedDays.has(mixedKey)) {
       doc.data.chamber_mix_warning = true
     }
-    return applyK04Override(doc, overrides[doc.id] || {})
+    return applyK04Override(doc, k04OverridesForDoc(doc, overrides, pool))
   }))
 }
 
@@ -1462,8 +1491,25 @@ export function normalizePn(value) {
   return value === 'N' ? 'N' : 'P'
 }
 
-export function getLiveK04Doc(doc, overrides) {
-  return applyK04Override(doc, overrides?.[doc?.id] || {})
+/** Scal override po id oraz po tym samym dniu (syntetyczny K04-YYYY-MM-DD vs wpis UUID w bazie). */
+export function k04OverridesForDoc(doc, overrides = {}, relatedDocs = []) {
+  const stable = k04StableKey(doc)
+  let merged = {}
+  for (const d of relatedDocs || []) {
+    if (k04StableKey(d) !== stable) continue
+    const ov = overrides?.[d.id]
+    if (ov) merged = { ...merged, ...ov }
+  }
+  const direct = overrides?.[doc?.id]
+  if (direct) merged = { ...merged, ...direct }
+  return merged
+}
+
+export function getLiveK04Doc(doc, overrides, relatedDocs) {
+  const ov = relatedDocs?.length
+    ? k04OverridesForDoc(doc, overrides, relatedDocs)
+    : (overrides?.[doc?.id] || {})
+  return applyK04Override(doc, ov)
 }
 
 export function getLiveK07Doc(doc, overrides) {
@@ -1482,14 +1528,14 @@ export function buildK04MonthlyHtml(group, escapeHtml) {
   const customDefs = resolveK04CustomColumnDefs(docs)
   const year = (group.period || docs[0]?.document_date || '').slice(0, 4)
   const month = (group.period || docs[0]?.document_date || '').slice(5, 7)
-  const notes = K04_FORM_META.tempNotes.map(l => escapeHtml(l)).join('<br/>')
+  const notes = K04_FORM_META.tempNotes.map(l => escapeHtml(scrubLegacyK04Labels(l))).join('<br/>')
   const customHead = customDefs.map(c => `<th>${escapeHtml(c.label)}</th>`).join('')
   const rows = docs.map(doc => k04PrintRowCells(doc, escapeHtml, customDefs)).join('')
   const blankCols = 10 + customDefs.length
   const blanks = Array.from({ length: Math.max(0, 16 - docs.length) }, () =>
     `<tr class="blank-row">${Array.from({ length: blankCols }).map(() => '<td></td>').join('')}</tr>`
   ).join('')
-  return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(group.period || '')}</title><style>@page{size:A4 landscape;margin:6mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:3px 2px;text-align:center;vertical-align:middle;font-size:9pt;line-height:1.08}.company{width:33%;font-weight:bold;line-height:1.12;text-align:center}.title{width:44%;font-weight:bold;line-height:1.35;text-align:center}.meta{width:17%;text-align:left;vertical-align:top;font-size:10pt}.temp-note{text-align:left;font-size:10pt;line-height:1.2;padding:4px 6px}.blank-row td{height:20px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="3"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td class="title" colspan="5"><b>${escapeHtml(K04_FORM_META.title)}</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br/><br/><b>Miesiąc:</b> ${escapeHtml(month)}<br/><br/><b>Strona:</b></td></tr><tr><td class="temp-note" colspan="5">${notes}</td></tr><tr><td colspan="5"></td><td class="meta" style="text-align:center">${escapeHtml(K04_FORM_META.version)}</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 2 [°C]</th><th>Zbiornik na pulpę nr 1<br/>[°C]</th><th>Zbiornik na pulpę nr 2<br/>[°C]</th><th>Zbiornik na pulpę nr 3<br/>[°C]</th><th>Zbiornik na pulpę nr 4<br/>[°C]</th>${customHead}<th>Podpis<br/>osoby kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K04 ${escapeHtml(group.period || '')}</title><style>@page{size:A4 landscape;margin:6mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:3px 2px;text-align:center;vertical-align:middle;font-size:9pt;line-height:1.08}.company{width:33%;font-weight:bold;line-height:1.12;text-align:center}.title{width:44%;font-weight:bold;line-height:1.35;text-align:center}.meta{width:17%;text-align:left;vertical-align:top;font-size:10pt}.temp-note{text-align:left;font-size:10pt;line-height:1.2;padding:4px 6px}.blank-row td{height:20px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="3"><b>AGRO-MAR MARIUSZ BAŃKA<br/>SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td><td class="title" colspan="5"><b>${escapeHtml(scrubLegacyK04Labels(K04_FORM_META.title))}</b></td><td class="meta" rowspan="2"><b>Rok:</b> ${escapeHtml(year)}<br/><br/><b>Miesiąc:</b> ${escapeHtml(month)}<br/><br/><b>Strona:</b></td></tr><tr><td class="temp-note" colspan="5">${notes}</td></tr><tr><td colspan="5"></td><td class="meta" style="text-align:center">${escapeHtml(K04_FORM_META.version)}</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Godzina</th><th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 1 [°C]</th><th>Temperatura<br/>w chłodni produktu gotowego<br/>nr 2 [°C]</th><th>Zbiornik na pulpę nr 1<br/>[°C]</th><th>Zbiornik na pulpę nr 2<br/>[°C]</th><th>Zbiornik na pulpę nr 3<br/>[°C]</th><th>Zbiornik na pulpę nr 4<br/>[°C]</th>${customHead}<th>Podpis<br/>osoby kontrolującej</th><th>Uwagi<br/>(P/N)*</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildK06MonthlyHtml(group, escapeHtml) {
@@ -1638,7 +1684,7 @@ export function buildK04ExcelRows(group) {
   const customDefs = resolveK04CustomColumnDefs(docs)
   const rows = []
   rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
-  rows.push([K04_FORM_META.title, '', '', '', '', '', '', '', '', `Okres: ${group.period || ''}`])
+  rows.push([scrubLegacyK04Labels(K04_FORM_META.title), '', '', '', '', '', '', '', '', `Okres: ${group.period || ''}`])
   rows.push([
     'Data', 'Godzina',
     'Chłodnia gotowego nr 1 [°C]', 'Chłodnia gotowego nr 2 [°C]',
