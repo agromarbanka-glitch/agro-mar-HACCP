@@ -1341,8 +1341,16 @@ button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); 
 .w06-cell-input { width: 100%; border: 1px solid #d8d8d8; border-radius: 6px; padding: 4px 6px; font-size: 11px; background: #fff; box-sizing: border-box; }
 .w06-cell-input.w06-wide { min-width: 0; }
 .w06-act { width: 5%; }
+.w06-cell-stack { display: grid; gap: 4px; }
+.w06-row-tools { margin-top: 2px; }
+.w06-fruit-add { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 4px; }
+.w06-fruit-input { flex: 1; min-width: 72px; }
+.w06-accept-btn.w06-accepted { background: #23472b; color: #fff; border-color: #23472b; }
+.w06-col-accepted, tr.w06-row-accepted td { background: #f3faf4; }
 @media print {
-  .w06-cell-input, .w06-act, .no-print, .w06-recipients-panel, .w06-admin-table { display: none !important; }
+  .w06-cell-input, .w06-act, .no-print, .w06-recipients-panel, .w06-admin-table,
+  .w06-row-tools, .w06-fruit-add, .w06-accept-btn { display: none !important; }
+  .w06-col-accepted, tr.w06-row-accepted td { background: transparent !important; }
   .w06-split-table .w06-section-head th { font-size: 7.5pt; }
 }
 

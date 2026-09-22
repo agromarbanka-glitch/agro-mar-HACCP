@@ -50,8 +50,8 @@ import {
 import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, dedupeW06PartiesBatch, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
-  partyToW06NewRow, W06_PARTY_LABELS, W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
-  w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine
+  W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
+  w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine, w06MergeItemNames
 } from './w06Engine'
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
 import { buildR11SyncPayloads } from './r11Engine'
@@ -488,7 +488,6 @@ function App() {
   const [w06PdfPreview, setW06PdfPreview] = useState('')
   const [w06PdfInputKey, setW06PdfInputKey] = useState(0)
   const [w06PdfFileName, setW06PdfFileName] = useState('')
-  const [w06PdfStagedParties, setW06PdfStagedParties] = useState([])
   const [w06NewRow, setW06NewRow] = useState({
     party_type: 'supplier',
     supplier_kind: 'raw',
@@ -497,6 +496,8 @@ function App() {
     address: '',
     item_name: ''
   })
+  const [w06FruitPickId, setW06FruitPickId] = useState('')
+  const [w06FruitName, setW06FruitName] = useState('')
   const [pzRows, setPzRows] = useState([])
   const [pzHistoryRows, setPzHistoryRows] = useState([])
   const [pzDateAudit, setPzDateAudit] = useState(null)
@@ -6276,7 +6277,6 @@ function App() {
         if (error) throw error
       }
       await loadHaccpDocs()
-      setW06PdfStagedParties(prev => prev.filter(p => p.source_filename !== fileName))
       setMessage(`W06: usunięto ${toDelete.length} wpisów z importu „${fileName}".`)
     } catch (err) {
       setMessage(`W06: błąd usuwania importu – ${err?.message || String(err)}`)
@@ -6293,7 +6293,6 @@ function App() {
     setW06PdfFileName(files.map(f => f.name).join(', '))
     setW06PdfImporting(true)
     setW06PdfPreview('')
-    setW06PdfStagedParties([])
     setMessage(`W06: odczytuję ${files.length} plik(ów)…`)
     try {
       const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
@@ -6335,26 +6334,17 @@ function App() {
         setW06PdfInputKey(k => k + 1)
         return
       }
-      setW06PdfStagedParties(uniqueParties)
-      const firstRow = partyToW06NewRow(uniqueParties[0])
-      if (firstRow) setW06NewRow(firstRow)
-
       const { added, skipped } = await importW06StagedParties(uniqueParties, existing)
       setW06PdfInputKey(k => k + 1)
       if (added > 0) {
-        setW06PdfStagedParties(prev => {
-          const keys = new Set(filterNewW06Parties(existing, uniqueParties).added.map(p => p.dedupe_key))
-          return prev.filter(p => !keys.has(p.dedupe_key || w06DedupeKey(p)))
-        })
-        let msg = `W06: dodano ${added} kontrahentów do wykazu`
+        let msg = `W06: automatycznie dodano ${added} kontrahentów do wykazu`
         if (dupesInFiles.length) msg += `, usunięto ${dupesInFiles.length} duplikatów w pliku`
         if (skipped) msg += `, pominięto ${skipped} już na liście`
-        if (uniqueParties.length > added) msg += `. Unikalnych w pliku: ${uniqueParties.length}`
-        setMessage(msg + '.')
+        setMessage(msg + '. Oznacz zaakceptowanych u góry tabeli (przycisk nie wchodzi w druk).')
       } else {
-        let msg = `W06: rozpoznano ${uniqueParties.length} unikalnych firm – wszystkie są już na liście.`
+        let msg = `W06: rozpoznano ${uniqueParties.length} firm – wszystkie są już na liście.`
         if (dupesInFiles.length) msg += ` Usunięto ${dupesInFiles.length} duplikatów w pliku.`
-        setMessage(msg + ' Możesz edytować poniżej lub kliknąć „Dodaj rozpoznane firmy".')
+        setMessage(msg)
       }
       if (unreadable.length) setMessage(prev => `${prev} Nieczytelne pliki: ${unreadable.length}.`)
       if (noParty.length) setMessage(prev => `${prev} Pliki bez kontrahenta: ${noParty.length}.`)
@@ -6365,23 +6355,31 @@ function App() {
     }
   }
 
-  async function addW06StagedFromPdf() {
-    if (!supabase || !w06PdfStagedParties.length) {
-      setMessage('W06: brak rozpoznanych firm z PDF – wgraj plik ponownie.')
+  async function toggleW06Accepted(doc) {
+    if (!doc?.id) return
+    await saveW06Cell(doc, 'accepted', !doc.data?.accepted)
+  }
+
+  async function appendW06Fruit(doc, fruitName) {
+    const fruit = String(fruitName || '').trim()
+    if (!doc?.id || !fruit) return
+    const merged = w06MergeItemNames(w06ItemLine(doc), fruit)
+    if (merged === w06ItemLine(doc)) {
+      setMessage(`W06: „${fruit}" jest już przy tym dostawcy.`)
       return
     }
-    try {
-      const existing = (haccpDocs || []).filter(d => d.document_type === 'W06')
-      const { added, skipped } = await importW06StagedParties(w06PdfStagedParties, existing)
-      if (added > 0) {
-        setW06PdfStagedParties([])
-        setMessage(`W06: dodano ${added} kontrahentów do wykazu${skipped ? `, pominięto ${skipped} duplikatów` : ''}.`)
-      } else {
-        setMessage(`W06: wszystkie rozpoznane firmy (${w06PdfStagedParties.length}) są już na liście.`)
-      }
-    } catch (err) {
-      setMessage(`W06: błąd dodawania – ${err?.message || String(err)}`)
+    await saveW06Cell(doc, 'item_name', merged)
+    setMessage(`W06: dodano owoc „${fruit}" do ${doc.data?.company_name || doc.data?.supplier_name || 'dostawcy'}.`)
+  }
+
+  async function addW06FruitToSelected() {
+    const doc = (haccpDocs || []).find(d => d.id === w06FruitPickId)
+    if (!doc) {
+      setMessage('W06: wybierz dostawcę z listy.')
+      return
     }
+    await appendW06Fruit(doc, w06FruitName)
+    setW06FruitName('')
   }
 
   async function saveW06Cell(doc, field, value) {
@@ -6479,8 +6477,16 @@ function App() {
     const renderCompanyCell = (doc) => {
       if (!doc) return ''
       if (!editable) return w06CompanyLine(doc)
+      const accepted = !!doc.data?.accepted
       return <>
-        <input className="w06-cell-input w06-wide no-print" defaultValue={doc.data?.company_name || doc.data?.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
+        <div className="w06-cell-stack">
+          <input className="w06-cell-input w06-wide" defaultValue={doc.data?.company_name || doc.data?.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
+          <div className="w06-row-tools no-print">
+            <button type="button" className={`mini w06-accept-btn${accepted ? ' w06-accepted' : ' secondary'}`} onClick={() => toggleW06Accepted(doc)}>
+              {accepted ? '✓ Zaakceptowany' : 'Akceptuj dostawcę'}
+            </button>
+          </div>
+        </div>
         <span className="print-only">{w06CompanyLine(doc)}</span>
       </>
     }
@@ -6488,10 +6494,21 @@ function App() {
       if (!doc) return ''
       if (!editable) return w06ItemLine(doc)
       return <>
-        <input className="w06-cell-input w06-wide no-print" defaultValue={doc.data?.item_name || doc.product_name || ''} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
+        <div className="w06-cell-stack">
+          <input className="w06-cell-input w06-wide" defaultValue={doc.data?.item_name || doc.product_name || ''} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
+          <div className="w06-fruit-add no-print">
+            <input className="w06-fruit-input w06-cell-input" placeholder="Dodaj owoc…" />
+            <button type="button" className="mini secondary" onClick={e => {
+              const inp = e.currentTarget.parentElement?.querySelector('.w06-fruit-input')
+              appendW06Fruit(doc, inp?.value)
+              if (inp) inp.value = ''
+            }}>+ owoc</button>
+          </div>
+        </div>
         <span className="print-only">{w06ItemLine(doc)}</span>
       </>
     }
+    const cellAcceptedClass = doc => (doc?.data?.accepted ? ' w06-col-accepted' : '')
 
     return <>
       <table className="w06-head"><tbody>
@@ -6521,12 +6538,12 @@ function App() {
             const a = auxRows[i]
             return <tr key={`w06-row-${i}`}>
               <td>{r.lp}</td>
-              <td className="left">{renderCompanyCell(r.doc)}</td>
-              <td className="left">{renderItemCell(r.doc)}</td>
+              <td className={`left${cellAcceptedClass(r.doc)}`}>{renderCompanyCell(r.doc)}</td>
+              <td className={`left${cellAcceptedClass(r.doc)}`}>{renderItemCell(r.doc)}</td>
               <td className="w06-gap"></td>
               <td>{a.lp}</td>
-              <td className="left">{renderCompanyCell(a.doc)}</td>
-              <td className="left">{renderItemCell(a.doc)}</td>
+              <td className={`left${cellAcceptedClass(a.doc)}`}>{renderCompanyCell(a.doc)}</td>
+              <td className={`left${cellAcceptedClass(a.doc)}`}>{renderItemCell(a.doc)}</td>
             </tr>
           })}
         </tbody>
@@ -6556,7 +6573,7 @@ function App() {
     return <>
       <div className="card inner-card no-print">
         <h3>Import Excel / PDF – PZ (dostawcy) i WZ (odbiorcy)</h3>
-        <p className="hint">Wgraj <b>Excel</b> (.xls / .xlsx – lista dostawców lub rejestr PZ/WZ) albo PDF. Program scala wiersze tej samej firmy i pomija duplikaty już zapisane w W06.</p>
+        <p className="hint">Wgraj <b>Excel</b> (.xls / .xlsx – lista dostawców lub rejestr PZ/WZ) albo PDF. Kontrahenci trafiają <b>od razu</b> na wykaz (duplikaty pomijane). Zaakceptowanych ustaw przyciskiem przy firmie – na druku widać tylko kolejność (zaakceptowani u góry).</p>
         <label className="full-width">Pliki Excel (.xls, .xlsx) lub PDF
           <input key={w06PdfInputKey} type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/pdf,.pdf" multiple disabled={w06PdfImporting} onChange={handleW06ImportFiles} />
           <span className="hint">Lista dostawców: kolumny <b>Dostawca/Firma</b>, opcjonalnie <b>Towar/Surowiec</b> i NIP. Eksport magazynu: Rodzaj, Dostawca/Odbiorca, Produkt/Towar. PDF: dokumenty z tekstem.</span>
@@ -6567,20 +6584,6 @@ function App() {
           <summary>Podgląd odczytu (pierwsze wiersze)</summary>
           <pre className="pdf-text-preview">{w06PdfPreview}</pre>
         </details>}
-        {w06PdfStagedParties.length > 0 && <div className="w06-staged no-print">
-          <p className="hint"><b>Rozpoznano ({w06PdfStagedParties.length}):</b></p>
-          <ul className="w06-staged-list">
-            {w06PdfStagedParties.map((p, i) => <li key={i}>
-              {W06_PARTY_LABELS[p.party_type] || 'Dostawca'} – {p.company_name || p.supplier_name}
-              {p.nip ? `, NIP ${p.nip}` : ''}
-              {p.item_name ? ` · towar: ${p.item_name}` : ''}
-              <button type="button" className="mini secondary" onClick={() => { const row = partyToW06NewRow(p); if (row) setW06NewRow(row) }}>Wstaw do formularza</button>
-            </li>)}
-          </ul>
-          <div className="actions">
-            <button onClick={addW06StagedFromPdf}>Dodaj rozpoznane firmy do wykazu ({w06PdfStagedParties.length})</button>
-          </div>
-        </div>}
         {w06ImportBatches.length > 0 && <div className="w06-imports no-print">
           <p className="hint"><b>Wgrane pliki ({w06ImportBatches.length}):</b></p>
           <ul className="w06-staged-list">
@@ -6605,10 +6608,15 @@ function App() {
       {w06Docs.length > 0 && <details className="card inner-card no-print" style={{ marginTop: 12 }}>
         <summary>NIP, kategoria i usuwanie wpisów ({w06Docs.length})</summary>
         <div className="table-wrap docs-table-wrap"><table className="docs-table w06-admin-table">
-          <thead><tr><th>Kategoria</th><th>Dane firmy</th><th>NIP</th><th>Towar</th><th>Źr.</th><th>Akcje</th></tr></thead>
+          <thead><tr><th>Akcept.</th><th>Kategoria</th><th>Dane firmy</th><th>NIP</th><th>Towar</th><th>Źr.</th><th>Akcje</th></tr></thead>
           <tbody>{w06Docs.map(doc => {
             const d = doc.data || {}
-            return <tr key={doc.id}>
+            return <tr key={doc.id} className={d.accepted ? 'w06-row-accepted' : ''}>
+              <td>
+                <button type="button" className={`mini w06-accept-btn${d.accepted ? ' w06-accepted' : ' secondary'}`} onClick={() => toggleW06Accepted(doc)}>
+                  {d.accepted ? '✓' : '—'}
+                </button>
+              </td>
               <td>
                 <select className="w06-cell-input" defaultValue={d.supplier_kind || 'raw'} onBlur={e => saveW06Cell(doc, 'supplier_kind', e.target.value)}>
                   <option value="raw">Surowiec (lewa tabela)</option>
@@ -6625,6 +6633,22 @@ function App() {
           })}</tbody>
         </table></div>
       </details>}
+      <div className="card inner-card no-print">
+        <h3>Dodaj owoc do dostawcy</h3>
+        <div className="form-grid compact">
+          <label className="full-width">Dostawca z wykazu
+            <select value={w06FruitPickId} onChange={e => setW06FruitPickId(e.target.value)}>
+              <option value="">— wybierz —</option>
+              {w06Docs.filter(d => (d.data?.supplier_kind || 'raw') !== 'recipient').map(d => (
+                <option key={d.id} value={d.id}>{w06CompanyLine(d)}{w06ItemLine(d) ? ` · ${w06ItemLine(d)}` : ''}</option>
+              ))}
+            </select>
+          </label>
+          <label>Nazwa owocu / surowca<input value={w06FruitName} onChange={e => setW06FruitName(e.target.value)} placeholder="np. Truskawka" onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addW06FruitToSelected() } }} /></label>
+        </div>
+        <div className="actions"><button type="button" className="secondary" disabled={!w06FruitPickId || !w06FruitName.trim()} onClick={addW06FruitToSelected}>Dodaj owoc do wybranego</button></div>
+        <p className="hint">Możesz też dopisać owoc przy konkretnym wierszu w tabeli powyżej („+ owoc"). Ten sam owoc nie zduplikuje się w polu surowca.</p>
+      </div>
       <div className="card inner-card no-print">
         <h3>Dodaj kontrahenta ręcznie</h3>
         <div className="form-grid compact">
@@ -6644,9 +6668,9 @@ function App() {
           <label className="full-width">Nazwa firmy<input value={w06NewRow.company_name} onChange={e => setW06NewRow(prev => ({ ...prev, company_name: e.target.value }))} /></label>
           <label>NIP<input value={w06NewRow.nip} onChange={e => setW06NewRow(prev => ({ ...prev, nip: e.target.value }))} placeholder="10 cyfr" /></label>
           <label>Adres<input value={w06NewRow.address} onChange={e => setW06NewRow(prev => ({ ...prev, address: e.target.value }))} /></label>
-          <label>Przykładowy towar<input value={w06NewRow.item_name} onChange={e => setW06NewRow(prev => ({ ...prev, item_name: e.target.value }))} /></label>
+          <label>Surowiec / owoc<input value={w06NewRow.item_name} onChange={e => setW06NewRow(prev => ({ ...prev, item_name: e.target.value }))} placeholder="np. Malina" /></label>
         </div>
-        <p className="hint">Po wgraniu Excel/PDF pola poniżej uzupełnią się pierwszą rozpoznaną firmą – możesz poprawić i kliknąć „Dodaj do wykazu", albo użyć przycisku „Dodaj rozpoznane firmy" powyżej.</p>
+        <p className="hint">Import Excel/PDF dodaje firmy automatycznie – tutaj możesz dopisać pojedynczego kontrahenta ręcznie.</p>
         <div className="actions"><button onClick={addW06Row}>Dodaj do wykazu</button></div>
       </div>
     </>

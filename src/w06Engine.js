@@ -6,7 +6,7 @@ import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
 import * as XLSX from 'xlsx'
 
-export const W06_ENGINE_VERSION = '1.7'
+export const W06_ENGINE_VERSION = '1.8'
 export const AGRO_MAR_NIP = '7171839598'
 export const W06_MIN_ROWS = 20
 
@@ -864,10 +864,27 @@ export function sortW06Docs(docs) {
     const ta = a.data?.party_type === 'recipient' ? 1 : 0
     const tb = b.data?.party_type === 'recipient' ? 1 : 0
     if (ta !== tb) return ta - tb
+    const aa = a.data?.accepted ? 1 : 0
+    const ab = b.data?.accepted ? 1 : 0
+    if (aa !== ab) return ab - aa
     return String(a.data?.company_name || a.data?.supplier_name || '').localeCompare(
       String(b.data?.company_name || b.data?.supplier_name || ''), 'pl'
     )
   })
+}
+
+/** Scala nowy owoc/surowiec z istniejącą listą (bez duplikatów). */
+export function w06MergeItemNames(current, addition) {
+  const add = String(addition || '').trim()
+  if (!add) return String(current || '').trim().slice(0, 160)
+  const parts = String(current || '')
+    .split(/[;,]/)
+    .map(s => s.trim())
+    .filter(Boolean)
+  const key = add.toLowerCase()
+  if (parts.some(p => p.toLowerCase() === key)) return parts.join('; ').slice(0, 160)
+  parts.push(add)
+  return parts.join('; ').slice(0, 160)
 }
 
 export function buildW06InsertPayload(party) {
@@ -882,7 +899,8 @@ export function buildW06InsertPayload(party) {
     item_name: party.item_name || '',
     source_doc_kind: party.source_doc_kind || '',
     source_filename: party.source_filename || '',
-    dedupe_key
+    dedupe_key,
+    accepted: !!party.accepted
   }
   return {
     document_type: 'W06',
