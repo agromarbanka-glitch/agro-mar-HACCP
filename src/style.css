@@ -1345,11 +1345,14 @@ button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); 
 .w06-row-tools { margin-top: 2px; }
 .w06-fruit-add { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 4px; }
 .w06-fruit-input { flex: 1; min-width: 72px; }
+.w06-fruit-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.w06-fruit-tag { display: inline-flex; align-items: center; gap: 2px; background: #eef5ef; border: 1px solid #c5d9c8; border-radius: 999px; padding: 2px 6px 2px 8px; font-size: 10px; line-height: 1.2; }
+.w06-fruit-rm { border: none; background: transparent; color: #8b3a3a; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
 .w06-accept-btn.w06-accepted { background: #23472b; color: #fff; border-color: #23472b; }
 .w06-col-accepted, tr.w06-row-accepted td { background: #f3faf4; }
 @media print {
   .w06-cell-input, .w06-act, .no-print, .w06-recipients-panel, .w06-admin-table,
-  .w06-row-tools, .w06-fruit-add, .w06-accept-btn { display: none !important; }
+  .w06-row-tools, .w06-fruit-add, .w06-fruit-tags, .w06-accept-btn { display: none !important; }
   .w06-col-accepted, tr.w06-row-accepted td { background: transparent !important; }
   .w06-split-table .w06-section-head th { font-size: 7.5pt; }
 }

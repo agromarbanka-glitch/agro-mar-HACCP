@@ -51,7 +51,8 @@ import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, dedupeW06PartiesBatch, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
-  w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine, w06MergeItemNames
+  w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine, w06MergeItemNames, w06ParseItemList,
+  w06RemoveItemName, w06ApplyDefaultRawItems, planW06DuplicateRepairs
 } from './w06Engine'
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
 import { buildR11SyncPayloads } from './r11Engine'
@@ -6262,6 +6263,62 @@ function App() {
     return { added: added.length, skipped: skipped.length }
   }
 
+  async function persistW06DocData(doc, nextData) {
+    if (!supabase || !doc?.id) return
+    nextData.dedupe_key = w06DedupeKey({
+      nip: nextData.nip || doc.data?.nip,
+      company_name: nextData.company_name || doc.data?.company_name,
+      supplier_name: nextData.supplier_name || doc.data?.supplier_name
+    })
+    const payload = {
+      data: nextData,
+      product_name: nextData.item_name || doc.product_name,
+      supplier_name: nextData.supplier_name || doc.supplier_name,
+      updated_at: new Date().toISOString()
+    }
+    const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
+    if (error) throw error
+    setHaccpDocs(prev => prev.map(d => d.id === doc.id ? { ...d, ...payload, data: nextData } : d))
+  }
+
+  async function repairW06DuplicateDocs() {
+    if (!supabase) return { merged: 0, removed: 0 }
+    const all = await fetchAllHaccpDocuments(supabase)
+    const w06 = (all || []).filter(d => d.document_type === 'W06')
+    const plans = planW06DuplicateRepairs(w06)
+    if (!plans.length) return { merged: 0, removed: 0 }
+    let removed = 0
+    for (const plan of plans) {
+      const nextData = { ...(plan.keep.data || {}), ...plan.patch }
+      await persistW06DocData(plan.keep, nextData)
+      for (const doc of plan.remove) {
+        const { error } = await supabase.from('haccp_documents').delete().eq('id', doc.id)
+        if (error) throw error
+        removed += 1
+      }
+    }
+    await loadHaccpDocs()
+    return { merged: plans.length, removed }
+  }
+
+  async function applyW06DefaultRawItemsToAll() {
+    if (!supabase) return 0
+    const all = await fetchAllHaccpDocuments(supabase)
+    const w06 = (all || []).filter(d => d.document_type === 'W06')
+    let n = 0
+    for (const doc of w06) {
+      const kind = doc.data?.supplier_kind || 'raw'
+      if (kind === 'recipient' || kind === 'aux') continue
+      const nextItem = w06ApplyDefaultRawItems(w06ItemLine(doc), kind)
+      if (nextItem === w06ItemLine(doc)) continue
+      const nextData = { ...(doc.data || {}), item_name: nextItem }
+      await persistW06DocData(doc, nextData)
+      n += 1
+    }
+    if (n) await loadHaccpDocs()
+    return n
+  }
+
   async function deleteW06ImportBatch(fileName) {
     if (!supabase || !fileName) return
     if (!ensureCanDelete()) return
@@ -6335,15 +6392,21 @@ function App() {
         return
       }
       const { added, skipped } = await importW06StagedParties(uniqueParties, existing)
+      const repair = await repairW06DuplicateDocs()
+      const defaultsN = await applyW06DefaultRawItemsToAll()
       setW06PdfInputKey(k => k + 1)
       if (added > 0) {
         let msg = `W06: automatycznie dodano ${added} kontrahentów do wykazu`
         if (dupesInFiles.length) msg += `, usunięto ${dupesInFiles.length} duplikatów w pliku`
         if (skipped) msg += `, pominięto ${skipped} już na liście`
-        setMessage(msg + '. Oznacz zaakceptowanych u góry tabeli (przycisk nie wchodzi w druk).')
+        if (repair.removed) msg += `, scalono ${repair.removed} duplikatów w bazie`
+        if (defaultsN) msg += `, uzupełniono domyślne surowce u ${defaultsN} wpisów`
+        setMessage(msg + '. Zaakceptowany dostawca trafia na górę listy (przycisk ukryty na druku).')
       } else {
         let msg = `W06: rozpoznano ${uniqueParties.length} firm – wszystkie są już na liście.`
         if (dupesInFiles.length) msg += ` Usunięto ${dupesInFiles.length} duplikatów w pliku.`
+        if (repair.removed) msg += ` Scalono ${repair.removed} duplikatów w bazie.`
+        if (defaultsN) msg += ` Uzupełniono domyślne surowce u ${defaultsN} wpisów.`
         setMessage(msg)
       }
       if (unreadable.length) setMessage(prev => `${prev} Nieczytelne pliki: ${unreadable.length}.`)
@@ -6357,7 +6420,24 @@ function App() {
 
   async function toggleW06Accepted(doc) {
     if (!doc?.id) return
-    await saveW06Cell(doc, 'accepted', !doc.data?.accepted)
+    const next = !doc.data?.accepted
+    const nextData = {
+      ...(doc.data || {}),
+      accepted: next,
+      accepted_order: next ? Date.now() : 0
+    }
+    try {
+      await persistW06DocData(doc, nextData)
+    } catch (err) {
+      setMessage(`W06: błąd zapisu – ${err.message}`)
+    }
+  }
+
+  async function removeW06Fruit(doc, fruitName) {
+    const fruit = String(fruitName || '').trim()
+    if (!doc?.id || !fruit) return
+    const merged = w06RemoveItemName(w06ItemLine(doc), fruit)
+    await saveW06Cell(doc, 'item_name', merged)
   }
 
   async function appendW06Fruit(doc, fruitName) {
@@ -6385,6 +6465,7 @@ function App() {
   async function saveW06Cell(doc, field, value) {
     if (!supabase || !doc?.id) return
     const nextData = { ...(doc.data || {}), [field]: value }
+    if (field === 'item_name') nextData.item_name = String(value || '').slice(0, 160)
     if (field === 'company_name') {
       const addr = nextData.address || doc.data?.address || ''
       nextData.supplier_name = addr ? `${value}, ${addr}` : value
@@ -6397,21 +6478,8 @@ function App() {
       if (value === 'recipient') nextData.supplier_kind = 'recipient'
       else if (nextData.supplier_kind === 'recipient') nextData.supplier_kind = 'raw'
     }
-    nextData.dedupe_key = w06DedupeKey({
-      nip: nextData.nip || doc.data?.nip,
-      company_name: nextData.company_name || doc.data?.company_name,
-      supplier_name: nextData.supplier_name
-    })
-    const payload = {
-      data: nextData,
-      product_name: nextData.item_name || doc.product_name,
-      supplier_name: nextData.supplier_name || doc.supplier_name,
-      updated_at: new Date().toISOString()
-    }
     try {
-      const { error } = await supabase.from('haccp_documents').update(payload).eq('id', doc.id)
-      if (error) throw error
-      setHaccpDocs(prev => prev.map(d => d.id === doc.id ? { ...d, ...payload, data: nextData } : d))
+      await persistW06DocData(doc, nextData)
     } catch (err) {
       setMessage(`W06: błąd zapisu – ${err.message}`)
     }
@@ -6478,13 +6546,15 @@ function App() {
       if (!doc) return ''
       if (!editable) return w06CompanyLine(doc)
       const accepted = !!doc.data?.accepted
+      const rowKey = `${doc.id}-${accepted ? 1 : 0}-${Number(doc.data?.accepted_order || 0)}`
       return <>
-        <div className="w06-cell-stack">
-          <input className="w06-cell-input w06-wide" defaultValue={doc.data?.company_name || doc.data?.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
+        <div className="w06-cell-stack" key={`co-${rowKey}`}>
+          <input className="w06-cell-input w06-wide" key={`co-in-${rowKey}`} defaultValue={doc.data?.company_name || doc.data?.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
           <div className="w06-row-tools no-print">
             <button type="button" className={`mini w06-accept-btn${accepted ? ' w06-accepted' : ' secondary'}`} onClick={() => toggleW06Accepted(doc)}>
               {accepted ? '✓ Zaakceptowany' : 'Akceptuj dostawcę'}
             </button>
+            <button type="button" className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń dostawcę</button>
           </div>
         </div>
         <span className="print-only">{w06CompanyLine(doc)}</span>
@@ -6493,9 +6563,19 @@ function App() {
     const renderItemCell = (doc) => {
       if (!doc) return ''
       if (!editable) return w06ItemLine(doc)
+      const items = w06ParseItemList(doc.data?.item_name || doc.product_name || '')
+      const rowKey = `${doc.id}-${items.join('|')}`
       return <>
-        <div className="w06-cell-stack">
-          <input className="w06-cell-input w06-wide" defaultValue={doc.data?.item_name || doc.product_name || ''} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
+        <div className="w06-cell-stack" key={`it-${rowKey}`}>
+          {items.length > 0 && <div className="w06-fruit-tags no-print">
+            {items.map(item => (
+              <span key={`${doc.id}-${item}`} className="w06-fruit-tag">
+                {item}
+                <button type="button" className="w06-fruit-rm" title="Usuń surowiec" onClick={() => removeW06Fruit(doc, item)}>×</button>
+              </span>
+            ))}
+          </div>}
+          <input className="w06-cell-input w06-wide" key={`it-in-${rowKey}`} defaultValue={w06ItemLine(doc)} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
           <div className="w06-fruit-add no-print">
             <input className="w06-fruit-input w06-cell-input" placeholder="Dodaj owoc…" />
             <button type="button" className="mini secondary" onClick={e => {
@@ -6536,7 +6616,7 @@ function App() {
           {Array.from({ length: rowCount }, (_, i) => {
             const r = rawRows[i]
             const a = auxRows[i]
-            return <tr key={`w06-row-${i}`}>
+            return <tr key={`w06-row-${r.doc?.id ?? 'r' + i}-${a.doc?.id ?? 'a' + i}`}>
               <td>{r.lp}</td>
               <td className={`left${cellAcceptedClass(r.doc)}`}>{renderCompanyCell(r.doc)}</td>
               <td className={`left${cellAcceptedClass(r.doc)}`}>{renderItemCell(r.doc)}</td>
@@ -6597,6 +6677,20 @@ function App() {
       </div>
       <div className="actions no-print" style={{ marginBottom: 12 }}>
         <button className="secondary" disabled={haccpBusy} onClick={() => clickRefreshHaccp()}><RefreshCcw size={16}/> {haccpBusy ? 'Odświeżanie…' : 'Odśwież'}</button>
+        <button className="secondary" type="button" onClick={async () => {
+          try {
+            const repair = await repairW06DuplicateDocs()
+            const defaultsN = await applyW06DefaultRawItemsToAll()
+            let msg = 'W06: '
+            if (repair.removed) msg += `scalono ${repair.removed} duplikatów. `
+            else msg += 'brak duplikatów do scalenia. '
+            if (defaultsN) msg += `Uzupełniono domyślne surowce u ${defaultsN} dostawców.`
+            else msg += 'Domyślne surowce już u wszystkich.'
+            setMessage(msg)
+          } catch (err) {
+            setMessage(`W06: błąd porządkowania – ${err?.message || String(err)}`)
+          }
+        }}>Połącz duplikaty i surowce</button>
         <button className="secondary" onClick={() => printManualHaccpPeriod('W06', w06Docs)}><Printer size={16}/> Druk / PDF</button>
         <KartotekaPrintBadge group={{ key: 'W06|register', type: 'W06', docs: w06Docs }} localPrints={kartotekaLocalPrints} onToggle={toggleKartotekaPrintStatus} />
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W06', w06Docs)}>Pobierz Excel</button>
