@@ -11,7 +11,7 @@ import { extractPrintDocumentParts, buildCombinedLandscapePrintHtml, HACCP_BULK_
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, enrichK04DocsPulpFromK03, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, normalizeK03DocsForK04Pulp, buildK04PulpAutoByDate, applyK04PulpAutoToDoc, enrichK04DocsPulpFromK03, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth,
@@ -671,6 +671,16 @@ function App() {
 
   const syntheticK03Docs = useMemo(() => mergeK03Overrides(k03FormsRaw, k03Overrides), [k03FormsRaw, k03Overrides])
 
+  const k04PulpK03Sources = useMemo(
+    () => normalizeK03DocsForK04Pulp(syntheticK03Docs, haccpDocs),
+    [syntheticK03Docs, haccpDocs]
+  )
+
+  const k04PulpAutoByDate = useMemo(
+    () => buildK04PulpAutoByDate(k04PulpK03Sources),
+    [k04PulpK03Sources]
+  )
+
   const formsTraceContext = useMemo(() => ({
     lots: stockRows,
     allocations: formsTrace.allocations || [],
@@ -678,8 +688,8 @@ function App() {
   }), [stockRows, formsTrace])
 
   const syntheticK04Docs = useMemo(
-    () => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides, syntheticK03Docs),
-    [formsTraceContext, k04Overrides, syntheticK03Docs]
+    () => buildSyntheticK04DocsFromTrace(formsTraceContext, k04Overrides, k04PulpK03Sources),
+    [formsTraceContext, k04Overrides, k04PulpK03Sources]
   )
   const mergedK04Docs = useMemo(() => {
     const isK04Db = (doc) => doc?.id && !doc.synthetic && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(doc.id))
@@ -706,8 +716,8 @@ function App() {
       }
     }
     const merged = dedupeK04Docs(Array.from(byKey.values()))
-    return enrichK04DocsPulpFromK03(merged, syntheticK03Docs)
-  }, [haccpDocs, syntheticK04Docs, syntheticK03Docs, k04ManualExtra, k04HiddenKeys, k04Overrides])
+    return enrichK04DocsPulpFromK03(merged, k04PulpK03Sources)
+  }, [haccpDocs, syntheticK04Docs, k04PulpK03Sources, k04ManualExtra, k04HiddenKeys, k04Overrides])
   const syntheticK07Docs = useMemo(
     () => buildAllSyntheticK07Docs(formsTraceContext, syntheticK03Docs, k07Overrides, haccpDocs)
       .filter(d => !k07HiddenKeys.has(k07RowHideKey(d))),
@@ -4418,10 +4428,16 @@ function App() {
 
   async function printHaccpGroup(group) {
     if (!group) return
+    const printGroup = group.type === 'K04'
+      ? {
+        ...group,
+        docs: enrichK04DocsPulpFromK03(dedupeK04Docs(group.docs || []), k04PulpK03Sources)
+      }
+      : group
     const cfg = getDocFormCfg(group.type)
     const html = group.type === 'K01' ? buildK01MonthlyHtml(group)
       : group.type === 'K03' ? buildK03MonthlyHtml(group)
-      : group.type === 'K04' ? buildK04MonthlyHtml(group, escapeHtml)
+      : group.type === 'K04' ? buildK04MonthlyHtml(printGroup, escapeHtml)
       : group.type === 'K06' ? buildK06MonthlyHtml(group, escapeHtml)
       : group.type === 'K07' ? buildK07MonthlyHtml(group, escapeHtml)
       : cfg?.layout === 'document' && (group.docs || []).length === 1
@@ -4469,7 +4485,10 @@ function App() {
       rows.push(['Data', 'Godzina', 'Temperatura chłodni surowca nr 1 [°C]', 'Temperatura chłodni surowca nr 2 [°C]', 'Podpis osoby kontrolującej', 'Uwagi (P/N)'])
       docs.forEach(doc => rows.push([doc.document_date || '', doc.data?.godzina || '09:15', doc.data?.temperatura_chlodnia_1 || '2', doc.data?.temperatura_chlodnia_2 || '2', doc.signed_by_operator || doc.data?.podpis_kontrolujacego || '', normalizePN(doc.data?.uwagi || 'P')]))
     } else if (group.type === 'K04') {
-      rows.push(...buildK04ExcelRows(group))
+      rows.push(...buildK04ExcelRows({
+        ...group,
+        docs: enrichK04DocsPulpFromK03(dedupeK04Docs(docs), k04PulpK03Sources)
+      }))
     } else if (group.type === 'K06') {
       rows.push(...buildK06ExcelRows(group))
     } else if (group.type === 'K07') {
@@ -4834,7 +4853,7 @@ function App() {
             colSpan: k04ColSpan,
             onInsertAt: (afterIndex) => addK04ManualRow(group, afterIndex),
             renderDocRow: (doc) => {
-              const live = getLiveK04Doc(doc, k04Overrides)
+              const live = applyK04PulpAutoToDoc(getLiveK04Doc(doc, k04Overrides), k04PulpAutoByDate)
               const godzina = live.data?.godzina ?? ''
               const temp1 = live.data?.temperatura_chlodnia_1 ?? ''
               const temp2 = live.data?.temperatura_chlodnia_2 ?? ''
@@ -4926,7 +4945,7 @@ function App() {
         </tbody></table>
         </div>
         {periodDocs.some(d => d.data?.chamber_mix_warning) && <div className="haccp-warning no-print">Uwaga: w tym dniu magazynowano różne asortymenty – sprawdź wpisy.</div>}
-        <p className="hint no-print">K04: widoczne są 4 zbiorniki na pulpę (przewiń tabelę w poziomie, jeśli ekran jest wąski). Temperatura 0…−1°C uzupełnia się od daty produkcji K03 do WZ. Dodatkowe kolumny — pole powyżej tabeli.</p>
+        <p className="hint no-print">K04: zbiorniki 1–4 — auto 0…−1°C od <b>daty produkcji</b> do <b>daty WZ</b> z kartoteki K03 (partie Mp/Pczp/Pkp). Jedna partia = jeden zbiornik; kolejna nakładająca się → następny zbiornik. Wartości można poprawić ręcznie. Przewiń tabelę w poziomie na wąskim ekranie.</p>
       </div>
     }
 

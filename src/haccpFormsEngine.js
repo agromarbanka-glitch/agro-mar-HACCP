@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '2.4'
+export const HACCP_FORMS_VERSION = '2.5'
 
 import { calendarDaysInMonth } from './r13Engine'
 import { resolveK03ProductionDate } from './k03Engine'
@@ -781,6 +781,70 @@ function isPulpProductName(productName = '') {
   return normalizeText(productName).includes('pulpa')
 }
 
+/** Partie pulpy — nazwa lub numer partii (Mp/, Pczp/, Pkp/). Tylko odczyt pól K03. */
+export function isK04PulpBatchK03(k03) {
+  if (isPulpProductName(k03?.product_name || '')) return true
+  const lot = String(k03?.lot_no || k03?.data?.k03_workflow?.lot_no || '').trim()
+  return /^(mp|pczp|pkp)\//i.test(lot)
+}
+
+/** Data produkcji z kartoteki K03 (bez modyfikacji silnika K03). */
+export function k04ReadProductionDateFromK03(k03) {
+  const d = k03?.data || {}
+  const stored = d.k03_edits?.production_date ?? d.production_date
+  if (stored) return String(stored).slice(0, 10)
+  const wf = d.k03_workflow || {}
+  if (wf.przerob_date) return String(wf.przerob_date).slice(0, 10)
+  if (wf.fifo_cutoff_date) return String(wf.fifo_cutoff_date).slice(0, 10)
+  return ''
+}
+
+export function k04ReadWzDateFromK03(k03) {
+  const d = k03?.data || {}
+  return String(d.wz_date || d.k03_edits?.wz_date || k03?.document_date || '').slice(0, 10)
+}
+
+/** Formularze K03 + snapshoty z bazy — źródło dat dla K04. */
+export function normalizeK03DocsForK04Pulp(syntheticK03Docs = [], haccpDocs = []) {
+  const byId = new Map()
+  for (const doc of syntheticK03Docs || []) {
+    if (!doc?.id) continue
+    byId.set(doc.id, doc)
+  }
+  for (const snap of haccpDocs || []) {
+    if (snap?.document_type !== 'K03') continue
+    const id = snap.data?.form_id || snap.data?.k03_key || snap.id
+    if (!id) continue
+    const existing = byId.get(id)
+    if (!existing) {
+      byId.set(id, {
+        id,
+        document_no: snap.document_no,
+        document_date: snap.document_date,
+        product_name: snap.product_name,
+        lot_no: snap.lot_no,
+        qty: snap.qty,
+        data: { ...(snap.data || {}) }
+      })
+      continue
+    }
+    const prod = existing.data?.production_date || snap.data?.production_date || snap.data?.k03_edits?.production_date
+    if (prod && !existing.data?.production_date) {
+      byId.set(id, {
+        ...existing,
+        lot_no: existing.lot_no || snap.lot_no,
+        data: {
+          ...existing.data,
+          ...snap.data,
+          production_date: prod,
+          k03_edits: { ...(snap.data?.k03_edits || {}), ...(existing.data?.k03_edits || {}) }
+        }
+      })
+    }
+  }
+  return Array.from(byId.values())
+}
+
 /** Losowa temperatura 0…-1 °C (deterministyczna od seed — ten sam dzień/partia daje ten sam wynik). */
 export function k04RandomPulpTankTempC(seed = '') {
   let h = 0
@@ -803,9 +867,9 @@ function k03PulpBatchKey(k03) {
 function collectPulpK03Batches(k03Forms = []) {
   const batches = []
   for (const k03 of k03Forms) {
-    if (!k03?.product_name || !isPulpProductName(k03.product_name)) continue
-    const prodDate = resolveK03ProductionDate(k03)
-    const saleDate = String(k03.data?.wz_date || k03.document_date || '').slice(0, 10)
+    if (!isK04PulpBatchK03(k03)) continue
+    const prodDate = k04ReadProductionDateFromK03(k03)
+    const saleDate = k04ReadWzDateFromK03(k03)
     if (!prodDate || !saleDate || prodDate > saleDate) continue
     const k03Key = k03PulpBatchKey(k03)
     if (!k03Key) continue
@@ -927,50 +991,58 @@ function applyK03PulpTankTemperatures(dailyEntries, k03Forms = []) {
   }
 }
 
-/** Uzupełnia zbiorniki na pulpę także na wierszach K04 z bazy (kartoteka miesięczna), bez nadpisywania ręcznych wpisów. */
-export function enrichK04DocsPulpFromK03(docs = [], k03Forms = []) {
-  if (!docs?.length || !k03Forms?.length) return docs
+/** Mapa dzienna: data → temperatury w zbiornikach 1–4 (z K03). */
+export function buildK04PulpAutoByDate(k03Forms = []) {
   const dailyEntries = new Map()
-  for (const doc of docs) {
-    const date = String(doc.document_date || '').slice(0, 10)
-    if (!date) continue
-    dailyEntries.set(k04DailyEntryId(date), {
-      ...doc,
-      data: { ...(doc.data || {}) }
-    })
-  }
   applyK03PulpTankTemperatures(dailyEntries, k03Forms)
-  return docs.map(doc => {
-    const date = String(doc.document_date || '').slice(0, 10)
-    const enriched = dailyEntries.get(k04DailyEntryId(date))
-    if (!enriched?.data) return doc
-    const mergedData = { ...(doc.data || {}) }
-    let changed = false
+  const byDate = new Map()
+  for (const entry of dailyEntries.values()) {
+    const date = String(entry.document_date || '').slice(0, 10)
+    if (!date || !entry.data) continue
+    if (!byDate.has(date)) byDate.set(date, { tanks: {}, auto: {} })
+    const slot = byDate.get(date)
     for (let t = 1; t <= K04_PULPA_TANK_COUNT; t++) {
       const key = k04PulpaTankField(t)
-      const wasManual = mergedData[key] && !mergedData.pulpa_auto?.[t]
-      if (wasManual) continue
-      const nextVal = enriched.data[key]
-      if (nextVal !== undefined && nextVal !== mergedData[key]) {
-        mergedData[key] = nextVal
-        changed = true
-      }
+      const val = entry.data[key]
+      if (val === undefined || val === null || val === '') continue
+      slot.tanks[t] = val
+      if (entry.data.pulpa_auto?.[t]) slot.auto[t] = entry.data.pulpa_auto[t]
     }
-    if (enriched.data.pulpa_auto && Object.keys(enriched.data.pulpa_auto).length) {
-      mergedData.pulpa_auto = { ...(mergedData.pulpa_auto || {}), ...enriched.data.pulpa_auto }
+  }
+  return byDate
+}
+
+export function applyK04PulpAutoToDoc(doc, pulpByDate) {
+  if (!doc || !pulpByDate?.get) return doc
+  const date = String(doc.document_date || '').slice(0, 10)
+  const slot = pulpByDate.get(date)
+  if (!slot?.tanks) return doc
+  const data = { ...(doc.data || {}) }
+  let changed = false
+  for (let t = 1; t <= K04_PULPA_TANK_COUNT; t++) {
+    const key = k04PulpaTankField(t)
+    if (data[key] && !data.pulpa_auto?.[t]) continue
+    const nextVal = slot.tanks[t]
+    if (nextVal === undefined || nextVal === null || nextVal === '') continue
+    if (data[key] !== nextVal) {
+      data[key] = nextVal
       changed = true
     }
-    if (enriched.data.pulpa_tank_by_lot) {
-      mergedData.pulpa_tank_by_lot = { ...(mergedData.pulpa_tank_by_lot || {}), ...enriched.data.pulpa_tank_by_lot }
+    if (slot.auto[t]) {
+      data.pulpa_auto = { ...(data.pulpa_auto || {}), [t]: slot.auto[t] }
       changed = true
     }
-    if (enriched.data.pulpa_tank_overflow) mergedData.pulpa_tank_overflow = true
-    if (enriched.data.produkty && enriched.data.produkty !== mergedData.produkty) {
-      mergedData.produkty = enriched.data.produkty
-      changed = true
-    }
-    return changed ? { ...doc, data: mergedData } : doc
-  })
+  }
+  if (changed && (!data.auto_source || data.auto_source === 'trace' || data.auto_source === 'manual_month')) {
+    data.auto_source = 'k03_pulpa'
+  }
+  return changed ? { ...doc, data } : doc
+}
+
+export function enrichK04DocsPulpFromK03(docs = [], k03Forms = []) {
+  if (!docs?.length || !k03Forms?.length) return docs
+  const pulpByDate = buildK04PulpAutoByDate(k03Forms)
+  return docs.map(doc => applyK04PulpAutoToDoc(doc, pulpByDate))
 }
 
 function upsertK04DailyEntry(dailyEntries, mixedDays, { chamberCode, productGroup, productName, lot, start, end, lotId = null }) {
