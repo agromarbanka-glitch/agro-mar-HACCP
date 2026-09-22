@@ -50,7 +50,8 @@ import {
 import {
   sortW06Docs, buildW06InsertPayload, buildW06PrintHtml, buildW06ExcelRows,
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
-  partyToW06NewRow, W06_PARTY_LABELS
+  partyToW06NewRow, W06_PARTY_LABELS, W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
+  w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine
 } from './w06Engine'
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
 import { buildR11SyncPayloads } from './r11Engine'
@@ -5264,27 +5265,7 @@ function App() {
 
     if (group.type === 'W06') {
       const sorted = sortW06Docs(docs)
-      return <div className="w06-paper haccp-paper">
-        <table className="w06-head"><tbody><tr>
-          <td className="w06-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>NIP: 7171839598</b></td>
-          <td className="w06-title"><b>Wykaz W06 – dostawcy i odbiorcy</b></td>
-          <td className="w06-meta"><b>Wpisy:</b> {sorted.length}</td>
-        </tr></tbody></table>
-        <table className="w06-table"><thead><tr>
-          <th>Lp.</th><th>Typ</th><th>Dane firmy</th><th>NIP</th><th>Towar</th><th>Źr.</th>
-        </tr></thead><tbody>
-          {sorted.map((doc, i) => {
-            const d = doc.data || {}
-            return <tr key={doc.id}>
-              <td>{i + 1}</td><td>{w06PartyLabel(doc)}</td>
-              <td className="left">{d.supplier_name || d.company_name || ''}</td>
-              <td>{d.nip || ''}</td>
-              <td className="left">{d.item_name || doc.product_name || ''}</td>
-              <td>{d.source_doc_kind || ''}</td>
-            </tr>
-          })}
-        </tbody></table>
-      </div>
+      return <div className="w06-paper haccp-paper">{renderW06PaperLayout(sorted)}</div>
     }
 
     if (group.type === 'W03') {
@@ -6481,6 +6462,88 @@ function App() {
     }
   }
 
+  function renderW06PaperLayout(w06Docs, { editable = false } = {}) {
+    const { raw, aux, recipients } = w06PartitionDocs(w06Docs)
+    const rawRows = w06PaddedRows(raw)
+    const auxRows = w06PaddedRows(aux)
+    const rowCount = Math.max(rawRows.length, auxRows.length)
+    while (rawRows.length < rowCount) rawRows.push({ lp: rawRows.length + 1, doc: null })
+    while (auxRows.length < rowCount) auxRows.push({ lp: auxRows.length + 1, doc: null })
+
+    const renderCompanyCell = (doc) => {
+      if (!doc) return ''
+      if (!editable) return w06CompanyLine(doc)
+      return <>
+        <input className="w06-cell-input w06-wide no-print" defaultValue={doc.data?.company_name || doc.data?.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
+        <span className="print-only">{w06CompanyLine(doc)}</span>
+      </>
+    }
+    const renderItemCell = (doc) => {
+      if (!doc) return ''
+      if (!editable) return w06ItemLine(doc)
+      return <>
+        <input className="w06-cell-input w06-wide no-print" defaultValue={doc.data?.item_name || doc.product_name || ''} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
+        <span className="print-only">{w06ItemLine(doc)}</span>
+      </>
+    }
+
+    return <>
+      <table className="w06-head"><tbody>
+        <tr>
+          <td className="w06-company">{W06_HEADER.companyLines.map((l, i) => <span key={i}>{l}{i < W06_HEADER.companyLines.length - 1 && <br/>}</span>)}</td>
+          <td className="w06-title" rowSpan={2}><b>{W06_HEADER.title}</b></td>
+          <td className="w06-meta"><b>Wersja</b> {W06_HEADER.version}</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td className="w06-meta"><b>Data wydania:</b> {W06_HEADER.issueDateLabel}<br/><b>Strona:</b> 1 z 1</td>
+        </tr>
+      </tbody></table>
+      <table className="w06-table w06-split-table">
+        <thead><tr className="w06-section-head">
+          <th className="w06-lp">Lp.</th>
+          <th className="left">{W06_RAW_SUPPLIER_HEAD}</th>
+          <th className="left">Nazwa surowca</th>
+          <th className="w06-gap"></th>
+          <th className="w06-lp">Lp.</th>
+          <th className="left">{W06_AUX_SUPPLIER_HEAD}</th>
+          <th className="left">Nazwa towaru</th>
+        </tr></thead>
+        <tbody>
+          {Array.from({ length: rowCount }, (_, i) => {
+            const r = rawRows[i]
+            const a = auxRows[i]
+            return <tr key={`w06-row-${i}`}>
+              <td>{r.lp}</td>
+              <td className="left">{renderCompanyCell(r.doc)}</td>
+              <td className="left">{renderItemCell(r.doc)}</td>
+              <td className="w06-gap"></td>
+              <td>{a.lp}</td>
+              <td className="left">{renderCompanyCell(a.doc)}</td>
+              <td className="left">{renderItemCell(a.doc)}</td>
+            </tr>
+          })}
+        </tbody>
+      </table>
+      {recipients.length > 0 && <div className="no-print w06-recipients-panel">
+        <p className="hint"><b>Odbiorcy z importu WZ</b> (nie wchodzą w papierowy wzór W06 – tylko lista robocza):</p>
+        <table className="w06-table w06-recipients-table">
+          <thead><tr><th>Lp.</th><th>Dane odbiorcy</th><th>Towar</th><th className="w06-act">Akcje</th></tr></thead>
+          <tbody>
+            {recipients.map((doc, i) => (
+              <tr key={doc.id}>
+                <td>{i + 1}</td>
+                <td className="left">{w06CompanyLine(doc)}</td>
+                <td className="left">{w06ItemLine(doc)}</td>
+                <td className="no-print row-actions">{isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>}
+    </>
+  }
+
   function renderW06Section() {
     const w06Docs = sortW06Docs(hubManualDocsForFilter.filter(d => d.document_type === 'W06'))
     const w06ImportBatches = listW06ImportBatches(w06Docs)
@@ -6530,56 +6593,32 @@ function App() {
         <button className="secondary" onClick={() => exportManualHaccpPeriodExcel('W06', w06Docs)}>Pobierz Excel</button>
       </div>
       <div className="w06-paper haccp-paper">
-        <table className="w06-head"><tbody><tr>
-          <td className="w06-company"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
-          <td className="w06-title"><b>Wykaz W06 – Wykaz kwalifikowanych dostawców i odbiorców</b></td>
-          <td className="w06-meta"><b>Wersja</b> I/2024<br/><b>Wpisy:</b> {w06Docs.length}</td>
-        </tr></tbody></table>
-        <table className="w06-table">
-          <thead><tr>
-            <th>Lp.</th><th>Typ</th><th>Kategoria</th><th>Dane firmy</th><th>NIP</th><th>Towar / surowiec</th><th>Źr.</th>
-            <th className="no-print w06-act">Akcje</th>
-          </tr></thead>
-          <tbody>
-            {w06Docs.length === 0 && <tr><td colSpan={8} className="hint">Brak wpisów – wgraj Excel/PDF PZ/WZ lub dodaj ręcznie poniżej.</td></tr>}
-            {w06Docs.map((doc, i) => {
-              const d = doc.data || {}
-              return <tr key={doc.id}>
-                <td>{i + 1}</td>
-                <td>
-                  <select className="w06-cell-input no-print" defaultValue={d.party_type || 'supplier'} onBlur={e => saveW06Cell(doc, 'party_type', e.target.value)}>
-                    <option value="supplier">Dostawca</option>
-                    <option value="recipient">Odbiorca</option>
-                  </select>
-                  <span className="print-only">{w06PartyLabel(doc)}</span>
-                </td>
-                <td>
-                  <select className="w06-cell-input no-print" defaultValue={d.supplier_kind || 'raw'} onBlur={e => saveW06Cell(doc, 'supplier_kind', e.target.value)}>
-                    <option value="raw">Surowiec</option>
-                    <option value="aux">Materiały pom.</option>
-                    <option value="recipient">Odbiorca</option>
-                  </select>
-                  <span className="print-only">{w06KindLabel(doc)}</span>
-                </td>
-                <td className="left">
-                  <input className="w06-cell-input w06-wide no-print" defaultValue={d.company_name || d.supplier_name || ''} onBlur={e => saveW06Cell(doc, 'company_name', e.target.value)} />
-                  <span className="print-only">{d.supplier_name || d.company_name || ''}</span>
-                </td>
-                <td>
-                  <input className="w06-cell-input no-print" defaultValue={d.nip || ''} onBlur={e => saveW06Cell(doc, 'nip', e.target.value.replace(/\D/g, '').slice(0, 10))} />
-                  <span className="print-only">{d.nip || ''}</span>
-                </td>
-                <td className="left">
-                  <input className="w06-cell-input w06-wide no-print" defaultValue={d.item_name || doc.product_name || ''} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
-                  <span className="print-only">{d.item_name || doc.product_name || ''}</span>
-                </td>
-                <td>{d.source_doc_kind || ''}</td>
-                <td className="no-print row-actions">{isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń</button>}</td>
-              </tr>
-            })}
-          </tbody>
-        </table>
+        {w06Docs.length === 0 && <p className="hint no-print">Brak wpisów – wgraj Excel/PDF PZ/WZ lub dodaj ręcznie poniżej (min. 20 pustych wierszy w druku jak we wzorze).</p>}
+        {renderW06PaperLayout(w06Docs, { editable: true })}
       </div>
+      {w06Docs.length > 0 && <details className="card inner-card no-print" style={{ marginTop: 12 }}>
+        <summary>NIP, kategoria i usuwanie wpisów ({w06Docs.length})</summary>
+        <div className="table-wrap docs-table-wrap"><table className="docs-table w06-admin-table">
+          <thead><tr><th>Kategoria</th><th>Dane firmy</th><th>NIP</th><th>Towar</th><th>Źr.</th><th>Akcje</th></tr></thead>
+          <tbody>{w06Docs.map(doc => {
+            const d = doc.data || {}
+            return <tr key={doc.id}>
+              <td>
+                <select className="w06-cell-input" defaultValue={d.supplier_kind || 'raw'} onBlur={e => saveW06Cell(doc, 'supplier_kind', e.target.value)}>
+                  <option value="raw">Surowiec (lewa tabela)</option>
+                  <option value="aux">Materiały pom. (prawa tabela)</option>
+                  <option value="recipient">Odbiorca WZ</option>
+                </select>
+              </td>
+              <td className="left">{w06CompanyLine(doc)}</td>
+              <td><input className="w06-cell-input" defaultValue={d.nip || ''} onBlur={e => saveW06Cell(doc, 'nip', e.target.value.replace(/\D/g, '').slice(0, 10))} /></td>
+              <td className="left">{w06ItemLine(doc)}</td>
+              <td>{d.source_doc_kind || ''}</td>
+              <td>{isAdmin(authProfile) && <button className="mini danger" onClick={() => deleteW06Row(doc)}>Usuń</button>}</td>
+            </tr>
+          })}</tbody>
+        </table></div>
+      </details>}
       <div className="card inner-card no-print">
         <h3>Dodaj kontrahenta ręcznie</h3>
         <div className="form-grid compact">

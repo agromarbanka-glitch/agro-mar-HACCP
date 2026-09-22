@@ -141,7 +141,7 @@ export const WYKAZY_FORMS = {
     code: 'W06',
     layout: 'table',
     periodMode: 'register',
-    title: 'Wykaz W06 – Wykaz kwalifikowanych dostawców i odbiorców',
+    title: 'Wykaz W06 - Wykaz kwalifikowanych dostawców',
     columns: [
       col('lp', 'Lp.', (_, i) => i + 1),
       col('party', 'Typ', d => dval(d, 'party_type') === 'recipient' ? 'Odbiorca' : 'Dostawca'),

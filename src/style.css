@@ -1326,19 +1326,24 @@ button.linkish { background: none; border: none; color: var(--accent, #2d6a4f); 
   .r13-day-off td { background: #ffe8e8 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 
-/* W06 – dostawcy i odbiorcy */
+/* W06 – wykaz kwalifikowanych dostawców (2× Lp. | firma | towar, min. 20 wierszy) */
 .w06-paper { overflow-x: auto; }
 .w06-head, .w06-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.w06-head td, .w06-table td, .w06-table th { border: 1px solid #111; padding: 6px 4px; text-align: center; vertical-align: middle; font-size: 11px; }
-.w06-company { width: 28%; text-align: left; font-weight: 700; vertical-align: top; }
-.w06-title { width: 52%; text-align: center; font-weight: 700; font-size: 13px; }
-.w06-meta { width: 20%; text-align: left; font-size: 11px; vertical-align: top; }
-.w06-table .left { text-align: left; }
-.w06-cell-input { width: 100%; border: 1px solid #d8d8d8; border-radius: 6px; padding: 4px 6px; font-size: 11px; background: #fff; }
-.w06-cell-input.w06-wide { min-width: 140px; }
+.w06-head td, .w06-table td, .w06-table th { border: 1px solid #111; padding: 5px 4px; text-align: center; vertical-align: middle; font-size: 10px; line-height: 1.15; }
+.w06-company { width: 30%; text-align: left; font-weight: 700; vertical-align: top; line-height: 1.2; }
+.w06-title { width: 44%; text-align: center; font-weight: 700; font-size: 12px; vertical-align: middle; }
+.w06-meta { width: 26%; text-align: left; font-size: 10px; vertical-align: top; }
+.w06-table .left { text-align: left; vertical-align: top; }
+.w06-split-table .w06-section-head th { font-size: 8px; font-weight: 700; padding: 6px 3px; }
+.w06-split-table .w06-lp { width: 4%; }
+.w06-split-table .w06-gap { width: 1.5%; border: none !important; background: transparent !important; }
+.w06-recipients-panel { margin-top: 14px; }
+.w06-cell-input { width: 100%; border: 1px solid #d8d8d8; border-radius: 6px; padding: 4px 6px; font-size: 11px; background: #fff; box-sizing: border-box; }
+.w06-cell-input.w06-wide { min-width: 0; }
 .w06-act { width: 5%; }
 @media print {
-  .w06-cell-input, .w06-act, .no-print { display: none !important; }
+  .w06-cell-input, .w06-act, .no-print, .w06-recipients-panel, .w06-admin-table { display: none !important; }
+  .w06-split-table .w06-section-head th { font-size: 7.5pt; }
 }
 
 /* Archiwum PDF */

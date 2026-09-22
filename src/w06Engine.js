@@ -5,8 +5,33 @@ import { extractPdfData, isReadablePdfText, rebuildTextFromItems } from './pdfIm
 import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
 
-export const W06_ENGINE_VERSION = '1.5'
+export const W06_ENGINE_VERSION = '1.6'
 export const AGRO_MAR_NIP = '7171839598'
+export const W06_MIN_ROWS = 20
+
+/** Układ 1:1 – W06 - Wykaz kwalifikowanych dostawców.docx (I/2024). */
+export const W06_HEADER = {
+  companyLines: [
+    'AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.',
+    '24-335 ŁAZISKA,',
+    'KOLONIA ŁAZISKA 30',
+    'NIP: 7171839598'
+  ],
+  title: 'Wykaz W06 - Wykaz kwalifikowanych dostawców',
+  version: 'I/2024',
+  issueDate: '2024-09-02',
+  issueDateLabel: '02.09.2024'
+}
+
+export const W06_RAW_SUPPLIER_HEAD = 'Dane dostawcy surowca (nazwa i dane firmy)'
+export const W06_AUX_SUPPLIER_HEAD = 'Dane dostawcy materiałów pomocniczych w tym opakowań i środków czystości (nazwa i dane firmy)'
+
+export function formatW06PlDate(iso) {
+  if (!iso) return ''
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!m) return iso
+  return `${m[3]}.${m[2]}.${m[1]}`
+}
 
 export const W06_PARTY_LABELS = {
   supplier: 'Dostawca',
@@ -650,43 +675,96 @@ export function w06KindLabel(doc) {
   return W06_KIND_LABELS[k] || W06_KIND_LABELS.raw
 }
 
-export function buildW06PrintHtml(docs, escapeHtml) {
-  const sorted = sortW06Docs(docs)
-  const rows = sorted.map((doc, i) => {
+export function w06CompanyLine(doc) {
+  if (!doc) return ''
+  const d = doc.data || {}
+  return d.supplier_name || [d.company_name, d.address].filter(Boolean).join(', ') || d.company_name || ''
+}
+
+export function w06ItemLine(doc) {
+  if (!doc) return ''
+  const d = doc.data || {}
+  return d.item_name || doc.product_name || ''
+}
+
+/** Surowiec | materiały pom. | odbiorcy (poza wzorem Word – import WZ). */
+export function w06PartitionDocs(docs = []) {
+  const raw = []
+  const aux = []
+  const recipients = []
+  for (const doc of sortW06Docs(docs)) {
     const d = doc.data || {}
+    if (d.party_type === 'recipient' || d.supplier_kind === 'recipient') recipients.push(doc)
+    else if (d.supplier_kind === 'aux') aux.push(doc)
+    else raw.push(doc)
+  }
+  return { raw, aux, recipients }
+}
+
+export function w06PaddedRows(docs = [], minRows = W06_MIN_ROWS) {
+  const sorted = sortW06Docs(docs)
+  const n = Math.max(minRows, sorted.length)
+  return Array.from({ length: n }, (_, i) => ({ lp: i + 1, doc: sorted[i] || null }))
+}
+
+export function buildW06PrintHtml(docs, escapeHtml) {
+  const { raw, aux } = w06PartitionDocs(docs)
+  const rawRows = w06PaddedRows(raw)
+  const auxRows = w06PaddedRows(aux)
+  const rowCount = Math.max(rawRows.length, auxRows.length)
+  while (rawRows.length < rowCount) rawRows.push({ lp: rawRows.length + 1, doc: null })
+  while (auxRows.length < rowCount) auxRows.push({ lp: auxRows.length + 1, doc: null })
+  const company = W06_HEADER.companyLines.map(l => escapeHtml(l)).join('<br/>')
+  const paired = Array.from({ length: rowCount }, (_, i) => {
+    const r = rawRows[i]
+    const a = auxRows[i]
     return `<tr>
-      <td>${i + 1}</td>
-      <td>${escapeHtml(w06PartyLabel(doc))}</td>
-      <td class="left">${escapeHtml(d.supplier_name || d.company_name || '')}</td>
-      <td>${escapeHtml(d.nip || '')}</td>
-      <td class="left">${escapeHtml(d.item_name || doc.product_name || '')}</td>
-      <td>${escapeHtml(d.source_doc_kind || '')}</td>
+      <td>${r.lp}</td><td class="left">${escapeHtml(w06CompanyLine(r.doc))}</td><td class="left">${escapeHtml(w06ItemLine(r.doc))}</td>
+      <td class="gap"></td>
+      <td>${a.lp}</td><td class="left">${escapeHtml(w06CompanyLine(a.doc))}</td><td class="left">${escapeHtml(w06ItemLine(a.doc))}</td>
     </tr>`
   }).join('')
-  return `<!doctype html><html><head><meta charset="utf-8"><title>W06 – Dostawcy i odbiorcy</title>
-<style>@page{size:A4 landscape;margin:10mm}body{font-family:"Times New Roman",serif;color:#111;margin:0;font-size:11pt}
-table{width:100%;border-collapse:collapse}td,th{border:1px solid #111;padding:6px;text-align:center;font-size:10pt}
-.left{text-align:left}.company{font-weight:bold;text-align:left}.title{text-align:center;font-weight:bold;font-size:13pt}
+  return `<!doctype html><html><head><meta charset="utf-8"><title>W06</title>
+<style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0;font-size:10pt}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #111;padding:4px 5px;text-align:center;vertical-align:middle;font-size:9.5pt;line-height:1.15}
+.left{text-align:left;vertical-align:top}.company{width:30%;font-weight:bold;text-align:left;line-height:1.2}
+.title{width:44%;text-align:center;font-weight:bold;font-size:12pt;line-height:1.25}.meta{width:26%;text-align:left;font-size:10pt;vertical-align:top}
+.head td{border:1px solid #111;padding:5px}.lp{width:5%}.gap{width:1%;border:none!important;background:transparent!important}
+.section-head th{font-size:8.5pt;font-weight:bold;line-height:1.1;padding:5px 3px}
 @media print{button{display:none}}</style></head><body>
-<table><tr><td class="company">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA, KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</td>
-<td class="title">Wykaz W06 – Wykaz kwalifikowanych dostawców i odbiorców</td>
-<td>Wersja I/2024</td></tr></table>
-<table style="margin-top:12px"><thead><tr>
-<th>Lp.</th><th>Typ</th><th>Dane firmy</th><th>NIP</th><th>Towar / surowiec</th><th>Źródło</th>
-</tr></thead><tbody>${rows}</tbody></table>
+<table class="head"><tbody>
+<tr><td class="company" rowspan="3">${company}</td><td class="title" rowspan="2"><b>${escapeHtml(W06_HEADER.title)}</b></td><td class="meta"><b>Wersja</b> ${escapeHtml(W06_HEADER.version)}</td></tr>
+<tr><td class="meta"><b>Data wydania:</b> ${escapeHtml(W06_HEADER.issueDateLabel)}</td></tr>
+<tr><td></td><td class="meta"><b>Strona:</b> 1 z 1</td></tr>
+</tbody></table>
+<table style="margin-top:8px"><thead><tr class="section-head">
+<th class="lp">Lp.</th><th class="left">${escapeHtml(W06_RAW_SUPPLIER_HEAD)}</th><th class="left">Nazwa surowca</th>
+<th class="gap"></th>
+<th class="lp">Lp.</th><th class="left">${escapeHtml(W06_AUX_SUPPLIER_HEAD)}</th><th class="left">Nazwa towaru</th>
+</tr></thead><tbody>${paired}</tbody></table>
 <script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildW06ExcelRows(docs) {
-  const sorted = sortW06Docs(docs)
-  return [
-    ['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'],
-    ['Wykaz W06 – kwalifikowani dostawcy i odbiorcy'],
+  const { raw, aux } = w06PartitionDocs(docs)
+  const rawRows = w06PaddedRows(raw)
+  const auxRows = w06PaddedRows(aux)
+  const rowCount = Math.max(rawRows.length, auxRows.length)
+  while (rawRows.length < rowCount) rawRows.push({ lp: rawRows.length + 1, doc: null })
+  while (auxRows.length < rowCount) auxRows.push({ lp: auxRows.length + 1, doc: null })
+  const rows = [
+    W06_HEADER.companyLines,
+    [W06_HEADER.title, '', '', '', `Wersja ${W06_HEADER.version}`, `Data wydania: ${W06_HEADER.issueDateLabel}`],
     [],
-    ['Lp.', 'Typ', 'Dane firmy', 'NIP', 'Towar / surowiec', 'Źródło dokumentu'],
-    ...sorted.map((doc, i) => {
-      const d = doc.data || {}
-      return [i + 1, w06PartyLabel(doc), d.supplier_name || d.company_name || '', d.nip || '', d.item_name || doc.product_name || '', d.source_doc_kind || '']
-    })
+    ['Lp.', W06_RAW_SUPPLIER_HEAD, 'Nazwa surowca', '', 'Lp.', W06_AUX_SUPPLIER_HEAD, 'Nazwa towaru']
   ]
+  for (let i = 0; i < rowCount; i++) {
+    const r = rawRows[i]
+    const a = auxRows[i]
+    rows.push([
+      r.lp, w06CompanyLine(r.doc), w06ItemLine(r.doc), '',
+      a.lp, w06CompanyLine(a.doc), w06ItemLine(a.doc)
+    ])
+  }
+  return rows
 }
