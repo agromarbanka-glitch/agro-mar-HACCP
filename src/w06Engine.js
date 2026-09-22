@@ -6,7 +6,7 @@ import { isReadableName } from './k011InvoiceParser.js'
 import { readAgromarExcel } from './excelImport.js'
 import * as XLSX from 'xlsx'
 
-export const W06_ENGINE_VERSION = '2.0'
+export const W06_ENGINE_VERSION = '2.1'
 
 /** Domyślny zestaw surowców (lewa kolumna W06) – dopisywany automatycznie. */
 export const W06_DEFAULT_RAW_ITEMS = ['Truskawka', 'Malina', 'Porzeczka', 'Jabłko', 'Wiśnia']
@@ -70,8 +70,20 @@ export function normalizeNip(value) {
   return ''
 }
 
+const W06_COMPANY_STOP_TOKENS = new Set([
+  'sp', 'z', 'oo', 'spzoo', 'sa', 'sc', 's', 'c', 'phu', 'ppuh', 'fhu', 'gospodarstwo', 'rolne',
+  'przedsiebiorstwo', 'wielobranzowe', 'handlowo', 'uslugowe', 'produkcyjno', 'firma', 'sady', 'i'
+])
+
+export function w06NormalizeCompanyInput(name = '') {
+  return String(name || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .trim()
+}
+
 export function w06CompanyFingerprint(name = '') {
-  return normalizeText(name)
+  return normalizeText(w06NormalizeCompanyInput(name))
     .replace(/["«»„"]/g, '')
     .replace(/\bsp\.?\s*z\.?\s*o\.?\s*o\.?\b/g, ' spzoo ')
     .replace(/\bprzedsiebiorstwo\b/g, ' ')
@@ -79,27 +91,141 @@ export function w06CompanyFingerprint(name = '') {
     .trim()
 }
 
-/** Klucz dopasowania tej samej firmy – po nazwie (pierwsze słowo ≥4 zn.), NIP tylko gdy brak sensownej nazwy. */
-export function w06DedupeKey(party) {
-  const fp = w06CompanyFingerprint(party?.company_name || party?.supplier_name || party?.name || '')
-  if (fp.length >= 3) {
-    const first = fp.split(' ').filter(Boolean)[0] || fp
-    if (first.length >= 4) return `co:${first}`
-    return `name:${fp.slice(0, 80)}`
+export function w06PrimaryDedupeToken(name = '') {
+  const fp = w06CompanyFingerprint(name)
+  if (!fp) return ''
+  const tokens = fp.split(' ').filter(t => t && !W06_COMPANY_STOP_TOKENS.has(t))
+  for (const t of tokens) {
+    if (t.length >= 4) return t
   }
+  return (tokens[0] || fp.replace(/\s+/g, '')).slice(0, 24)
+}
+
+/** Klucz kanoniczny nazwy (bez spacji, bez form prawnych). */
+export function w06CanonicalCompanyKey(name = '') {
+  const fp = w06CompanyFingerprint(name)
+  if (!fp) return ''
+  const tokens = fp.split(' ').filter(t => t && !W06_COMPANY_STOP_TOKENS.has(t))
+  const compact = (tokens.join('') || fp.replace(/\s+/g, '')).slice(0, 72)
+  return compact
+}
+
+export function w06DedupeKey(party) {
+  const name = party?.company_name || party?.supplier_name || party?.name || ''
+  const canon = w06CanonicalCompanyKey(name)
+  if (canon.length >= 3) return `k:${canon}`
   const nip = normalizeNip(party?.nip)
   if (nip) return `nip:${nip}`
   return ''
 }
 
+export function w06SameSupplierIdentity(a, b) {
+  const kindA = w06KindPartitionKey(a)
+  const kindB = w06KindPartitionKey(b)
+  if (kindA !== kindB) return false
+  const da = a?.data || a
+  const db = b?.data || b
+  const nipA = normalizeNip(da.nip ?? a.nip)
+  const nipB = normalizeNip(db.nip ?? b.nip)
+  if (nipA && nipB && nipA === nipB) return true
+  const nameA = da.company_name || da.supplier_name || a.company_name || a.supplier_name || ''
+  const nameB = db.company_name || db.supplier_name || b.company_name || b.supplier_name || ''
+  const ka = w06CanonicalCompanyKey(nameA)
+  const kb = w06CanonicalCompanyKey(nameB)
+  if (ka && kb) {
+    if (ka === kb) return true
+    const minLen = Math.min(ka.length, kb.length)
+    if (minLen >= 5 && (ka.includes(kb) || kb.includes(ka))) return true
+  }
+  const ta = w06PrimaryDedupeToken(nameA)
+  const tb = w06PrimaryDedupeToken(nameB)
+  return !!(ta && tb && ta === tb && ta.length >= 4)
+}
+
+function w06PartyFromAny(x) {
+  const d = x?.data || x
+  return {
+    party_type: d.party_type || x.party_type || 'supplier',
+    supplier_kind: d.supplier_kind || x.supplier_kind || 'raw',
+    company_name: w06NormalizeCompanyInput(d.company_name || d.supplier_name || x.company_name || x.supplier_name || ''),
+    supplier_name: w06NormalizeCompanyInput(d.supplier_name || d.company_name || x.supplier_name || x.company_name || ''),
+    nip: normalizeNip(d.nip ?? x.nip),
+    address: d.address || x.address || '',
+    item_name: d.item_name || x.item_name || '',
+    source_doc_kind: d.source_doc_kind || x.source_doc_kind || '',
+    source_filename: d.source_filename || x.source_filename || '',
+    accepted: !!(d.accepted ?? x.accepted),
+    accepted_order: Number(d.accepted_order ?? x.accepted_order ?? 0)
+  }
+}
+
+/** Scala listę kontrahentów (import) – ta sama firma / NIP tylko raz. */
+export function collapseW06PartiesByIdentity(parties = []) {
+  const merged = []
+  for (const raw of parties) {
+    const p = w06PartyFromAny(raw)
+    if (!p.company_name || isAgromarParty(p.company_name, p.nip)) continue
+    if (W06_DEFAULT_RAW_ITEMS.some(f => f.toLowerCase() === p.company_name.toLowerCase())) continue
+    let target = null
+    for (const m of merged) {
+      if (w06SameSupplierIdentity(m, p)) {
+        target = m
+        break
+      }
+    }
+    if (!target) {
+      p.dedupe_key = w06DedupeKey(p)
+      p.item_name = w06EnforceRawItemLine('', p.company_name, p.supplier_kind || 'raw')
+      merged.push(p)
+      continue
+    }
+    if (p.company_name.length > target.company_name.length) {
+      target.company_name = p.company_name.slice(0, 200)
+      target.supplier_name = p.company_name.slice(0, 200)
+    }
+    if (!target.nip && p.nip) target.nip = p.nip
+    if (p.source_filename && !target.source_filename) target.source_filename = p.source_filename
+    target.dedupe_key = w06DedupeKey(target)
+    target.item_name = w06EnforceRawItemLine(target.item_name, target.company_name, target.supplier_kind || 'raw')
+  }
+  return merged
+}
+
 export function w06LooksLikeCompanyName(text, companyHint = '') {
-  const p = w06CompanyFingerprint(text)
-  if (!p || p.length < 4) return false
+  const raw = String(text || '').trim()
+  if (!raw) return false
+  const p = w06CompanyFingerprint(raw)
+  if (!p || p.length < 3) return false
   const hint = w06CompanyFingerprint(companyHint)
-  if (hint && (p === hint || p.includes(hint) || hint.includes(p))) return true
-  if (/spzoo|ograniczona odpowiedzialnoscia|spolka akcyjna|\bsa\b/.test(p)) return true
-  if (p.length > 36 && /przedsiebiorstwo|wielobranzow|handlow|produkcyjn|dostawc/.test(p)) return true
+  if (hint && hint.length >= 3 && (p === hint || p.includes(hint) || hint.includes(p))) return true
+  if (/spzoo|ograniczona odpowiedzialnoscia|spolka akcyjna|\bsa\b|wielobranzow|przedsiebiorstwo/.test(p)) return true
+  if (raw.length > 22) return true
+  if (p.split(' ').filter(Boolean).length >= 3 && raw.length > 14) return true
+  if (/[«»"„"]/.test(raw) && raw.length > 10) return true
+  if (/sp\.?\s*z\.?\s*o\.?\s*o\.?|spółka|spolka/i.test(raw)) return true
   return false
+}
+
+export function w06StandardRawItemLine() {
+  return W06_DEFAULT_RAW_ITEMS.join('; ')
+}
+
+/** W kolumnie surowca: wyłącznie domyślne owoce + krótkie ręczne (bez nazw firm). */
+export function w06EnforceRawItemLine(itemName, companyName, supplierKind = 'raw') {
+  if (supplierKind === 'recipient' || supplierKind === 'aux') {
+    return w06CleanItemListForSupplier(itemName, companyName).slice(0, 160)
+  }
+  const allowed = new Set(W06_DEFAULT_RAW_ITEMS.map(x => x.toLowerCase()))
+  const out = [...W06_DEFAULT_RAW_ITEMS]
+  for (const it of w06ParseItemList(itemName)) {
+    if (allowed.has(it.toLowerCase())) continue
+    if (w06LooksLikeCompanyName(it, companyName)) continue
+    if (it.length > 28) continue
+    if (/sp\.?\s*z|spolka|spółka|przedsiebiorstwo|oo\b/i.test(it)) continue
+    out.push(it)
+    allowed.add(it.toLowerCase())
+  }
+  return out.join('; ').slice(0, 160)
 }
 
 export function w06SanitizeSupplierProduct(companyName, productName) {
@@ -126,7 +252,7 @@ export function w06MatchKeyFromDoc(doc) {
 }
 
 export function w06KindPartitionKey(doc) {
-  const d = doc?.data || {}
+  const d = doc?.data || doc || {}
   const kind = d.supplier_kind || (d.party_type === 'recipient' ? 'recipient' : 'raw')
   return kind
 }
@@ -742,9 +868,7 @@ export function parseW06SupplierListWorkbook(buffer, fileName = '') {
   }
   const beforeDedupe = best.rows.length
   const parsed = parseW06PartiesFromExcelRows(best.rows, fileName, { supplierList: true })
-  for (const party of parsed.parties) {
-    party.item_name = w06ApplyDefaultRawItems('', party.supplier_kind || 'raw', party.company_name)
-  }
+  parsed.parties = collapseW06PartiesByIdentity(parsed.parties)
   const dupesInFile = Math.max(0, beforeDedupe - parsed.parties.length)
   parsed.preview = buildW06ExcelPreview(best.rows, parsed.parties, {
     dataRows: best.dataRows,
@@ -757,7 +881,8 @@ export function parseW06SupplierListWorkbook(buffer, fileName = '') {
 
 /** Usuwa duplikaty w partii (np. wiele wierszy tej samej firmy w pliku). */
 export function dedupeW06PartiesBatch(parties) {
-  return filterNewW06Parties([], parties || [])
+  const collapsed = collapseW06PartiesByIdentity(parties || [])
+  return filterNewW06Parties([], collapsed)
 }
 
 /** Grupuje wiersze Excela (PZ/WZ) w unikalnych kontrahentów z asortymentem. */
@@ -765,8 +890,9 @@ export function parseW06PartiesFromExcelRows(rows, fileName = '', { supplierList
   const byKey = new Map()
 
   for (const row of rows || []) {
-    const name = String(row.contractorName || '').trim()
-    if (!name || isAgromarParty(name)) continue
+    const name = w06NormalizeCompanyInput(row.contractorName)
+    if (!name || name.length < 2 || isAgromarParty(name)) continue
+    if (W06_DEFAULT_RAW_ITEMS.some(f => f.toLowerCase() === name.toLowerCase())) continue
 
     const docKind = detectW06DocKind(`${row.documentType || ''} ${row.documentNo || ''}`, fileName)
     const partyType = docKind === 'WZ' ? 'recipient' : 'supplier'
@@ -940,8 +1066,13 @@ export function filterNewW06Parties(existingDocs, parties) {
       skipped.push({ party, reason: 'brak nazwy/NIP' })
       continue
     }
-    if (keys.has(key)) {
+    const already = (existingDocs || []).some(doc => w06SameSupplierIdentity(doc, party))
+    if (already || keys.has(key)) {
       skipped.push({ party, reason: 'już na liście' })
+      continue
+    }
+    if (added.some(p => w06SameSupplierIdentity(p, party))) {
+      skipped.push({ party, reason: 'duplikat w pliku' })
       continue
     }
     keys.add(key)
@@ -1033,37 +1164,37 @@ export function pickW06CanonicalDoc(group) {
 
 /** Plan scalenia duplikatów tej samej firmy w tej samej kategorii (surowiec / aux / odbiorca). */
 export function planW06DuplicateRepairs(docs) {
-  const map = new Map()
-  for (const doc of docs || []) {
-    if (doc.document_type !== 'W06') continue
-    const key = w06CompositeMatchKey(doc)
-    if (!key) continue
-    if (!map.has(key)) map.set(key, [])
-    map.get(key).push(doc)
+  const w06 = (docs || []).filter(d => d.document_type === 'W06')
+  const groups = []
+  for (const doc of w06) {
+    let g = groups.find(gr => gr.some(d => w06SameSupplierIdentity(d, doc)))
+    if (!g) {
+      g = []
+      groups.push(g)
+    }
+    g.push(doc)
   }
   const plans = []
-  for (const group of map.values()) {
+  for (const group of groups) {
     if (group.length <= 1) continue
     const keep = pickW06CanonicalDoc(group)
     const remove = group.filter(d => d.id !== keep.id)
-    let item_name = w06ItemLine(keep)
+    const company_name = w06LongestCompanyName(group)
+    const kind = w06KindPartitionKey(keep)
     let accepted = !!keep.data?.accepted
     let accepted_order = Number(keep.data?.accepted_order || 0)
     let nip = keep.data?.nip || ''
     for (const d of group) {
-      item_name = w06MergeItemNames(item_name, w06ItemLine(d))
       if (d.data?.accepted) {
         accepted = true
         accepted_order = Math.max(accepted_order, Number(d.data?.accepted_order || 0))
       }
       if (!nip && d.data?.nip) nip = d.data.nip
     }
-    const kind = w06KindPartitionKey(keep)
-    item_name = w06ApplyDefaultRawItems(item_name, kind, company_name)
-    const company_name = w06LongestCompanyName(group)
     const address = keep.data?.address || group.map(d => d.data?.address).find(Boolean) || ''
     const supplier_name = address ? `${company_name}, ${address}` : company_name
-    const dedupe_key = w06MatchKeyFromDoc({ data: { ...keep.data, company_name, nip } })
+    const item_name = w06EnforceRawItemLine('', company_name, kind)
+    const dedupe_key = w06DedupeKey({ company_name, nip })
     plans.push({
       keep,
       remove,
@@ -1091,7 +1222,7 @@ export function buildW06InsertPayload(party) {
     supplier_name: party.supplier_name || party.company_name || '',
     nip: party.nip || '',
     address: party.address || '',
-    item_name: w06ApplyDefaultRawItems(party.item_name || '', data.supplier_kind, data.company_name),
+    item_name: w06EnforceRawItemLine(party.item_name || '', data.company_name, data.supplier_kind),
     source_doc_kind: party.source_doc_kind || '',
     source_filename: party.source_filename || '',
     dedupe_key,
@@ -1101,7 +1232,7 @@ export function buildW06InsertPayload(party) {
   return {
     document_type: 'W06',
     document_date: new Date().toISOString().slice(0, 10),
-    product_name: data.item_name || data.company_name,
+    product_name: data.supplier_kind === 'raw' ? data.item_name : (data.item_name || data.company_name),
     supplier_name: data.supplier_name,
     document_no: `W06/${dedupe_key.slice(0, 40)}`,
     status: 'P',
@@ -1130,7 +1261,11 @@ export function w06CompanyLine(doc) {
 export function w06ItemLine(doc) {
   if (!doc) return ''
   const d = doc.data || {}
-  return d.item_name || doc.product_name || ''
+  const kind = d.supplier_kind || 'raw'
+  const company = d.company_name || d.supplier_name || ''
+  const stored = d.item_name || ''
+  const legacyProduct = doc.product_name && doc.product_name !== company ? doc.product_name : ''
+  return w06EnforceRawItemLine(stored || legacyProduct, company, kind)
 }
 
 /** Surowiec | materiały pom. | odbiorcy (poza wzorem Word – import WZ). */

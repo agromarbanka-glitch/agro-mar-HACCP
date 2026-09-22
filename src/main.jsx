@@ -52,7 +52,7 @@ import {
   parseW06FromPdfFile, parseW06FromExcelFile, isW06ExcelFile, filterNewW06Parties, dedupeW06PartiesBatch, listW06ImportBatches, w06PartyLabel, w06KindLabel, w06DedupeKey,
   W06_HEADER, W06_RAW_SUPPLIER_HEAD, W06_AUX_SUPPLIER_HEAD,
   w06PartitionDocs, w06PaddedRows, w06CompanyLine, w06ItemLine, w06MergeItemNames, w06ParseItemList,
-  w06RemoveItemName, w06ApplyDefaultRawItems, w06CleanItemListForSupplier, planW06DuplicateRepairs
+  w06RemoveItemName, w06EnforceRawItemLine, w06CleanItemListForSupplier, collapseW06PartiesByIdentity, planW06DuplicateRepairs
 } from './w06Engine'
 import { buildRMonthlyPeriodGroups, buildRMonthlyPrintHtml, buildRMonthlyExcelRows, resolveRMonthlyGroupDeleteDocs } from './rMonthlyEngine'
 import { buildR11SyncPayloads } from './r11Engine'
@@ -6253,7 +6253,8 @@ function App() {
   }
 
   async function importW06StagedParties(parties, existing) {
-    const { added, skipped } = filterNewW06Parties(existing, parties)
+    const collapsed = collapseW06PartiesByIdentity(parties)
+    const { added, skipped } = filterNewW06Parties(existing, collapsed)
     if (!added.length) return { added: 0, skipped: skipped.length }
     for (const party of added) {
       const { error } = await supabase.from('haccp_documents').insert(buildW06InsertPayload(party))
@@ -6272,7 +6273,9 @@ function App() {
     })
     const payload = {
       data: nextData,
-      product_name: nextData.item_name || doc.product_name,
+      product_name: (nextData.supplier_kind || doc.data?.supplier_kind) === 'raw'
+        ? nextData.item_name
+        : (nextData.item_name || doc.product_name),
       supplier_name: nextData.supplier_name || doc.supplier_name,
       updated_at: new Date().toISOString()
     }
@@ -6310,8 +6313,7 @@ function App() {
       const kind = doc.data?.supplier_kind || 'raw'
       if (kind === 'recipient' || kind === 'aux') continue
       const company = doc.data?.company_name || doc.data?.supplier_name || ''
-      const scrubbed = w06CleanItemListForSupplier(w06ItemLine(doc), company)
-      const nextItem = w06ApplyDefaultRawItems(scrubbed, kind, company)
+      const nextItem = w06EnforceRawItemLine(doc.data?.item_name || doc.product_name || '', company, kind)
       if (nextItem === w06ItemLine(doc)) continue
       const nextData = { ...(doc.data || {}), item_name: nextItem }
       await persistW06DocData(doc, nextData)
@@ -6481,7 +6483,11 @@ function App() {
   async function saveW06Cell(doc, field, value) {
     if (!supabase || !doc?.id) return
     const nextData = { ...(doc.data || {}), [field]: value }
-    if (field === 'item_name') nextData.item_name = String(value || '').slice(0, 160)
+    if (field === 'item_name') {
+      const kind = nextData.supplier_kind || doc.data?.supplier_kind || 'raw'
+      const company = nextData.company_name || doc.data?.company_name || doc.data?.supplier_name || ''
+      nextData.item_name = w06EnforceRawItemLine(value, company, kind)
+    }
     if (field === 'company_name') {
       const addr = nextData.address || doc.data?.address || ''
       nextData.supplier_name = addr ? `${value}, ${addr}` : value
@@ -6579,7 +6585,7 @@ function App() {
     const renderItemCell = (doc) => {
       if (!doc) return ''
       if (!editable) return w06ItemLine(doc)
-      const items = w06ParseItemList(doc.data?.item_name || doc.product_name || '')
+      const items = w06ParseItemList(w06ItemLine(doc))
       const rowKey = `${doc.id}-${items.join('|')}`
       return <>
         <div className="w06-cell-stack" key={`it-${rowKey}`}>
@@ -6591,7 +6597,7 @@ function App() {
               </span>
             ))}
           </div>}
-          <input className="w06-cell-input w06-wide" key={`it-in-${rowKey}`} defaultValue={w06ItemLine(doc)} onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
+          <input className="w06-cell-input w06-wide" key={`it-in-${rowKey}`} defaultValue={w06ItemLine(doc)} readOnly title="Edytuj surowce tagami poniżej (+ owoc / ×)" onBlur={e => saveW06Cell(doc, 'item_name', e.target.value)} />
           <div className="w06-fruit-add no-print">
             <input className="w06-fruit-input w06-cell-input" placeholder="Dodaj owoc…" />
             <button type="button" className="mini secondary" onClick={e => {
