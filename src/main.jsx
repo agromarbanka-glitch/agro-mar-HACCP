@@ -10463,6 +10463,17 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
     throw lastErr
   }
 
+  function k03DocsForHaccpAutoSync(dbHaccpDocs = []) {
+    const byId = new Map()
+    for (const d of dbHaccpDocs || []) {
+      if (d.document_type === 'K03') byId.set(d.id, d)
+    }
+    for (const d of syntheticK03Docs || []) {
+      byId.set(d.id, d)
+    }
+    return Array.from(byId.values())
+  }
+
   async function syncAutoR11Documents(k03Forms = [], currentDocs = []) {
     if (!supabase) return 0
     const r11Existing = (currentDocs || []).filter(d => d.document_type === 'R11')
@@ -10594,20 +10605,31 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         }
         let data = await fetchAllHaccpDocuments(supabase)
         if (generation !== haccpLoadGenerationRef.current) return data
+        try {
+          const k03ForAuto = k03DocsForHaccpAutoSync(data)
+          const r11Added = await syncAutoR11Documents(k03ForAuto, data)
+          if (r11Added > 0) {
+            data = await fetchAllHaccpDocuments(supabase)
+            if (generation === haccpLoadGenerationRef.current) {
+              setMessage(`R11: uzupełniono ${r11Added} wpisów z dni produkcji K03 (magnesy + / uwagi P).`)
+            }
+          }
+        } catch (syncErr) {
+          console.warn('syncAutoR11Documents', syncErr)
+        }
         if (options.syncK01) {
           try {
-            const k03Forms = (data || []).filter(d => d.document_type === 'K03')
+            const k03Forms = k03DocsForHaccpAutoSync(data)
             const k07Removed = await repairK07DuplicateDocuments(data)
             const k07Added = await syncAutoK07Documents(k03Forms, data)
-            const r11Added = await syncAutoR11Documents(k03Forms, data)
-            if (k07Removed > 0 || k07Added > 0 || r11Added > 0) {
+            if (k07Removed > 0 || k07Added > 0) {
               data = await fetchAllHaccpDocuments(supabase)
               if (k07Removed > 0 && generation === haccpLoadGenerationRef.current) {
                 setMessage(`K07: usunięto ${k07Removed} duplikatów, uzupełniono ${k07Added} brakujących wpisów.`)
               }
             }
           } catch (syncErr) {
-            console.warn('syncAutoK07/R11', syncErr)
+            console.warn('syncAutoK07', syncErr)
           }
         }
         if (generation !== haccpLoadGenerationRef.current) return data

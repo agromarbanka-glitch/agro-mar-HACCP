@@ -158,7 +158,7 @@ export const R_MONTHLY_CONFIGS = {
     ],
     columnLabel: 'Miejsca kontroli magnesów',
     addColumnLabel: 'Dodaj miejsce magnesu',
-    createHint: 'Wpisy auto w dni przerobu maliny/porzeczki czarnej (K03): „+” w magnesach, „P” w uwagach. Osobna kartoteka na miesiąc. Odśwież kartoteki po K03.',
+    createHint: 'Auto z K03: każdy dzień produkcji (decyzja przerób, data z kartoteki K03) → „+” w obu kolumnach magnesów, „P” w uwagach. Odśwież kartoteki po zmianach K03.',
     signLabel: 'Podpis'
   }
 }

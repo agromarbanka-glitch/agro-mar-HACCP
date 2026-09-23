@@ -1,11 +1,13 @@
 /**
  * Raport R11 – kontrola magnesów (układ 1:1 ze wzorem Word/Excel).
- * Kartoteka miesięczna: wpisy tylko w dni przerobu pulpy (malina / porzeczka czarna z K03) – „+” w magnesach, „P” w uwagach.
+ * Kartoteka miesięczna: wpisy w dni produkcji z K03 (decyzja przerób, data z resolveK03ProductionDate) – „+” w obu kolumnach magnesów, „P” w uwagach.
  */
-import { normalizePn, shouldIncludeK03InK07, k06EvaluationDateFromK03 } from './haccpFormsEngine'
+import { normalizePn } from './haccpFormsEngine'
+import { resolveK03ProductionDate } from './k03Engine'
+import { k03IsPulpPrzerob } from './r02Engine'
 import { calendarDaysInMonth, isSundayDate, formatR13PlDate } from './r13Engine'
 
-export const R11_ENGINE_VERSION = '1.2'
+export const R11_ENGINE_VERSION = '1.3'
 export const R11_COLUMNS_STORAGE = 'agro-mar-r11-columns-v1'
 
 export const R11_HEADER = {
@@ -83,12 +85,12 @@ export function defaultR11Magnets(columns, dayOff = false, przerob = false) {
   return magnets
 }
 
-/** Dni przerobu pulpy (malina / porzeczka czarna) z kart K03. */
+/** Dni produkcji z kart K03 (tylko przerób na pulpę – ta sama reguła co wanna zasypowa R02). */
 export function collectR11PrzerobDaysFromK03(k03Forms = []) {
   const byDate = new Map()
   for (const k03 of k03Forms || []) {
-    if (!shouldIncludeK03InK07(k03)) continue
-    const date = k06EvaluationDateFromK03(k03)
+    if (!k03IsPulpPrzerob(k03)) continue
+    const date = String(resolveK03ProductionDate(k03) || '').slice(0, 10)
     if (!date || date === '0000-01-01') continue
     if (!byDate.has(date)) byDate.set(date, { k03Keys: [], products: [] })
     const entry = byDate.get(date)
@@ -187,7 +189,7 @@ export function r11RepairDocData(doc, columns = resolveR11Columns([doc])) {
   }
 }
 
-/** Payloady R11 do insertu – jeden wiersz na dzień przerobu z K03 (malina / porzeczka czarna). */
+/** Payloady R11 do insertu – jeden wiersz na dzień produkcji z K03 (przerób). */
 export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], columns = null) {
   const cols = resolveR11Columns([], columns)
   const przerobDays = collectR11PrzerobDaysFromK03(k03Forms)
@@ -202,7 +204,7 @@ export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], column
     const yearMonth = date.slice(0, 7)
     const existing = existingByDate.get(date)
     if (!existing) {
-      toInsert.push(buildR11PrzerobDayPayload(yearMonth, date, cols, meta))
+      toInsert.push(buildR11PrzerobDayPayload(yearMonth, date, cols, { ...meta, auto_source: 'k03_przerob' }))
       continue
     }
     const repaired = r11RepairDocData(existing, cols)
@@ -212,10 +214,18 @@ export function buildR11SyncPayloads(k03Forms = [], existingR11Docs = [], column
       const v = oldMagnets[c.id]
       return v === '-' || v === '' || v === undefined || v === null
     })
-    if (invalidCols || (existing.data?.auto_source === 'k03_przerob' && weakMagnets)) {
+    const src = existing.data?.auto_source || ''
+    const userEdited = src === 'manual' || src === 'k03_przerob_edited'
+    if (invalidCols || (weakMagnets && !userEdited)) {
       toRepair.push({
         id: existing.id,
-        data: { ...(existing.data || {}), ...repaired }
+        data: {
+          ...(existing.data || {}),
+          ...repaired,
+          k03_keys: Array.from(new Set([...(existing.data?.k03_keys || []), ...(meta.k03Keys || [])])),
+          przerob_products: Array.from(new Set([...(existing.data?.przerob_products || []), ...(meta.products || [])])),
+          auto_source: src || 'k03_przerob'
+        }
       })
     }
   }

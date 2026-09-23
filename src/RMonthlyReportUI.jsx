@@ -1526,7 +1526,7 @@ export function RMonthlyReportPreview({
     return <div className="monthly-paper r13-paper r11-paper">{toolbar}{headR11}
       <div className="no-print employee-signature-row" style={{ marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
         <button type="button" className="mini secondary" onClick={() => addR11ManualRow(`${period}-01`)}>+ Dodaj wiersz</button>
-        <span className="hint">Wpisy z przerobu maliny/porzeczki (K03) uzupełniają się automatycznie. Każda kolumna edytowalna.</span>
+        <span className="hint">Dni produkcji z K03 (przerób) uzupełniają się przy „Odśwież kartoteki”: „+” w obu kolumnach magnesów, „P” w uwagach. Ręcznie zmienione wiersze nie są nadpisywane.</span>
       </div>
       {allowDelete && <div className="no-print card inner-card" style={{ marginBottom: 12 }}>
         <b>Dodaj miejsce kontroli magnesu do tej kartoteki:</b>
