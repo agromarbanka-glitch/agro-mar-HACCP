@@ -6,12 +6,12 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { readAgromarExcel, classifyOperation, normalizeDocumentNo, resolveDocumentIssueDate, inferDateFromDocumentNo, documentNoHasExplicitDate, isWzMonthYearDocument } from './excelImport'
 import { resolveFifoProductGroup, resolveFifoMatchSpec, fifoLotMatchesMatchSpec, canonicalProductName, productGroupForName as k03ProductGroupForName } from './k03Engine'
 import { saveImportToSupabase, getExistingOperationsForImport, splitImportGroupsByExisting, repairWarehouseImportDuplicates, removeDuplicateK01Documents, cancelStuckInProgressImport, formatRepairWarehouseResult, formatImportNetworkError, cleanupOrphanedDeletedImports, formatCleanupResult, runFullImportLotCleanup, prepareImportExcelSave, formatPrepareImportResult, purgeImportDataClientSide, appendNewItemsFromExistingDocuments, estimateMergeNewItems, summarizeImportDuplicateGap, auditExcelImportCoverage, formatImportAuditReport, auditImportDocumentMonthConsistency, formatImportMonthWarnings, lookupWarehouseDocument, traceExcelDocumentInImport, repairMissingIncomingLots, formatMergeResult, purgeCompleteWarehouseReset, formatPurgeAllImportsResult, countIncomingItemsInGroups, hasAnyFifoAllocations, fetchImportPreviewOperations, saveWarehouseOperationDate, repairFifoPzDatesQuick, repairDatesFromExcelRows, summarizeImportRowsByProduct, summarizeOperationsByProduct, auditPzDateMismatches, fetchAllPzFifoOverviewRows, withImportRetry, isTransientNetworkError, IMPORT_SAVE_ENGINE_VERSION } from './importSaveEngine'
-import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers, labelForK03ClassFilter } from './k03Engine'
+import { loadK03Forms, mergeK03Overrides, buildK03FormsFromExcelRows, buildK03FormsFromImportPreview, isSaleOperation, K03_ENGINE_VERSION, buildK03PaperData, buildK03PrintHtml, buildK03ExcelRows, loadK03Snapshots, mergeK03Snapshots, saveK03Snapshot, applyK03DocEdits, fifoSourcePickerForProduct, defaultFifoSourceKeys, K03_CLASS_FILTER_TREE, matchesK03ClassFilter, normalizeK03ClassFilterValue, collectExtraK03Variants, normalizeFifoProductKey, formatK03PzNo, resolveK03PzNoFromRow, repairPorzeczkaProductGroups, repairK03SavedLotNumbers, labelForK03ClassFilter, labelForK03ProductGroup } from './k03Engine'
 import { extractPrintDocumentParts, buildCombinedLandscapePrintHtml, HACCP_BULK_PDF_VERSION } from './haccpBulkPdf'
 import { loadWzQueue, previewK03Workflow, generateK03Workflow, changeK03Workflow, revertK03Workflow, unfreezeK03Workflow, freezeK03Workflow, k03LineAfterUnfreeze, resyncOpenK03FromFifo, unfreezeAndResyncK03ByWzMonth, suggestFrozenK03UnfreezeAfterImport, suggestK03LotNo, applyK03WorkflowResultToQueue, K03_WZ_ENGINE_VERSION } from './k03WzEngine'
 import { computeUnassignedPzStock, STOCK_STATES_VERSION } from './stockStatesEngine'
 import { recalculateFifoIncremental, recalculateFifoFullProtected, frozenKeysFromSnapshots, frozenOperationIdsFromSnapshots, countIncompleteSales, repairAllIncomingLotRemainingFromAllocations, invalidateFifoBaseCache, prefetchFifoBaseData, compareFifoSaleOrder, lotReceiptDate } from './fifoEngine'
-import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, normalizeK03DocsForK04Pulp, buildK04PulpAutoByDate, applyK04PulpAutoToDoc, enrichK04DocsPulpFromK03, findPersistedK04DocForDay, k04OverridesForDoc, scrubLegacyK04Labels, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
+import { HACCP_FORMS_VERSION, K04_FORM_META, k04PulpaTankField, k04CustomColumnField, resolveK04CustomColumnDefs, normalizeK03DocsForK04Pulp, buildK04PulpAutoByDate, applyK04PulpAutoToDoc, enrichK04DocsPulpFromK03, findPersistedK04DocForDay, k04OverridesForDoc, scrubLegacyK04Labels, buildSyntheticK04DocsFromTrace, buildAllSyntheticK07Docs, buildManualK07BlankDoc, buildManualK04BlankDoc, buildK04MonthPayloads, buildK04InsertPayload, buildSyntheticK06DocsFromK03, buildK06InsertPayload, buildK07InsertPayload, getLiveK04Doc, getLiveK06Doc, getLiveK07Doc, buildK04MonthlyHtml, buildK06MonthlyHtml, buildK07MonthlyHtml, buildManualMonthlyHtml, buildManualExcelRows, buildK04ExcelRows, buildK06ExcelRows, buildK07ExcelRows, MANUAL_HACCP_FORMS, normalizePn as formNormalizePn, normalizeK04Data, normalizeK06Data, normalizeK07Data, k04TempForProductName, isDirectToSaleProduct, isIndustrialApple, isPeelingApple, isSyntheticK06Doc, k06RowHideKey, k06AssortmentGroupForDoc, isSyntheticK07Doc, isSyntheticK04Doc, k07RowHideKey, k07DedupeKey, k07StableKey, k07AlreadyInDb, dedupeK07Docs, dedupeK04Docs, scoreK07Doc, scoreK04Doc, k04StableKey, k04GroupHasManualMonth, k04DocSort, findK07DuplicateGroups, pickBestK07Duplicate, k07DocSort, isK07EligibleDoc, K07_KONTROLA_ETAPY } from './haccpFormsEngine'
 import { buildSyntheticK01DocsFromTrace, buildK01InsertPayload, repairK01IntakeProductNames } from './k01Engine'
 import {
   K02_ENGINE_VERSION, buildK02MonthPayloads, mergeK02DisplayDocs, k01DocsByDay, k02GroupHasManualMonth,
@@ -1105,8 +1105,8 @@ function App() {
         </label>
       </div>
 
-      {(isK03 || docsFilter === 'K01') && <div className="docs-sidebar-block docs-sidebar-class-filter">
-        <h4>{docsFilter === 'K01' ? 'Asortyment surowca (K01)' : 'Klasa / asortyment (K03)'}</h4>
+      {(isK03 || docsFilter === 'K01' || docsFilter === 'K06') && <div className="docs-sidebar-block docs-sidebar-class-filter">
+        <h4>{docsFilter === 'K01' ? 'Asortyment surowca (K01)' : docsFilter === 'K06' ? 'Asortyment produktu gotowego (K06)' : 'Klasa / asortyment (K03)'}</h4>
         {(k03AssortmentFilter !== 'all' || docsWorkflowFilter !== 'all' || docsDateFrom || docsDateTo) && (
           <p className="hint"><button type="button" className="linkish mini" onClick={resetK03SidebarFilters}>Wyczyść filtry {docsFilter}</button></p>
         )}
@@ -3711,8 +3711,10 @@ function App() {
     return sourceDocs
       .filter(d => d.document_type === docsFilter)
       .filter(d => {
-        if (docsFilter !== 'K03' && docsFilter !== 'K01') return true
-        const group = d.product_group || d.data?.product_group || productGroupForName(d.product_name || '')
+        if (docsFilter !== 'K03' && docsFilter !== 'K01' && docsFilter !== 'K06') return true
+        const group = docsFilter === 'K06'
+          ? k06AssortmentGroupForDoc(d)
+          : (d.product_group || d.data?.product_group || productGroupForName(d.product_name || ''))
         return matchesK03ClassFilter(d.product_name, group, k03AssortmentFilter)
       })
       .filter(d => matchesDocsDateRange(d.document_date))
@@ -3783,8 +3785,19 @@ function App() {
       }
       return counts
     }
+    if (docsFilter === 'K06') {
+      const items = mergedK06Docs.filter(d => matchesDocsDateRange(d.document_date))
+      const counts = new Map([['all', items.length]])
+      for (const d of items) {
+        const group = k06AssortmentGroupForDoc(d)
+        const variant = normalizeFifoProductKey(d.product_name)
+        counts.set(`group:${group}`, (counts.get(`group:${group}`) || 0) + 1)
+        counts.set(`variant:${variant}`, (counts.get(`variant:${variant}`) || 0) + 1)
+      }
+      return counts
+    }
     return new Map([['all', 0]])
-  }, [docsFilter, k03ClassCounts, haccpDocs, docsDateFrom, docsDateTo])
+  }, [docsFilter, k03ClassCounts, haccpDocs, mergedK06Docs, docsDateFrom, docsDateTo])
 
   const k03YearOptions = useMemo(() => {
     const years = new Set()
@@ -3810,18 +3823,38 @@ function App() {
       const product = doc.product_name || 'Bez produktu'
       const chamber = doc.document_type === 'K02' || doc.document_type === 'K04' ? (doc.chamber_code || 'bez komory') : ''
       const productGroup = doc.document_type === 'K04' ? (doc.data?.product_group || doc.product_name || 'produkt') : (doc.product_name || 'Bez produktu')
+      const k06Assortment = doc.document_type === 'K06' ? k06AssortmentGroupForDoc(doc) : ''
       const key = doc.document_type === 'K01'
         ? `${doc.document_type}|${period}|${product}`
         : doc.document_type === 'K03'
           ? `${doc.document_type}|${doc.id}|${doc.document_no || 'brak-wz'}`
-          : ['K05', 'K06', 'K04.1', 'K07'].includes(doc.document_type)
+          : doc.document_type === 'K06'
+            ? `${doc.document_type}|${period}|${k06Assortment}`
+          : ['K05', 'K04.1', 'K07'].includes(doc.document_type)
             ? `${doc.document_type}|${period}`
             : doc.document_type === 'K02'
               ? `${doc.document_type}|${period}`
               : doc.document_type === 'K04'
                 ? `${doc.document_type}|${period}`
                 : `${doc.document_type}|${period}|${product}|${chamber}`
-      if (!map.has(key)) map.set(key, { key, type: doc.document_type, period, product: doc.document_type === 'K04' ? productGroup : (doc.document_type === 'K06' ? 'Produkt gotowy' : doc.document_type === 'K07' ? 'Kontrola sita CCP1' : product), chamber, docs: [] })
+      if (!map.has(key)) {
+        const k06Label = doc.document_type === 'K06' ? labelForK03ProductGroup(k06Assortment) : ''
+        map.set(key, {
+          key,
+          type: doc.document_type,
+          period,
+          product: doc.document_type === 'K04'
+            ? productGroup
+            : doc.document_type === 'K06'
+              ? k06Label
+              : doc.document_type === 'K07'
+                ? 'Kontrola sita CCP1'
+                : product,
+          assortmentGroup: doc.document_type === 'K06' ? k06Assortment : '',
+          chamber,
+          docs: []
+        })
+      }
       map.get(key).docs.push(doc)
     }
     return Array.from(map.values()).map(g => {
@@ -3834,7 +3867,7 @@ function App() {
         product: g.type === 'K04'
           ? `Magazyn CP3 – ${g.period || ''}`
           : g.type === 'K06'
-            ? (products.length <= 1 ? (products[0] || 'Produkt gotowy') : `${products.length} asortymentów`)
+            ? (g.product || labelForK03ProductGroup(g.assortmentGroup))
           : g.type === 'K07'
             ? `Kontrola sita CCP1 – ${g.period || ''}`
           : g.type === 'K01'
@@ -3842,14 +3875,20 @@ function App() {
             : g.product,
         docs: g.type === 'K04' ? dedupeK04Docs(docs) : g.type === 'K07' ? dedupeK07Docs(docs) : docs
       }
-    })
+    }).sort((a, b) =>
+      String(a.period || '').localeCompare(String(b.period || '')) ||
+      String(a.type || '').localeCompare(String(b.type || '')) ||
+      (a.type === 'K06' || b.type === 'K06'
+        ? String(a.product || '').localeCompare(String(b.product || ''), 'pl')
+        : String(a.product || '').localeCompare(String(b.product || '')))
+    )
   }, [haccpListDocs, mergedK07Docs, docsFilter, docsDateFrom, docsDateTo])
 
   const docsFilterStats = useMemo(() => {
     const filtersActive = Boolean(
       docsDateFrom || docsDateTo || docsWorkflowFilter !== 'all' ||
       haccpSearch.trim() || haccpStatusFilter !== 'all' ||
-      ((docsFilter === 'K03' || docsFilter === 'K01') && k03AssortmentFilter !== 'all')
+      ((docsFilter === 'K03' || docsFilter === 'K01' || docsFilter === 'K06') && k03AssortmentFilter !== 'all')
     )
     return {
       filteredDocs: haccpDocsForFilter.length,
@@ -3935,7 +3974,11 @@ function App() {
     if (doc.document_type === 'K03') {
       return haccpMonthlyGroups.find(g => g.type === 'K03' && g.docs.some(d => d.id === doc.id)) || null
     }
-    if (['K05', 'K06', 'K04.1', 'K07'].includes(doc.document_type)) {
+    if (doc.document_type === 'K06') {
+      const assortment = k06AssortmentGroupForDoc(doc)
+      return haccpMonthlyGroups.find(g => g.type === 'K06' && g.period === period && g.assortmentGroup === assortment) || null
+    }
+    if (['K05', 'K04.1', 'K07'].includes(doc.document_type)) {
       return haccpMonthlyGroups.find(g => g.type === doc.document_type && g.period === period) || null
     }
     const product = doc.product_name || 'Bez produktu'
@@ -5027,7 +5070,7 @@ function App() {
         <table className="k02-head"><tbody>
           <tr>
             <td className="k02-company" rowSpan="2"><b>AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br/>24-335 ŁAZISKA,<br/>KOLONIA ŁAZISKA 30<br/>NIP: 7171839598</b></td>
-            <td className="k02-title"><b>Karta K06 - Karta oceny jakości gotowego produktu</b></td>
+            <td className="k02-title"><b>Karta K06 - Karta oceny jakości gotowego produktu</b>{group.product ? <><br/><span className="k06-assortment-head">Asortyment: <b>{group.product}</b></span></> : null}</td>
             <td className="k02-meta"><b>Rok:</b> {group.period.slice(0,4)}<br/><b>Miesiąc:</b> {group.period.slice(5,7)}<br/><b>Strona:</b> 1 z 1</td>
           </tr>
           <tr><td></td><td className="k02-version">Wersja I/2024</td></tr>
@@ -5097,7 +5140,14 @@ function App() {
                   chamber_code: 'CP3',
                   qty: 0,
                   status: 'P',
-                  data: normalizeK06Data({ auto_source: 'manual', barwa: 'P', zapach: 'P', twardosc_jablko: 'P', brak_plesni: 'P' })
+                  data: normalizeK06Data({
+                    auto_source: 'manual',
+                    barwa: 'P',
+                    zapach: 'P',
+                    twardosc_jablko: 'P',
+                    brak_plesni: 'P',
+                    product_group: group.assortmentGroup || productGroupForName(draft.product_name)
+                  })
                 }
                 const saved = await saveK06DocumentField(rowDoc, { product_name: rowDoc.product_name, lot_no: rowDoc.lot_no, document_date: draft.document_date })
                 if (saved) {
@@ -5121,7 +5171,7 @@ function App() {
             }
           })}
         </tbody></table>
-        <p className="hint no-print">K06: najedź między wiersze – pojawi się „+” do wstawienia pustego wiersza. Każdy wiersz można usunąć.</p>
+        <p className="hint no-print">K06: osobna kartoteka na asortyment (Malina, Wiśnia, …). Wiersze z K03 z decyzją <b>przerób</b> lub <b>bez przerobu</b>. Najedź między wiersze – „+” wstawia pusty wiersz.</p>
       </div>
     }
 
@@ -7901,7 +7951,7 @@ function App() {
   }, [activeTab, docsFilter])
 
   useEffect(() => {
-    if (docsFilter !== 'K03') return
+    if (docsFilter !== 'K03' && docsFilter !== 'K06') return
     const fixed = normalizeK03ClassFilterValue(k03AssortmentFilter)
     if (fixed !== k03AssortmentFilter) setK03AssortmentFilter(fixed)
   }, [docsFilter, k03AssortmentFilter])
@@ -11674,9 +11724,8 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
         {!['K01.1', 'K04.1', 'K05', 'K02', 'K04'].includes(docsFilter) && <>
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K03' && <p className="hint">Brak kartotek K03 – wybierz WZ powyżej.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K04' && <p className="hint">Brak K04 – utwórz kartotekę miesiąca powyżej lub uzupełnij K03 (magazyn CP3).</p>}
-          {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – utwórz K03 dla WZ (przerób / bez przerobu), potem odśwież kartoteki.</p>}
+          {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – w K03 ustaw decyzję <b>przerób</b> lub <b>bez przerobu</b> dla WZ (produkt gotowy), potem odśwież kartoteki. Każdy asortyment ma osobną kartotekę miesięczną.</p>}
           {haccpMonthlyGroups.length === 0 && docsFilter === 'K07' && <p className="hint">Brak K07 – wpisy powstają z K03 (decyzja: przerób) dla maliny i porzeczki czarnej. Odśwież kartoteki lub uzupełnij w kartotece miesięcznej.</p>}
-          {haccpMonthlyGroups.length === 0 && docsFilter === 'K06' && <p className="hint">Brak K06 – auto po produkcji lub ręczny wpis poniżej.</p>}
           {haccpMonthlyGroups.length === 0 && !['K03','K04','K06','K07'].includes(docsFilter) && <p className="hint">Brak kartotek dla filtrów.</p>}
 
           {haccpMonthlyGroups.length > 0 && <div className="table-wrap docs-table-wrap"><table className="docs-table">

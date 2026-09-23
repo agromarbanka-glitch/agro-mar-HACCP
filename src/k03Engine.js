@@ -818,6 +818,15 @@ function k03VariantMatchesFilter(variant, filterVariant) {
   )
 }
 
+/** Etykieta grupy asortymentu (np. malina → Malina) — kartoteki K06, nagłówki. */
+export function labelForK03ProductGroup(groupId = '') {
+  const id = String(groupId || '').trim()
+  if (!id || id === 'inna') return id === 'inna' ? 'Inne' : 'Bez asortymentu'
+  const fam = K03_CLASS_FILTER_TREE.find(f => f.id === id)
+  if (fam) return fam.label
+  return id.replace(/_/g, ' ')
+}
+
 /** Etykieta filtra asortymentu (panel K01/K03, PDF zbiorczy). */
 export function labelForK03ClassFilter(filter = 'all', extraVariants = []) {
   const normalized = normalizeK03ClassFilterValue(filter)

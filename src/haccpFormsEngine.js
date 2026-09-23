@@ -1,7 +1,7 @@
 /**
  * K04, K04.1, K05, K06, K07 – silnik kartotek HACCP (układ papierowy + wpisy z magazynu/FIFO).
  */
-export const HACCP_FORMS_VERSION = '2.7'
+export const HACCP_FORMS_VERSION = '2.8'
 
 import { calendarDaysInMonth } from './r13Engine'
 import { resolveK03ProductionDate } from './k03Engine'
@@ -155,8 +155,16 @@ export function normalizeK06Data(data = {}) {
     tryb_label: data.tryb_label || '',
     wz_no: data.wz_no || '',
     wz_date: data.wz_date || '',
-    przerob_date: data.przerob_date || ''
+    przerob_date: data.przerob_date || '',
+    product_group: data.product_group || ''
   }
+}
+
+/** Grupa asortymentu K06 (Malina, Wiśnia, …) — osobna kartoteka miesięczna na grupę. */
+export function k06AssortmentGroupForDoc(doc) {
+  const fromData = String(doc?.data?.product_group || doc?.product_group || '').trim()
+  if (fromData) return fromData
+  return productGroupForName(doc?.product_name || '') || 'inna'
 }
 
 /** Nazwa produktu gotowego z K03 (linia WZ), nie surowca z PZ. */
@@ -1302,6 +1310,7 @@ export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], over
     const wf = k03.data?.k03_workflow || {}
     const ov = overrides[id] || {}
     const productName = finishedProductNameFromK03(k03)
+    const productGroup = k03.product_group || k03.data?.product_group || productGroupForName(productName)
     const evalDate = k06EvaluationDateFromK03(k03)
     const lotNo = k06LotNoFromK03(k03, ov)
     const mode = wf.mode || 'bez_przerobu'
@@ -1333,7 +1342,8 @@ export function buildSyntheticK06DocsFromK03(k03Forms = [], haccpDocs = [], over
         wz_date: String(k03.data?.wz_date || k03.document_date || '').slice(0, 10),
         przerob_date: mode === 'przerob'
           ? String(wf.przerob_date || wf.fifo_cutoff_date || evalDate).slice(0, 10)
-          : ''
+          : '',
+        product_group: productGroup
       }),
       signed_by_operator: '',
       document_version: 'I/2024',
@@ -1542,12 +1552,15 @@ export function buildK06MonthlyHtml(group, escapeHtml) {
   const docs = group.docs || []
   const year = (group.period || docs[0]?.document_date || '').slice(0, 4)
   const month = (group.period || docs[0]?.document_date || '').slice(5, 7)
+  const assortmentLine = group.product
+    ? `<br><b>Asortyment:</b> ${escapeHtml(group.product)}`
+    : ''
   const rows = docs.map(doc => {
     const d = normalizeK06Data(doc.data || {})
     return `<tr><td>${escapeHtml(doc.document_date || '')}</td><td class="left">${escapeHtml(doc.product_name || '')}</td><td>${escapeHtml(doc.lot_no || '')}</td><td>${normalizePn(d.barwa)}</td><td>${normalizePn(d.zapach)}</td><td>${normalizePn(d.twardosc_jablko)}</td><td>${normalizePn(d.brak_plesni)}</td><td>${escapeHtml(doc.signed_by_operator || d.podpis || '')}</td></tr>`
   }).join('')
   const blanks = Array.from({ length: Math.max(0, 11 - docs.length) }, () => `<tr class="blank-row"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join('')
-  return `<!doctype html><html><head><meta charset="utf-8"><title>K06 ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.1}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.3}.meta{width:25%;text-align:left;vertical-align:top}.left{text-align:left}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K06 - Karta oceny jakości gotowego produktu</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1 z 1</td></tr><tr><td></td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br>(P/N)*</th><th>Zapach<br>(P/N)*</th><th>Twardość (jabłko)<br>(P/N)*</th><th>Brak oznak pleśni<br>(P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
+  return `<!doctype html><html><head><meta charset="utf-8"><title>K06 ${escapeHtml(group.product || '')} ${escapeHtml(group.period)}</title><style>@page{size:A4 landscape;margin:8mm}body{font-family:"Times New Roman",serif;color:#111;margin:0}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{border:1px solid #111;padding:4px;text-align:center;vertical-align:middle;font-size:10.5pt;line-height:1.1}.company{width:31%;font-weight:bold;line-height:1.12}.title{width:44%;font-weight:bold;line-height:1.3}.meta{width:25%;text-align:left;vertical-align:top}.left{text-align:left}.blank-row td{height:21px}@media print{button{display:none}}</style></head><body><table><tbody><tr><td class="company" rowspan="2">AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.<br>24-335 ŁAZISKA,<br>KOLONIA ŁAZISKA 30<br>NIP: 7171839598</td><td class="title">Karta K06 - Karta oceny jakości gotowego produktu${assortmentLine}</td><td class="meta"><b>Rok:</b> ${escapeHtml(year)}<br><b>Miesiąc:</b> ${escapeHtml(month)}<br><b>Strona:</b> 1 z 1</td></tr><tr><td></td><td class="meta" style="text-align:center;vertical-align:middle">Wersja I/2024</td></tr></tbody></table><table><thead><tr><th>Data</th><th>Nazwa towaru</th><th>Numer partii</th><th>Barwa<br>(P/N)*</th><th>Zapach<br>(P/N)*</th><th>Twardość (jabłko)<br>(P/N)*</th><th>Brak oznak pleśni<br>(P/N)*</th><th>Podpis kontrolującego</th></tr></thead><tbody>${rows}${blanks}</tbody></table><script>window.onload=function(){setTimeout(function(){window.focus();window.print()},700)}</script></body></html>`
 }
 
 export function buildK07MonthlyHtml(group, escapeHtml) {
@@ -1710,6 +1723,7 @@ export function buildK06ExcelRows(group) {
   const rows = []
   rows.push(['AGRO-MAR MARIUSZ BAŃKA SP. Z O.O.'])
   rows.push(['Karta K06 - ocena jakości gotowego produktu', '', '', '', '', '', '', `Okres: ${group.period || ''}`])
+  if (group.product) rows.push([`Asortyment: ${group.product}`])
   rows.push(['Data', 'Nazwa towaru', 'Numer partii', 'Barwa (P/N)', 'Zapach (P/N)', 'Twardość (jabłko) (P/N)', 'Brak oznak pleśni (P/N)', 'Podpis kontrolującego'])
   for (const doc of docs) {
     const d = normalizeK06Data(doc.data || {})
