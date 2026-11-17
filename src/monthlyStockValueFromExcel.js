@@ -7,7 +7,6 @@
  * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
  * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
- * v2.11: deduplikacja raportu — ta sama operacja z wielu plików (np. październik + lipiec) liczy się raz.
  */
 import {
   classifyOperation,
@@ -21,7 +20,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.11'
+export const EXCEL_REPORT_VERSION = '2.10'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -97,9 +96,7 @@ const STOCK_VALUE_LABEL_BY_FIFO = {
   'porzeczka kolorowa': 'Porzeczka kolorowa',
   truskawka: 'Truskawka',
   'wisnia klasa i': 'Wiśnia I',
-  'wisnia pw': 'Wiśnia Pw',
-  'jablko przemyslowe': 'Jabłko przemysłowe',
-  'jablko obierka': 'Jabłko na obierkę'
+  'wisnia pw': 'Wiśnia Pw'
 }
 
 function stockValueFifoKey(productName) {
@@ -146,53 +143,6 @@ function prepareReportRows(excelRows) {
   const rows = excelRows || []
   if (rows.length && rows.every(r => r._lineId)) return rows
   return forwardFillExcelRows(rows)
-}
-
-function warehouseRowOperation(row) {
-  if (!row?.productName || !Number(row.qty)) return null
-  if (isMmDocument(row.documentType, row.documentNo)) return null
-  const documentNo = normalizeDocumentNo(row.documentNo)
-  if (!documentNo) return null
-  const operation = classifyOperation(row.documentType, documentNo)
-  if (operation === 'pominiete_mm') return null
-  return { operation, documentNo, qty: roundKg(Math.abs(Number(row.qty))) }
-}
-
-/**
- * Klucz do przeliczenia raportu — jak Comarch: dokument + produkt raportu + ilość.
- * Nie używa nazwy pliku (w przeciwieństwie do dedup_key w Supabase przy imporcie).
- */
-export function excelRowBusinessDedupKey(row) {
-  const op = warehouseRowOperation(row)
-  if (!op) return null
-  const productKey = stockValueProductKey(row.productName)
-  return `${op.operation}|${op.documentNo}|${productKey}|${op.qty}`
-}
-
-/** Te same PZ/WZ wgrane w kilku plikach (październik zbiorczo + lipiec/czerwiec) — jedna pozycja w raporcie. */
-export function collapseDuplicateWarehouseRowsForReport(rows) {
-  const seen = new Map()
-  const out = []
-  let removed = 0
-  for (const row of rows || []) {
-    const key = excelRowBusinessDedupKey(row)
-    if (!key) continue
-    if (seen.has(key)) {
-      removed += 1
-      const keep = seen.get(key)
-      const hasPrice = Number(row.unitNetPrice) > 0
-      const keepHasPrice = Number(keep.unitNetPrice) > 0
-      if (hasPrice && !keepHasPrice) {
-        const idx = out.indexOf(keep)
-        if (idx >= 0) out[idx] = row
-        seen.set(key, row)
-      }
-      continue
-    }
-    seen.set(key, row)
-    out.push(row)
-  }
-  return { rows: out, removed }
 }
 
 function inPeriod(date, periodStart, periodEnd) {
@@ -291,8 +241,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
   const filled = prepareReportRows(excelRows || [])
-  const { rows: collapsed, removed: duplicateRowsRemoved } = collapseDuplicateWarehouseRowsForReport(filled)
-  const lines = normalizeExcelRows(collapsed)
+  const lines = normalizeExcelRows(filled)
 
   if (!lines.length) {
     return {
@@ -465,9 +414,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzClampedToDocMonth > 0) {
     message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
   }
-  if (duplicateRowsRemoved > 0) {
-    message += ` Pominięto ${duplicateRowsRemoved} zduplikowanych linii (ta sama PZ/WZ z różnych plików importu).`
-  }
 
   const reportPayload = {
     source: 'excel',
@@ -485,8 +431,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     diagnostics: {
       inputRows: (excelRows || []).length,
       filledRows: filled.length,
-      collapsedRows: collapsed.length,
-      duplicateRowsRemoved,
       excelLines: lines.length,
       pzLines,
       wzLines,
@@ -494,7 +438,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzAfterCutoff,
       wzClampedToDocMonth,
       openingCutoff,
-      engine: 'cumulative_pz_minus_wz_v211'
+      engine: 'cumulative_pz_minus_wz_v28'
     },
     message
   }
