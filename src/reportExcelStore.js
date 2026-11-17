@@ -95,6 +95,29 @@ export function summarizeBusinessDuplicateLines(rows) {
   }
 }
 
+/** Który plik importu wnosi zbędne powtórzenia (zostawiamy pierwszy wiersz wg id w bazie). */
+export function summarizeDuplicateLinesBySourceFile(rows) {
+  const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
+  const seen = new Set()
+  const redundantByFile = new Map()
+  let duplicateLines = 0
+  for (const row of sorted) {
+    const key = excelRowDedupKey(row)
+    if (!key) continue
+    if (!seen.has(key)) {
+      seen.add(key)
+      continue
+    }
+    duplicateLines++
+    const src = String(row._batchSourceFile || '').trim() || '(nieznany plik)'
+    redundantByFile.set(src, (redundantByFile.get(src) || 0) + 1)
+  }
+  return {
+    duplicateLines,
+    redundantByFile: Object.fromEntries(redundantByFile)
+  }
+}
+
 /** Klucz ścisły (z datą) — do wykrywania duplikatów w pamięci. */
 export function excelRowDedupKeyStrict(row) {
   const op = rowOperation(row)

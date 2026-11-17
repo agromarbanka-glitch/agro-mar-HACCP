@@ -16,6 +16,7 @@ import {
   computeWarehouseValueMonthStats,
   auditWarehouseValueImport
 } from './monthlyStockValueFromExcel'
+import { summarizeDuplicateLinesBySourceFile } from './reportExcelStore'
 import {
   fetchAllWarehouseValueLines,
   fetchWarehouseValueMeta,
@@ -139,6 +140,11 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
 
   const fileNames = useMemo(() => batches.map(b => b.file_name).filter(Boolean), [batches])
 
+  const duplicateByFile = useMemo(
+    () => summarizeDuplicateLinesBySourceFile(excelRows),
+    [excelRows]
+  )
+
   const recalculate = useCallback((rows, names, date) => {
     const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
     setReport(result)
@@ -180,12 +186,18 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       if (!preserveAudit) setImportAudit(null)
       const probe = computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current)
       const skipped = rows.length - (probe.diagnostics?.excelLines || 0)
+      const bizDup = probe.diagnostics?.businessDuplicates
+      const dupNote =
+        bizDup?.duplicateLines > 0
+          ? `W bazie jest ${bizDup.duplicateLines.toLocaleString('pl-PL')} powtórnych PZ/WZ z innych plików (Σ PZ−Σ WZ zawyżone). Usuń partie z czerwoną liczbą „powtórzeń” poniżej — zwykle starszy wrzesień albo zbiorczy październik.`
+          : ''
       setIntegrityNote(
         rows.length !== meta.lineCount
           ? `Uwaga: w bazie ${meta.lineCount} wierszy, wczytano ${rows.length} — odśwież ponownie.`
-          : skipped > 0
-            ? `${skipped} wierszy w bazie pominięto przy przeliczeniu (MM, brak daty lub ilości).`
-            : ''
+          : dupNote
+            || (skipped > 0
+              ? `${skipped} wierszy w bazie pominięto przy przeliczeniu (MM, brak daty lub ilości).`
+              : '')
       )
       if (!silent && rows.length) {
         setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${meta.batchCount} importów).`)
@@ -509,14 +521,21 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         )}
         {batches.length > 0 && (
           <ul className="warehouse-batch-list hint">
-            {batches.map(b => (
+            {batches.map(b => {
+              const redundant = duplicateByFile.redundantByFile?.[b.file_name] || 0
+              return (
               <li key={b.id}>
                 {summarizeBatchRow(b)}
+                {redundant > 0 && (
+                  <span className="warning-text" title="Te linie są już w starszym imporcie — usuń tę partię lub cały plik z listy">
+                    {' '}· <b>{redundant.toLocaleString('pl-PL')} powtórzeń</b>
+                  </span>
+                )}
                 <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
                   <Trash2 size={12} /> Usuń
                 </button>
               </li>
-            ))}
+            )})}
           </ul>
         )}
         <div className="actions">
