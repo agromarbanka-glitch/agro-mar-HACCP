@@ -111,6 +111,10 @@ PROBLEMY?
 „Invalid login credentials”
   → Złe hasło lub użytkownik nie istnieje w Authentication → Users.
 
+„Database error querying schema”
+  → W SQL Editor uruchom: LOGOWANIE-NAPRAW-AUTH-NULL-TOKENY.sql
+  → Nowe konta dodawaj w Authentication → Users (Auto Confirm), nie INSERT do auth.users.
+
 Biały ekran / brak połączenia
   → Sprawdź VITE_SUPABASE_URL i VITE_SUPABASE_ANON_KEY na Vercel.
 

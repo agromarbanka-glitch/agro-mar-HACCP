@@ -72,7 +72,24 @@ export function LoginScreen({ onSuccess, supabaseConfigured }) {
           <p className="hint danger-text">{connCheck.message}</p>
         )}
         {error && <p className="hint danger-text">{error}</p>}
-        <button type="submit" disabled={loading || connCheck.state === 'fail'}><LogIn size={16} /> {loading ? 'Logowanie…' : 'Zaloguj się'}</button>
+        <button type="submit" disabled={loading}><LogIn size={16} /> {loading ? 'Logowanie…' : 'Zaloguj się'}</button>
+        {connCheck.state === 'fail' && (
+          <button
+            type="button"
+            className="secondary mini"
+            disabled={loading}
+            onClick={() => {
+              setConnCheck({ state: 'pending', message: '' })
+              probeSupabaseReachable().then(result => {
+                setConnCheck(result.ok
+                  ? { state: 'ok', message: `Połączenie z Supabase OK · projekt ${result.project || projectHint}` }
+                  : { state: 'fail', message: result.message })
+              })
+            }}
+          >
+            Sprawdź połączenie ponownie
+          </button>
+        )}
         <p className="hint login-foot">Dostęp tylko dla kont utworzonych przez administratora. Po pierwszym wdrożeniu uruchom migrację SQL v36 i dodaj konto admina w Supabase.</p>
       </form>
     </div>

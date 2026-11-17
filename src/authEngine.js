@@ -15,6 +15,9 @@ export function formatAuthError(err) {
   const lower = msg.toLowerCase()
 
   if (!msg && !code) return 'Błąd logowania — spróbuj ponownie.'
+  if (/database error querying schema|querying schema/i.test(lower)) {
+    return 'Błąd bazy Auth (Database error querying schema). W Supabase → SQL Editor uruchom plik supabase/LOGOWANIE-NAPRAW-AUTH-NULL-TOKENY.sql. Potem zaloguj się ponownie. Nowe konta dodawaj w Authentication → Users, nie przez SQL w auth.users.'
+  }
   if (/invalid login credentials|invalid_credentials/i.test(msg)) {
     return 'Nieprawidłowy email lub hasło.'
   }
@@ -24,8 +27,8 @@ export function formatAuthError(err) {
   if (/too many requests|rate limit/i.test(msg)) {
     return 'Zbyt wiele prób logowania — odczekaj chwilę i spróbuj ponownie.'
   }
-  if (/fetch failed|network|failed to fetch|networkerror/i.test(lower)) {
-    return 'Brak połączenia z Supabase. Sprawdź internet, adres projektu w .env (VITE_SUPABASE_URL) i czy strona nie blokuje API.'
+  if (/fetch failed|network|failed to fetch|networkerror|attempting to fetch resource/i.test(lower)) {
+    return 'Brak połączenia z Supabase (błąd sieci). Sprawdź internet, czy projekt w panelu Supabase nie jest wstrzymany (Paused → Restore), oraz zmienne VITE_SUPABASE_URL i VITE_SUPABASE_ANON_KEY (Vercel → Redeploy albo lokalny plik .env). Wyłącz na chwilę adblock/VPN.'
   }
   if (/invalid api key|jwt|anon key/i.test(lower)) {
     return 'Błędny klucz Supabase (VITE_SUPABASE_ANON_KEY). Skopiuj anon key z Supabase → Project Settings → API.'

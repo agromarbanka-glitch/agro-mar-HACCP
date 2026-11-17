@@ -1,0 +1,7 @@
+# Skopiuj jako .env w katalogu projektu (lokalnie: npm run dev).
+# Wartości: Supabase → Project Settings → API (Project URL + anon public key).
+VITE_SUPABASE_URL=https://TWOJ-PROJEKT.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# Tylko lokalny dev bez logowania (NIE ustawiaj na Vercel):
+# VITE_SKIP_AUTH=true

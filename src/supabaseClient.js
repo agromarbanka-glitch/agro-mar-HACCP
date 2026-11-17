@@ -42,11 +42,15 @@ export async function probeSupabaseReachable(timeoutMs = 8000) {
     }
   } catch (err) {
     const aborted = err?.name === 'AbortError'
+    const raw = String(err?.message || err)
+    const net = /fetch|network|networkerror|attempting to fetch resource/i.test(raw)
     return {
       ok: false,
       message: aborted
         ? 'Timeout połączenia z Supabase — projekt może być wstrzymany (Paused), zły URL albo blokada sieci (VPN, firewall).'
-        : String(err?.message || err)
+        : net
+          ? 'Brak połączenia z Supabase (błąd sieci). Sprawdź internet, czy projekt nie jest Paused w panelu Supabase oraz URL/klucz w Vercel (.env) i zrób Redeploy.'
+          : raw
     }
   } finally {
     clearTimeout(timer)
