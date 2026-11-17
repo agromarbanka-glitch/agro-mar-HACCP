@@ -145,6 +145,110 @@ function prepareReportRows(excelRows) {
   return forwardFillExcelRows(rows)
 }
 
+function warehouseRowOperation(row) {
+  if (!row?.productName || !Number(row.qty)) return null
+  if (isMmDocument(row.documentType, row.documentNo)) return null
+  const documentNo = normalizeDocumentNo(row.documentNo)
+  if (!documentNo) return null
+  const operation = classifyOperation(row.documentType, documentNo)
+  if (operation === 'pominiete_mm') return null
+  return { operation, documentNo, qty: roundKg(Math.abs(Number(row.qty))) }
+}
+
+/** Klucz jak Comarch: operacja + nr + produkt raportu + ilość (bez nazwy pliku). */
+export function excelRowBusinessDedupKey(row) {
+  const op = warehouseRowOperation(row)
+  if (!op) return null
+  return `${op.operation}|${op.documentNo}|${stockValueProductKey(row.productName)}|${op.qty}`
+}
+
+/**
+ * Ta sama PZ/WZ z kilku importów — w raporcie zostaw pierwszy wg id w bazie.
+ * Opcjonalne (checkbox w UI); domyślnie Σ wszystkich wierszy jak v2.10.
+ */
+export function collapseDuplicateWarehouseRowsForReport(rows) {
+  const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
+  const seen = new Map()
+  const out = []
+  let removed = 0
+  for (const row of sorted) {
+    const key = excelRowBusinessDedupKey(row)
+    if (!key) continue
+    if (seen.has(key)) {
+      removed += 1
+      const keep = seen.get(key)
+      const hasPrice = Number(row.unitNetPrice) > 0
+      const keepHasPrice = Number(keep?.unitNetPrice) > 0
+      if (hasPrice && !keepHasPrice) {
+        const idx = out.indexOf(keep)
+        if (idx >= 0) out[idx] = row
+        seen.set(key, row)
+      }
+      continue
+    }
+    seen.set(key, row)
+    out.push(row)
+  }
+  return { rows: out, removed }
+}
+
+/** Jak bardzo powtórzenia między plikami zmieniają saldo per produkt (Δ ≈ +PZ − WZ z nadmiarowych kopii). */
+export function summarizeBusinessDuplicateImpactByProduct(rows) {
+  const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
+  const seen = new Set()
+  const impact = new Map()
+  for (const row of sorted) {
+    const op = warehouseRowOperation(row)
+    const key = excelRowBusinessDedupKey(row)
+    if (!op || !key) continue
+    const label = stockValueReportProductName(row.productName)
+    if (!seen.has(key)) {
+      seen.add(key)
+      continue
+    }
+    const pKey = stockValueProductKey(row.productName)
+    if (!impact.has(pKey)) impact.set(pKey, { product_name: label, extraPz: 0, extraWz: 0 })
+    const bucket = impact.get(pKey)
+    if (op.operation === 'przyjecie') bucket.extraPz += op.qty
+    else if (op.operation === 'sprzedaz') bucket.extraWz += op.qty
+  }
+  return [...impact.values()]
+    .map(p => ({
+      ...p,
+      extraPz: roundKg(p.extraPz),
+      extraWz: roundKg(p.extraWz),
+      netBalanceBias: roundKg(p.extraPz - p.extraWz)
+    }))
+    .filter(p => p.extraPz > 0.001 || p.extraWz > 0.001)
+    .sort((a, b) => Math.abs(b.extraWz - b.extraPz) - Math.abs(a.extraWz - a.extraPz))
+}
+
+export function simulateReportWithoutBatch(excelRows, asOfDate, batchId, options = {}) {
+  const base = computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, options)
+  const filtered = (excelRows || []).filter(r => r._batchId !== batchId)
+  const without = computeMonthlyStockValueReportFromExcel(filtered, asOfDate, options)
+  const watchNames = ['Jabłko przemysłowe', 'Malina świeża PW', 'Jabłko na obierkę', 'Malina świeża 1']
+  const deltas = watchNames.map(name => {
+    const a = base.rows.find(r => r.product_name === name)
+    const b = without.rows.find(r => r.product_name === name)
+    return {
+      product_name: name,
+      remaining_now: roundKg(a?.remaining_kg || 0),
+      remaining_without: roundKg(b?.remaining_kg || 0),
+      delta: roundKg((b?.remaining_kg || 0) - (a?.remaining_kg || 0))
+    }
+  })
+  return {
+    batchId,
+    rowsLeft: filtered.length,
+    removedRows: (excelRows?.length || 0) - filtered.length,
+    totalsNow: base.totals,
+    totalsWithout: without.totals,
+    productDeltas: deltas,
+    businessDuplicates: without.diagnostics?.businessDuplicates
+  }
+}
+
 function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
@@ -224,7 +328,7 @@ function ensureRow(map, key, label) {
  * @param {Array} excelRows – wynik readAgromarExcel().rows lub odczyt z Supabase
  * @param {string} asOfDate – RRRR-MM-DD (lub RRRR-MM → ostatni dzień miesiąca)
  */
-export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { fileNames = [] } = {}) {
+export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { fileNames = [], dedupeCrossFile = false } = {}) {
   const bounds = parseAsOfDate(asOfDate)
   if (!bounds) {
     return {
@@ -240,8 +344,15 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const { monthStart, periodEnd, yearMonth } = bounds
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
-  const filled = prepareReportRows(excelRows || [])
+  let filled = prepareReportRows(excelRows || [])
+  let reportDedupeRemoved = 0
+  if (dedupeCrossFile) {
+    const collapsed = collapseDuplicateWarehouseRowsForReport(filled)
+    filled = collapsed.rows
+    reportDedupeRemoved = collapsed.removed
+  }
   const businessDuplicates = summarizeBusinessDuplicateLines(filled)
+  const duplicateImpactByProduct = dedupeCrossFile ? [] : summarizeBusinessDuplicateImpactByProduct(prepareReportRows(excelRows || []))
   const lines = normalizeExcelRows(filled)
 
   if (!lines.length) {
@@ -415,8 +526,16 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzClampedToDocMonth > 0) {
     message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
   }
-  if (businessDuplicates.duplicateLines > 0) {
-    message += ` UWAGA: ${businessDuplicates.duplicateLines} powtórnych operacji PZ/WZ z różnych importów (ok. +${businessDuplicates.duplicatePzKg.toLocaleString('pl-PL')} kg PZ i +${businessDuplicates.duplicateWzKg.toLocaleString('pl-PL')} kg WZ w saldzie). To zwykle zbiorczy Excel października nałożony na lipiec/czerwiec — usuń tę partię importu (lista powyżej) i zostaw miesięczne pliki; formuła raportu bez zmian.`
+  if (!dedupeCrossFile && businessDuplicates.duplicateLines > 0) {
+    message += ` UWAGA: ${businessDuplicates.duplicateLines} powtórnych operacji PZ/WZ z różnych importów (ok. +${businessDuplicates.duplicatePzKg.toLocaleString('pl-PL')} kg PZ i +${businessDuplicates.duplicateWzKg.toLocaleString('pl-PL')} kg WZ w saldzie). Włącz „Jedna operacja raz” albo użyj „Test bez partii”.`
+  }
+  if (dedupeCrossFile && reportDedupeRemoved > 0) {
+    message += ` Tryb Comarch: pominięto ${reportDedupeRemoved} powtórnych linii między importami (zostawiono starszy wpis w bazie).`
+  }
+  const bigBias = duplicateImpactByProduct.filter(p => Math.abs(p.extraWz - p.extraPz) > 500)
+  if (!dedupeCrossFile && bigBias.length) {
+    const hint = bigBias.slice(0, 3).map(p => `${p.product_name}: nadmiar ~${roundKg(p.extraWz - p.extraPz).toLocaleString('pl-PL')} kg WZ vs PZ w powtórzeniach`).join('; ')
+    message += ` Rozjazd z powtórzeń: ${hint}.`
   }
 
   const reportPayload = {
@@ -436,6 +555,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       inputRows: (excelRows || []).length,
       filledRows: filled.length,
       businessDuplicates,
+      duplicateImpactByProduct,
+      dedupeCrossFile,
+      reportDedupeRemoved,
       excelLines: lines.length,
       pzLines,
       wzLines,

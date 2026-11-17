@@ -14,7 +14,8 @@ import {
   buildReportTitle,
   compareStockValueReports,
   computeWarehouseValueMonthStats,
-  auditWarehouseValueImport
+  auditWarehouseValueImport,
+  simulateReportWithoutBatch
 } from './monthlyStockValueFromExcel'
 import { summarizeDuplicateLinesBySourceFile } from './reportExcelStore'
 import {
@@ -133,6 +134,8 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
   const [snapshots, setSnapshots] = useState([])
+  const [dedupeCrossFile, setDedupeCrossFile] = useState(false)
+  const [batchSim, setBatchSim] = useState(null)
   const fileInputRef = useRef(null)
   const auditInputRef = useRef(null)
   const asOfDateRef = useRef(asOfDate)
@@ -145,12 +148,21 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     [excelRows]
   )
 
-  const recalculate = useCallback((rows, names, date) => {
-    const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
+  const recalculate = useCallback((rows, names, date, dedupe = dedupeCrossFile) => {
+    const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names, dedupeCrossFile: dedupe })
     setReport(result)
     setExpanded(new Set())
     return result
-  }, [])
+  }, [dedupeCrossFile])
+
+  const runBatchSim = useCallback((batchId) => {
+    const sim = simulateReportWithoutBatch(excelRows, asOfDateRef.current, batchId, {
+      fileNames,
+      dedupeCrossFile
+    })
+  const batch = batches.find(b => b.id === batchId)
+    setBatchSim({ ...sim, fileName: batch?.file_name || '' })
+  }, [excelRows, fileNames, dedupeCrossFile, batches])
 
   const reloadFromSupabase = useCallback(async (silent = false, { forceRefresh = false, preserveAudit = false } = {}) => {
     if (!supabase) {
@@ -238,7 +250,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [asOfDate, excelRows, fileNames, recalculate])
+  }, [asOfDate, excelRows, fileNames, dedupeCrossFile, recalculate])
 
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
@@ -531,6 +543,9 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                     {' '}· <b>{redundant.toLocaleString('pl-PL')} powtórzeń</b>
                   </span>
                 )}
+                <button type="button" className="mini secondary" disabled={loading || !excelRows.length} onClick={() => runBatchSim(b.id)} title="Przelicz bez tej partii — widać, który plik psuje stan">
+                  Test
+                </button>
                 <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
                   <Trash2 size={12} /> Usuń
                 </button>
@@ -677,6 +692,15 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             <ReportDatePicker value={asOfDate} onChange={setAsOfDate} disabled={!excelRows.length || loading} />
           </label>
           <div className="actions">
+            <label className="hint report-dedupe-toggle">
+              <input
+                type="checkbox"
+                checked={dedupeCrossFile}
+                onChange={e => setDedupeCrossFile(e.target.checked)}
+                disabled={!excelRows.length}
+              />
+              {' '}Jedna operacja raz <small>(jak Comarch przy kilku importach)</small>
+            </label>
             <button
               type="button"
               className="secondary"
@@ -717,6 +741,36 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
 
       {!excelRows.length && !loading && !storeLoading && !lineCountHint && (
         <p className="hint">Wgraj plik Excel — dane zostaną w Supabase i będą dostępne przy kolejnych logowaniach.</p>
+      )}
+
+      {batchSim && (
+        <section className="card stock-excel-panel">
+          <h3>Test bez partii: {batchSim.fileName}</h3>
+          <p className="hint">
+            Symulacja bez zapisu — <b>Δ &gt; 0</b> przy produkcie znaczy: po usunięciu tego pliku stan <b>rośnie</b> (ten import zaniża stan, np. nadmiarowe WZ).
+          </p>
+          <table className="docs-table r14-table">
+            <thead>
+              <tr>
+                <th>Produkt</th>
+                <th className="num">Teraz</th>
+                <th className="num">Bez partii</th>
+                <th className="num">Δ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {batchSim.productDeltas?.map(row => (
+                <tr key={row.product_name}>
+                  <td>{row.product_name}</td>
+                  <td className="num">{Number(row.remaining_now).toLocaleString('pl-PL')}</td>
+                  <td className="num">{Number(row.remaining_without).toLocaleString('pl-PL')}</td>
+                  <td className="num">{row.delta > 0 ? '+' : ''}{Number(row.delta).toLocaleString('pl-PL')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button type="button" className="mini secondary" onClick={() => setBatchSim(null)}>Zamknij</button>
+        </section>
       )}
 
       {report && excelRows.length > 0 && (
