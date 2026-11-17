@@ -501,9 +501,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           )}
         </p>
         {batches.length > 1 && excelRows.length > 0 && (
-          <p className="hint">
-            Suma wierszy z listy importów może być większa niż {excelRows.length.toLocaleString('pl-PL')} — duplikaty między plikami są pomijane.
-            Audyt „kompletności” rób <b>tym samym plikiem</b>, który wgrywasz (albo wyczyść magazyn i wgraj 3 pliki od nowa).
+          <p className="hint warning-text">
+            Masz <b>{batches.length}</b> importów — ta sama PZ/WZ w dwóch plikach trafia do bazy <b>dwukrotnie</b> (inna nazwa pliku) i raport Σ PZ−Σ WZ się rozjeżdża (często po wgraniu zbiorczego października).
+            <b> Nie wgrywaj eksportu 1–10 jeśli masz już czerwiec–wrzesień</b> — usuń partię października przyciskiem „Usuń” albo doklej tylko wiersze z października.
+            Audyt kompletności: <b>te same pliki</b> co na liście importów, nie jeden sklejony Excel.
           </p>
         )}
         {batches.length > 0 && (
@@ -531,7 +532,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       <section className="card stock-excel-panel">
         <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel (doklej do bazy)</h3>
         <p className="hint">
-          Eksport szczegółowy PZ/WZ z kolumną „Cena netto”. Pierwszy raz — pełna historia. Kolejne miesiące — tylko nowy export; duplikaty są pomijane.
+          Eksport szczegółowy PZ/WZ z kolumną „Cena netto”. Pierwszy raz — pełna historia. Kolejne miesiące — <b>osobny plik tylko z nowym miesiącem</b>, nie zbiorczy export od stycznia (inaczej październik podwoi stary PZ/WZ w bazie).
         </p>
         <div className="actions">
           <input

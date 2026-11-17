@@ -63,6 +63,38 @@ export function excelRowDedupKey(row) {
   return `${op.operation}|${op.documentNo}|${op.product}|${op.qty}`
 }
 
+/**
+ * Te same PZ/WZ z różnych plików importu (inny dedup_key w Supabase) — raport liczy je wielokrotnie.
+ * Nie zmienia silnika; tylko diagnostyka przed przeliczeniem.
+ */
+export function summarizeBusinessDuplicateLines(rows) {
+  const counts = new Map()
+  for (const row of rows || []) {
+    const key = excelRowDedupKey(row)
+    if (!key) continue
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  let duplicateLines = 0
+  let duplicatePzKg = 0
+  let duplicateWzKg = 0
+  for (const [key, n] of counts) {
+    if (n <= 1) continue
+    const extra = n - 1
+    duplicateLines += extra
+    const [op, , , qtyStr] = key.split('|')
+    const qty = Number(qtyStr) || 0
+    if (op === 'przyjecie') duplicatePzKg += qty * extra
+    else if (op === 'sprzedaz') duplicateWzKg += qty * extra
+  }
+  return {
+    duplicateLines,
+    duplicatePzKg: roundQty(duplicatePzKg),
+    duplicateWzKg: roundQty(duplicateWzKg),
+    uniqueOperations: counts.size,
+    inputLines: (rows || []).length
+  }
+}
+
 /** Klucz ścisły (z datą) — do wykrywania duplikatów w pamięci. */
 export function excelRowDedupKeyStrict(row) {
   const op = rowOperation(row)

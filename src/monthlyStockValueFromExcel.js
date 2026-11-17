@@ -18,7 +18,7 @@ import {
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
-import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
+import { normalizeProductKey, warehouseValueDedupKey, summarizeBusinessDuplicateLines } from './reportExcelStore'
 
 export const EXCEL_REPORT_VERSION = '2.10'
 
@@ -241,6 +241,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
   const filled = prepareReportRows(excelRows || [])
+  const businessDuplicates = summarizeBusinessDuplicateLines(filled)
   const lines = normalizeExcelRows(filled)
 
   if (!lines.length) {
@@ -414,6 +415,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzClampedToDocMonth > 0) {
     message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
   }
+  if (businessDuplicates.duplicateLines > 0) {
+    message += ` UWAGA: ${businessDuplicates.duplicateLines} powtórnych operacji PZ/WZ z różnych importów (ok. +${businessDuplicates.duplicatePzKg.toLocaleString('pl-PL')} kg PZ i +${businessDuplicates.duplicateWzKg.toLocaleString('pl-PL')} kg WZ w saldzie). To zwykle zbiorczy Excel października nałożony na lipiec/czerwiec — usuń tę partię importu (lista powyżej) i zostaw miesięczne pliki; formuła raportu bez zmian.`
+  }
 
   const reportPayload = {
     source: 'excel',
@@ -431,6 +435,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     diagnostics: {
       inputRows: (excelRows || []).length,
       filledRows: filled.length,
+      businessDuplicates,
       excelLines: lines.length,
       pzLines,
       wzLines,
