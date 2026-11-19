@@ -37,16 +37,6 @@ import {
 import { isSupabaseConfigured } from './supabaseClient'
 import { confirmDelete } from './authEngine'
 
-const R14_DEDUPE_PREF = 'r14-dedupe-cross-file'
-
-function readDedupeCrossFilePref() {
-  try {
-    return localStorage.getItem(R14_DEDUPE_PREF) !== '0'
-  } catch {
-    return true
-  }
-}
-
 function defaultAsOfDate() {
   const d = new Date()
   const y = d.getFullYear()
@@ -145,7 +135,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
   const [snapshots, setSnapshots] = useState([])
-  const [dedupeCrossFile, setDedupeCrossFile] = useState(readDedupeCrossFilePref)
+  const [dedupeCrossFile, setDedupeCrossFile] = useState(false)
   const [batchSim, setBatchSim] = useState(null)
   const fileInputRef = useRef(null)
   const auditInputRef = useRef(null)
@@ -284,7 +274,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         fileNames: parsedFiles.map(f => f.fileName)
       })
       const fileLineCount = fileReport.diagnostics?.excelLines || 0
-      const { totalAdded, totalDuplicates, totalSkippedNoDate, totalSkippedBusinessDuplicate } = await appendWarehouseValueFromParsedFiles(
+      const { totalAdded, totalDuplicates, totalSkippedNoDate } = await appendWarehouseValueFromParsedFiles(
         supabase,
         parsedFiles,
         { uploadedBy: savedBy }
@@ -304,9 +294,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const linesWithPrice = flatRows.filter(r => Number(r.unitNetPrice) > 0).length
       const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
       const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
-      const bizHint = totalSkippedBusinessDuplicate
-        ? ` · ${totalSkippedBusinessDuplicate} już w bazie (ta sama PZ/WZ) — pominięto`
-        : ''
       const skipHint = totalSkippedNoDate ? ` · ${totalSkippedNoDate} wierszy bez daty pominięto przy zapisie` : ''
       const fileHint = `Plik: ${fileLineCount} linii raportowych · baza: ${dbRows.length} wierszy (${dbLineCount} do FIFO)`
       const verifyHint = !verify.ok && totalAdded > 0
@@ -315,7 +302,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           ? ` · UWAGA: w bazie mniej linii niż w pliku (${dbLineCount} vs ${fileLineCount}) — wyczyść i wgraj od nowa.`
           : ''
       setMessage?.(
-        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${bizHint}${skipHint}${priceHint}. ${fileHint}${verifyHint}. ` +
+        `Zapisano w Supabase: +${totalAdded} wierszy z ${files.length} pliku(ów)${skippedMm ? ` (pominięto ${skippedMm} MM)` : ''}${dupHint}${skipHint}${priceHint}. ${fileHint}${verifyHint}. ` +
         (totalAdded === 0 ? 'Wszystkie wiersze były już w bazie.' : 'Kolejne miesiące doklejaj — nie trzeba wgrywać historii od nowa.')
       )
       if (totalSkippedNoDate > 0) {
@@ -483,7 +470,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       await reloadFromSupabase(false, { forceRefresh: true })
       setMessage?.(
         removed
-          ? `Usunięto ${removed.toLocaleString('pl-PL')} powtórnych wierszy. Przelicz raport (opcja „Jedna operacja raz” jest domyślnie włączona).`
+          ? `Usunięto ${removed.toLocaleString('pl-PL')} powtórnych wierszy. Odśwież z bazy i przelicz (bez „Jedna operacja raz”, jeśli nie testujesz).`
           : 'Nie było wierszy do usunięcia.'
       )
     } catch (err) {
@@ -604,10 +591,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             type="button"
             className="secondary"
             disabled={!supabase || !excelRows.length || loading}
-            title="Usuwa z bazy młodsze kopie tej samej PZ/WZ (zostawia najstarszy import)"
+            title="Ryzykowne: usuwa młodsze kopie tej samej PZ/WZ. Najpierw usuń złą partię importu (np. drugi październik)."
             onClick={() => void handlePurgeBusinessDuplicates()}
           >
-            Usuń powtórzenia PZ/WZ
+            Usuń powtórzenia PZ/WZ (ostrożnie)
           </button>
           <button type="button" className="secondary danger" disabled={!supabase || !excelRows.length || loading} onClick={() => void handleClearAll()}>
             Wyczyść cały magazyn wartości
@@ -748,14 +735,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
               <input
                 type="checkbox"
                 checked={dedupeCrossFile}
-                onChange={e => {
-                  const on = e.target.checked
-                  setDedupeCrossFile(on)
-                  try { localStorage.setItem(R14_DEDUPE_PREF, on ? '1' : '0') } catch { /* ignore */ }
-                }}
+                onChange={e => setDedupeCrossFile(e.target.checked)}
                 disabled={!excelRows.length}
               />
-              {' '}Jedna operacja raz <small>(zalecane — jak Comarch przy kilku importach)</small>
+              {' '}Jedna operacja raz <small>(tylko test — może zmienić kg i wartości; domyślnie wyłączone)</small>
             </label>
             <button
               type="button"

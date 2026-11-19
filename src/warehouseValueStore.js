@@ -16,7 +16,7 @@ import {
   collectBusinessDuplicateLineIds
 } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.8'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.7'
 const INSERT_CHUNK = 250
 /** Supabase/PostgREST często zwraca max 1000 wierszy na zapytanie — mniejsze paczki + paginacja po id. */
 const FETCH_PAGE_SIZE = 1000
@@ -346,19 +346,6 @@ export async function fetchWarehouseValueStats(client) {
 export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, { uploadedBy = '' } = {}) {
   if (!client) throw new Error('Brak połączenia z Supabase.')
   const results = []
-  let businessKeys = null
-  const countRes = await client
-    .from('warehouse_value_lines')
-    .select('id', { count: 'exact', head: true })
-  if (countRes.error) throw countRes.error
-  if ((countRes.count || 0) > 0) {
-    const existing = await fetchAllWarehouseValueLines(client, { forceRefresh: true })
-    businessKeys = new Set()
-    for (const row of existing) {
-      const k = excelRowBusinessDedupKey(row)
-      if (k) businessKeys.add(k)
-    }
-  }
 
   for (const { fileName, rows } of parsedFiles || []) {
     const name = fileName || 'import.xlsx'
@@ -379,19 +366,11 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
     const batchId = batch.id
     let skippedNoDate = 0
     let skippedInvalid = 0
-    let skippedBusinessDuplicate = 0
     const payloads = []
     for (const r of rows || []) {
-      const businessKey = excelRowBusinessDedupKey(r)
-      if (businessKeys && businessKey && businessKeys.has(businessKey)) {
-        skippedBusinessDuplicate += 1
-        continue
-      }
       const { payload, reason } = excelRowToInsert(r, batchId, name)
-      if (payload) {
-        payloads.push(payload)
-        if (businessKeys && businessKey) businessKeys.add(businessKey)
-      } else if (reason === 'no_date') skippedNoDate += 1
+      if (payload) payloads.push(payload)
+      else if (reason === 'no_date') skippedNoDate += 1
       else if (reason === 'invalid' && (r.productName || r.qty)) skippedInvalid += 1
     }
     let added = 0
@@ -419,7 +398,6 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
       duplicates,
       skippedNoDate,
       skippedInvalid,
-      skippedBusinessDuplicate,
       parsedRows: (rows || []).length,
       batchId: added > 0 ? batchId : null
     })
@@ -428,9 +406,8 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
   const totalAdded = results.reduce((s, r) => s + r.added, 0)
   const totalDup = results.reduce((s, r) => s + r.duplicates, 0)
   const totalSkippedNoDate = results.reduce((s, r) => s + (r.skippedNoDate || 0), 0)
-  const totalSkippedBusiness = results.reduce((s, r) => s + (r.skippedBusinessDuplicate || 0), 0)
   if (totalAdded > 0) invalidateWarehouseValueLinesCache()
-  return { results, totalAdded, totalDuplicates: totalDup, totalSkippedNoDate, totalSkippedBusinessDuplicate: totalSkippedBusiness }
+  return { results, totalAdded, totalDuplicates: totalDup, totalSkippedNoDate }
 }
 
 const DELETE_CHUNK = 200
