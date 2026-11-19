@@ -971,6 +971,29 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           </table>
         </div>
       ) : excelRows.length > 0 && !loading && report && (
+        {report?.diagnostics?.hidden_watch?.length > 0 && (
+          <div className="hint inline-warning warehouse-hidden-watch">
+            {report.diagnostics.hidden_watch.map(h => (
+              <p key={h.product_name}>
+                {h.reason === 'brak_wierszy' ? (
+                  <>
+                    <b>{h.product_name}</b> — brak pozycji w bazie. Importuj osobno <b>sierpień</b>, <b>wrzesień</b>, <b>październik</b> (w czerwcu/lipcu w Excelu nie ma jabłka przemysłowego).
+                  </>
+                ) : (
+                  <>
+                    <b>{h.product_name}</b> nie w tabeli (raport pokazuje tylko stan &gt; 0 lub ruch w wybranym miesiącu).
+                    Surowe saldo Σ PZ−WZ: <b>{h.raw_remaining_kg.toLocaleString('pl-PL')} kg</b>
+                    {' '}(PZ: {h.pz_kg.toLocaleString('pl-PL')} kg w {h.pz_count} liniach,
+                    WZ: {h.wz_kg.toLocaleString('pl-PL')} kg w {h.wz_count} liniach).
+                    {h.product_name === 'Jabłko przemysłowe' && (
+                      <> Porównanie z Comarch na <b>31.10</b>: ustaw datę stanu <b>2026-10-31</b> (na listopadzie „Przybyło/Ubyło” = 0).</>
+                    )}
+                  </>
+                )}
+              </p>
+            ))}
+          </div>
+        )}
         <p className="hint">{report.message}</p>
       )}
     </div>

@@ -237,6 +237,48 @@ export function summarizeBusinessDuplicateImpactByProduct(rows) {
     .sort((a, b) => Math.abs(b.extraWz - b.extraPz) - Math.abs(a.extraWz - a.extraPz))
 }
 
+/** Produkty, które użytkownik porównuje z Comarch — diagnostyka gdy znikają z tabeli (saldo ≤ 0). */
+export const WATCH_REPORT_PRODUCTS = ['Jabłko przemysłowe', 'Malina świeża PW']
+
+function countRawLinesForReportProduct(excelRows, productLabel) {
+  const key = stockValueProductKey(productLabel)
+  let n = 0
+  for (const r of excelRows || []) {
+    if (!r?.productName) continue
+    if (stockValueProductKey(r.productName) === key) n += 1
+  }
+  return n
+}
+
+function warehouseActivityToDate(lines, productKey, cutoffDate, openingCutoff) {
+  let pz = 0
+  let wz = 0
+  let pzKg = 0
+  let wzKg = 0
+  let openPz = 0
+  let openWz = 0
+  for (const l of lines) {
+    if (l.productKey !== productKey || !l.issueDate || l.issueDate > cutoffDate) continue
+    if (l.operation === 'przyjecie') {
+      if (l.issueDate <= openingCutoff) openPz += l.qty
+      pz += 1
+      pzKg += l.qty
+    } else if (l.operation === 'sprzedaz') {
+      if (l.issueDate <= openingCutoff) openWz += l.qty
+      wz += 1
+      wzKg += l.qty
+    }
+  }
+  return {
+    pz,
+    wz,
+    pzKg: roundKg(pzKg),
+    wzKg: roundKg(wzKg),
+    rawOpening: roundKg(openPz - openWz),
+    rawRemaining: roundKg(pzKg - wzKg)
+  }
+}
+
 export function simulateReportWithoutBatch(excelRows, asOfDate, batchId, options = {}) {
   const base = computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, options)
   const filtered = (excelRows || []).filter(r => r._batchId !== batchId)
@@ -527,6 +569,39 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       String(a.product_name || '').localeCompare(String(b.product_name || ''))
     )
 
+  const visibleKeys = new Set(rows.map(r => r.product_key))
+  const hidden_watch = []
+  for (const name of WATCH_REPORT_PRODUCTS) {
+    if (visibleKeys.has(stockValueProductKey(name))) continue
+    const key = stockValueProductKey(name)
+    const row = periodMap.get(key)
+    const act = warehouseActivityToDate(lines, key, cutoffDate, openingCutoff)
+    const rawDbLines = countRawLinesForReportProduct(excelRows, name)
+    if (!row && act.pz + act.wz === 0 && rawDbLines === 0) {
+      hidden_watch.push({
+        product_name: name,
+        reason: 'brak_wierszy',
+        raw_db_lines: 0,
+        raw_remaining_kg: 0
+      })
+      continue
+    }
+    const rawRem = row ? roundKg(row._cum_pz - row._cum_wz) : act.rawRemaining
+    hidden_watch.push({
+      product_name: name,
+      reason: rawRem < -0.001 ? 'ujemny_stan' : rawRem > 0.0005 ? 'ukryte_mimo_dodatniego' : 'zero_stan',
+      raw_remaining_kg: rawRem,
+      opening_raw_kg: row ? roundKg(row._opening_pz - row._opening_wz) : act.rawOpening,
+      purchased_kg: roundKg(row?.purchased_kg || 0),
+      sold_kg: roundKg(row?.sold_kg || 0),
+      pz_count: act.pz,
+      wz_count: act.wz,
+      pz_kg: act.pzKg,
+      wz_kg: act.wzKg,
+      raw_db_lines: rawDbLines
+    })
+  }
+
   const totals = {
     opening_kg: roundKg(rows.reduce((s, r) => s + r.opening_kg, 0)),
     purchased_kg: roundKg(rows.reduce((s, r) => s + r.purchased_kg, 0)),
@@ -564,6 +639,18 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     message += ` Rozjazd z powtórzeń: ${hint}.`
   }
 
+  const jabHidden = hidden_watch.find(h => h.product_name === 'Jabłko przemysłowe')
+  if (jabHidden) {
+    if (jabHidden.reason === 'brak_wierszy') {
+      message += ' Jabłko przemysłowe: brak wierszy w bazie — wgraj sierpień, wrzesień i październik (w czerwcu/lipcu tego surowca nie ma w Excelu).'
+    } else {
+      message += ` Jabłko przemysłowe ukryte w tabeli: Σ PZ−WZ=${jabHidden.raw_remaining_kg.toLocaleString('pl-PL')} kg (${jabHidden.pz_count} PZ / ${jabHidden.wz_count} WZ do daty stanu; wierszy w bazie: ${jabHidden.raw_db_lines}). Cel Comarch na 31.10: 11 378 kg.`
+      if (jabHidden.raw_remaining_kg < -0.001) {
+        message += ' Nadmiar WZ — usuń podwójne partie sierpień/wrzesień/październik (przycisk Usuń przy partii), nie „Usuń powtórzenia”.'
+      }
+    }
+  }
+
   const reportPayload = {
     source: 'excel',
     asOfDate: cutoffDate,
@@ -591,6 +678,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzAfterCutoff,
       wzClampedToDocMonth,
       openingCutoff,
+      hidden_watch,
       engine: 'cumulative_pz_minus_wz_v28'
     },
     message
