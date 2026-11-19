@@ -1250,6 +1250,8 @@ button.btn-busy { background: var(--accent-soft, #e8f0e4); border-color: var(--a
 .r14-detail-row > td { background: #f8faf8; padding: 8px 12px !important; }
 .r14-lot-table { width: 100%; font-size: 12px; border-collapse: collapse; }
 .r14-lot-table th, .r14-lot-table td { border: 1px solid #ccc; padding: 4px 8px; }
+.r14-detail-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 8.5rem; }
+.r14-pz-scroll { max-height: 20rem; overflow: auto; margin-top: 6px; border: 1px solid #ddd; border-radius: 6px; background: #fff; }
 .r14-controls .month-nav { display: flex; align-items: center; gap: 6px; }
 .r14-controls .month-nav input[type="month"] { flex: 1; }
 .warning-text { color: #a33; }

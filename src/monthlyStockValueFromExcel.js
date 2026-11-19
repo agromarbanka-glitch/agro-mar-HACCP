@@ -455,6 +455,15 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
         String(a.pz_no || '').localeCompare(String(b.pz_no || '')) ||
         (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0)
       )
+    row.warehouse_pz_lines = lots.map(lot => ({
+      pz_no: lot.pz_no,
+      pz_date: lot.pz_date,
+      qty: roundKg(lot.qty),
+      unit_price_net: lot.unit_price_net
+    }))
+    row.warehouse_pz_count = row.warehouse_pz_lines.length
+    row.warehouse_pz_kg = roundKg(row.warehouse_pz_lines.reduce((s, l) => s + l.qty, 0))
+
     if (lots.length && row.remaining_kg > 0) {
       let left = row.remaining_kg
       for (const lot of lots) {
@@ -488,7 +497,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       remaining_value: roundMoney(row.remaining_value),
       purchased_missing_price_kg: roundKg(row.purchased_missing_price_kg),
       remaining_missing_price_kg: roundKg(row.remaining_missing_price_kg),
-      lot_lines: row.lot_lines || []
+      lot_lines: row.lot_lines || [],
+      warehouse_pz_lines: row.warehouse_pz_lines || [],
+      warehouse_pz_count: row.warehouse_pz_count || 0,
+      warehouse_pz_kg: roundKg(row.warehouse_pz_kg || 0)
     }))
     .filter(r =>
       r.opening_kg > 0.0005

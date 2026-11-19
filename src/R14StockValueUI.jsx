@@ -466,11 +466,11 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     }
   }
 
-  function toggleExpand(key) {
+  function toggleExpand(panelId) {
     setExpanded(prev => {
       const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+      if (next.has(panelId)) next.delete(panelId)
+      else next.add(panelId)
       return next
     })
   }
@@ -801,13 +801,16 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                 <th className="num">Ilość końcowa<br /><small>{report?.asOfDatePl || ''}</small></th>
                 <th className="num">Wartość zakupu<br /><small>netto</small></th>
                 <th className="num">Wartość końcowa<br /><small>netto</small></th>
-                <th>Szczegóły</th>
+                <th>Szczegóły<br /><small>w bazie · podział wartości</small></th>
               </tr>
             </thead>
             <tbody>
               {rows.map(row => {
                 const key = row.product_key || row.product_name
-                const open = expanded.has(key)
+                const panelWh = `wh:${key}`
+                const panelVal = `val:${key}`
+                const openWh = expanded.has(panelWh)
+                const openVal = expanded.has(panelVal)
                 return (
                   <React.Fragment key={key}>
                     <tr>
@@ -823,17 +826,68 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                           <small className="hint"> ({Number(row.remaining_missing_price_kg).toLocaleString('pl-PL')} kg bez ceny)</small>
                         )}
                       </td>
-                      <td>
-                        {row.lot_lines?.length > 0 && (
-                          <button type="button" className="mini secondary" onClick={() => toggleExpand(key)}>
-                            {open ? 'Ukryj' : `${row.lot_lines.length} PZ`}
+                      <td className="r14-detail-actions">
+                        {(row.warehouse_pz_count > 0) && (
+                          <button
+                            type="button"
+                            className="mini secondary"
+                            title={`Wszystkie PZ wgrane do ${report?.asOfDatePl || 'daty stanu'} (Σ PZ−WZ)`}
+                            onClick={() => toggleExpand(panelWh)}
+                          >
+                            {openWh ? 'Ukryj' : `${row.warehouse_pz_count} PZ w bazie`}
+                          </button>
+                        )}
+                        {(row.lot_lines?.length > 0) && (
+                          <button
+                            type="button"
+                            className="mini secondary"
+                            title="Tylko partie użyte do wyliczenia wartości końcowej (FIFO od najstarszego PZ)"
+                            onClick={() => toggleExpand(panelVal)}
+                          >
+                            {openVal ? 'Ukryj' : `${row.lot_lines.length} PZ → wartość`}
                           </button>
                         )}
                       </td>
                     </tr>
-                    {open && row.lot_lines?.length > 0 && (
+                    {openWh && (row.warehouse_pz_lines?.length > 0) && (
                       <tr className="r14-detail-row">
                         <td colSpan={8}>
+                          <p className="hint">
+                            <b>PZ w bazie</b> (do {report?.asOfDatePl || 'daty stanu'}): {row.warehouse_pz_count.toLocaleString('pl-PL')} dokumentów ·{' '}
+                            {Number(row.warehouse_pz_kg || 0).toLocaleString('pl-PL')} kg przyjęć. Tu szukaj np. PZ/006/15/10/2026.
+                          </p>
+                          <div className="r14-pz-scroll">
+                            <table className="r14-lot-table">
+                              <thead>
+                                <tr>
+                                  <th>Nr PZ</th>
+                                  <th>Data</th>
+                                  <th className="num">Ilość kg</th>
+                                  <th className="num">Cena netto</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {row.warehouse_pz_lines.map((line, idx) => (
+                                  <tr key={`wh-${line.pz_no}-${line.pz_date}-${line.qty}-${idx}`}>
+                                    <td>{line.pz_no}</td>
+                                    <td>{line.pz_date}</td>
+                                    <td className="num">{Number(line.qty || 0).toLocaleString('pl-PL')}</td>
+                                    <td className="num">{line.unit_price_net != null ? formatPlMoney(line.unit_price_net) : '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    {openVal && row.lot_lines?.length > 0 && (
+                      <tr className="r14-detail-row">
+                        <td colSpan={8}>
+                          <p className="hint">
+                            <b>Podział pod wartość końcową</b> — tylko {row.lot_lines.length} najstarszych partii PZ
+                            pokrywających {Number(row.remaining_kg || 0).toLocaleString('pl-PL')} kg stanu (nie pełna lista magazynowa).
+                          </p>
                           <table className="r14-lot-table">
                             <thead>
                               <tr>
@@ -846,7 +900,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                             </thead>
                             <tbody>
                               {row.lot_lines.map(line => (
-                                <tr key={`${line.pz_no}-${line.pz_date}-${line.remaining_kg}`}>
+                                <tr key={`val-${line.pz_no}-${line.pz_date}-${line.remaining_kg}`}>
                                   <td>{line.pz_no}</td>
                                   <td>{line.pz_date}</td>
                                   <td className="num">{Number(line.remaining_kg || 0).toLocaleString('pl-PL')}</td>
