@@ -166,6 +166,20 @@ export function excelRowBusinessDedupKey(row) {
  * Ta sama PZ/WZ z kilku importów — w raporcie zostaw pierwszy wg id w bazie.
  * Opcjonalne (checkbox w UI); domyślnie Σ wszystkich wierszy jak v2.10.
  */
+/** Id wierszy w Supabase do usunięcia — zostawia najstarszy wpis na operację (comarch). */
+export function collectBusinessDuplicateLineIds(rows) {
+  const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
+  const seen = new Set()
+  const toDelete = []
+  for (const row of sorted) {
+    const key = excelRowBusinessDedupKey(row)
+    if (!key || !row._lineId) continue
+    if (seen.has(key)) toDelete.push(row._lineId)
+    else seen.add(key)
+  }
+  return toDelete
+}
+
 export function collapseDuplicateWarehouseRowsForReport(rows) {
   const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
   const seen = new Map()
