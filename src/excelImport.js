@@ -480,10 +480,17 @@ export async function readAgromarExcel(file, { skipMm = true, includeUnitPrice =
   return { rows: resultRows, skippedMmCount, headerDocRows, rowsWithoutDoc }
 }
 
+export function isWzkDocument(documentType, documentNo) {
+  const type = String(documentType || '').trim().toUpperCase()
+  const norm = normalizeDocumentNo(documentNo).toUpperCase()
+  return type === 'WZK' || norm.startsWith('WZK/')
+}
+
 export function classifyOperation(documentType, documentNo) {
   const type = String(documentType || '').trim().toUpperCase()
   const text = `${documentType} ${documentNo}`.toUpperCase()
   if (isMmDocument(documentType, documentNo)) return 'pominiete_mm'
+  if (isWzkDocument(documentType, documentNo)) return 'sprzedaz'
   if (type === 'PZ' || text.includes('PZ')) return 'przyjecie'
   if (type === 'WZ' || type === 'FV' || type === 'FS' || text.includes('WZ') || text.includes('FV') || text.includes('FS') || text.includes('RR')) return 'sprzedaz'
   return 'przyjecie'
