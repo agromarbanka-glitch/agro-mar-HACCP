@@ -4,7 +4,7 @@
  * Łączenie partii, deduplikacja operacji, ręczne usuwanie.
  */
 import {
-  classifyStockValueOperation,
+  classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument
@@ -47,7 +47,7 @@ function rowOperation(row) {
   if (isMmDocument(row.documentType, row.documentNo)) return null
   const documentNo = normalizeDocumentNo(row.documentNo)
   if (!documentNo) return null
-  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
+  const operation = classifyOperation(row.documentType, documentNo)
   if (operation === 'pominiete_mm') return null
   return { operation, documentNo, product: normalizeProductKey(row.productName), qty: roundQty(row.qty) }
 }
@@ -61,61 +61,6 @@ export function excelRowDedupKey(row) {
   const op = rowOperation(row)
   if (!op) return null
   return `${op.operation}|${op.documentNo}|${op.product}|${op.qty}`
-}
-
-/**
- * Te same PZ/WZ z różnych plików importu (inny dedup_key w Supabase) — raport liczy je wielokrotnie.
- * Nie zmienia silnika; tylko diagnostyka przed przeliczeniem.
- */
-export function summarizeBusinessDuplicateLines(rows) {
-  const counts = new Map()
-  for (const row of rows || []) {
-    const key = excelRowDedupKey(row)
-    if (!key) continue
-    counts.set(key, (counts.get(key) || 0) + 1)
-  }
-  let duplicateLines = 0
-  let duplicatePzKg = 0
-  let duplicateWzKg = 0
-  for (const [key, n] of counts) {
-    if (n <= 1) continue
-    const extra = n - 1
-    duplicateLines += extra
-    const [op, , , qtyStr] = key.split('|')
-    const qty = Number(qtyStr) || 0
-    if (op === 'przyjecie') duplicatePzKg += qty * extra
-    else if (op === 'sprzedaz') duplicateWzKg += qty * extra
-  }
-  return {
-    duplicateLines,
-    duplicatePzKg: roundQty(duplicatePzKg),
-    duplicateWzKg: roundQty(duplicateWzKg),
-    uniqueOperations: counts.size,
-    inputLines: (rows || []).length
-  }
-}
-
-/** Który plik importu wnosi zbędne powtórzenia (zostawiamy pierwszy wiersz wg id w bazie). */
-export function summarizeDuplicateLinesBySourceFile(rows) {
-  const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
-  const seen = new Set()
-  const redundantByFile = new Map()
-  let duplicateLines = 0
-  for (const row of sorted) {
-    const key = excelRowDedupKey(row)
-    if (!key) continue
-    if (!seen.has(key)) {
-      seen.add(key)
-      continue
-    }
-    duplicateLines++
-    const src = String(row._batchSourceFile || '').trim() || '(nieznany plik)'
-    redundantByFile.set(src, (redundantByFile.get(src) || 0) + 1)
-  }
-  return {
-    duplicateLines,
-    redundantByFile: Object.fromEntries(redundantByFile)
-  }
 }
 
 /** Klucz ścisły (z datą) — do wykrywania duplikatów w pamięci. */
@@ -411,9 +356,8 @@ export function findDuplicateGroups(store) {
 
 export function formatRowSummary(row) {
   const docNo = normalizeDocumentNo(row.documentNo) || row.documentNo || '—'
-  const op = classifyStockValueOperation(row.documentType, row.documentNo, row.qty)
-  let opLabel = op === 'sprzedaz' ? 'WZ' : op === 'przyjecie' ? 'PZ' : String(row.documentType || '')
-  if (op === 'przyjecie' && String(row.documentType || '').toUpperCase().includes('WZK')) opLabel = 'WZK'
+  const op = classifyOperation(row.documentType, row.documentNo)
+  const opLabel = op === 'sprzedaz' ? 'WZ' : op === 'przyjecie' ? 'PZ' : String(row.documentType || '')
   const issueDate = resolveDocumentIssueDate(row.issueDate, row.documentNo) || row.issueDate || '—'
   return `${opLabel} ${docNo} · ${row.productName || '—'} · ${roundQty(row.qty)} kg · ${issueDate}`
 }
@@ -438,7 +382,7 @@ export function storeStats(store) {
   let wz = 0
   for (const stored of rows) {
     const row = toExcelRow(stored)
-    const op = classifyStockValueOperation(row.documentType, row.documentNo, row.qty)
+    const op = classifyOperation(row.documentType, row.documentNo)
     if (op === 'przyjecie') pz += 1
     else if (op === 'sprzedaz') wz += 1
   }

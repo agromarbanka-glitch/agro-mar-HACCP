@@ -14,10 +14,8 @@ import {
   buildReportTitle,
   compareStockValueReports,
   computeWarehouseValueMonthStats,
-  auditWarehouseValueImport,
-  simulateReportWithoutBatch
+  auditWarehouseValueImport
 } from './monthlyStockValueFromExcel'
-import { summarizeDuplicateLinesBySourceFile } from './reportExcelStore'
 import {
   fetchAllWarehouseValueLines,
   fetchWarehouseValueMeta,
@@ -29,7 +27,6 @@ import {
   fetchWarehouseValueSnapshots,
   deleteWarehouseValueSnapshot,
   clearAllWarehouseValueData,
-  purgeBusinessDuplicateWarehouseLines,
   summarizeBatchRow,
   invalidateWarehouseValueLinesCache,
   WAREHOUSE_VALUE_STORE_VERSION
@@ -135,8 +132,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
   const [snapshots, setSnapshots] = useState([])
-  const [dedupeCrossFile, setDedupeCrossFile] = useState(false)
-  const [batchSim, setBatchSim] = useState(null)
   const fileInputRef = useRef(null)
   const auditInputRef = useRef(null)
   const asOfDateRef = useRef(asOfDate)
@@ -144,26 +139,12 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
 
   const fileNames = useMemo(() => batches.map(b => b.file_name).filter(Boolean), [batches])
 
-  const duplicateByFile = useMemo(
-    () => summarizeDuplicateLinesBySourceFile(excelRows),
-    [excelRows]
-  )
-
-  const recalculate = useCallback((rows, names, date, dedupe = dedupeCrossFile) => {
-    const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names, dedupeCrossFile: dedupe })
+  const recalculate = useCallback((rows, names, date) => {
+    const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
     setReport(result)
     setExpanded(new Set())
     return result
-  }, [dedupeCrossFile])
-
-  const runBatchSim = useCallback((batchId) => {
-    const sim = simulateReportWithoutBatch(excelRows, asOfDateRef.current, batchId, {
-      fileNames,
-      dedupeCrossFile
-    })
-  const batch = batches.find(b => b.id === batchId)
-    setBatchSim({ ...sim, fileName: batch?.file_name || '' })
-  }, [excelRows, fileNames, dedupeCrossFile, batches])
+  }, [])
 
   const reloadFromSupabase = useCallback(async (silent = false, { forceRefresh = false, preserveAudit = false } = {}) => {
     if (!supabase) {
@@ -199,18 +180,12 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       if (!preserveAudit) setImportAudit(null)
       const probe = computeMonthlyStockValueReportFromExcel(rows, asOfDateRef.current)
       const skipped = rows.length - (probe.diagnostics?.excelLines || 0)
-      const bizDup = probe.diagnostics?.businessDuplicates
-      const dupNote =
-        bizDup?.duplicateLines > 0
-          ? `W bazie jest ${bizDup.duplicateLines.toLocaleString('pl-PL')} powtórnych PZ/WZ z innych plików (Σ PZ−Σ WZ zawyżone). Usuń partie z czerwoną liczbą „powtórzeń” poniżej — zwykle starszy wrzesień albo zbiorczy październik.`
-          : ''
       setIntegrityNote(
         rows.length !== meta.lineCount
           ? `Uwaga: w bazie ${meta.lineCount} wierszy, wczytano ${rows.length} — odśwież ponownie.`
-          : dupNote
-            || (skipped > 0
-              ? `${skipped} wierszy w bazie pominięto przy przeliczeniu (MM, brak daty lub ilości).`
-              : '')
+          : skipped > 0
+            ? `${skipped} wierszy w bazie pominięto przy przeliczeniu (MM, brak daty lub ilości).`
+            : ''
       )
       if (!silent && rows.length) {
         setMessage?.(`Wczytano ${rows.length} wierszy PZ/WZ z Supabase (${meta.batchCount} importów).`)
@@ -251,7 +226,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [asOfDate, excelRows, fileNames, dedupeCrossFile, recalculate])
+  }, [asOfDate, excelRows, fileNames, recalculate])
 
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
@@ -451,35 +426,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     }
   }
 
-  async function handlePurgeBusinessDuplicates() {
-    if (!supabase || !excelRows.length) return
-    const dupLines = report?.diagnostics?.businessDuplicates?.duplicateLines
-      ?? summarizeDuplicateLinesBySourceFile(excelRows).duplicateLines
-    if (!dupLines) {
-      setMessage?.('Brak powtórnych operacji między importami — baza już jest „po jednej”.')
-      return
-    }
-    if (!confirmDelete(
-      `Usunąć ok. ${dupLines.toLocaleString('pl-PL')} młodszych kopii tej samej PZ/WZ?\n\nZostaje najstarszy wiersz w bazie (jak Comarch). Nie usuwa całych partii.`
-    )) return
-    setLoading(true)
-    try {
-      const { removed } = await purgeBusinessDuplicateWarehouseLines(supabase, {
-        onProgress: msg => setMessage?.(msg)
-      })
-      await reloadFromSupabase(false, { forceRefresh: true })
-      setMessage?.(
-        removed
-          ? `Usunięto ${removed.toLocaleString('pl-PL')} powtórnych wierszy. Odśwież z bazy i przelicz (bez „Jedna operacja raz”, jeśli nie testujesz).`
-          : 'Nie było wierszy do usunięcia.'
-      )
-    } catch (err) {
-      setMessage?.(`Błąd czyszczenia: ${err?.message || String(err)}`)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   async function handleClearAll() {
     if (!supabase) return
     if (!confirmDelete('CAŁY magazyn wartości (wszystkie importy Excel i snapshoty).\n\nNie dotyka magazynu HACCP / FIFO partii.')) return
@@ -496,11 +442,11 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     }
   }
 
-  function toggleExpand(panelId) {
+  function toggleExpand(key) {
     setExpanded(prev => {
       const next = new Set(prev)
-      if (next.has(panelId)) next.delete(panelId)
-      else next.add(panelId)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
@@ -555,46 +501,26 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           )}
         </p>
         {batches.length > 1 && excelRows.length > 0 && (
-          <p className="hint warning-text">
-            Masz <b>{batches.length}</b> importów — ta sama PZ/WZ w dwóch plikach trafia do bazy <b>dwukrotnie</b> (inna nazwa pliku) i raport Σ PZ−Σ WZ się rozjeżdża (często po wgraniu zbiorczego października).
-            <b> Nie wgrywaj eksportu 1–10 jeśli masz już czerwiec–wrzesień</b> — usuń partię października przyciskiem „Usuń” albo doklej tylko wiersze z października.
-            Audyt kompletności: <b>te same pliki</b> co na liście importów, nie jeden sklejony Excel.
+          <p className="hint">
+            Suma wierszy z listy importów może być większa niż {excelRows.length.toLocaleString('pl-PL')} — duplikaty między plikami są pomijane.
+            Audyt „kompletności” rób <b>tym samym plikiem</b>, który wgrywasz (albo wyczyść magazyn i wgraj 3 pliki od nowa).
           </p>
         )}
         {batches.length > 0 && (
           <ul className="warehouse-batch-list hint">
-            {batches.map(b => {
-              const redundant = duplicateByFile.redundantByFile?.[b.file_name] || 0
-              return (
+            {batches.map(b => (
               <li key={b.id}>
                 {summarizeBatchRow(b)}
-                {redundant > 0 && (
-                  <span className="warning-text" title="Te linie są już w starszym imporcie — usuń tę partię lub cały plik z listy">
-                    {' '}· <b>{redundant.toLocaleString('pl-PL')} powtórzeń</b>
-                  </span>
-                )}
-                <button type="button" className="mini secondary" disabled={loading || !excelRows.length} onClick={() => runBatchSim(b.id)} title="Przelicz bez tej partii — widać, który plik psuje stan">
-                  Test
-                </button>
                 <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
                   <Trash2 size={12} /> Usuń
                 </button>
               </li>
-            )})}
+            ))}
           </ul>
         )}
         <div className="actions">
           <button type="button" className="secondary" disabled={!supabase || storeLoading} onClick={() => { invalidateWarehouseValueLinesCache(); void reloadFromSupabase(false, { forceRefresh: true }) }}>
             <RefreshCcw size={16} /> Odśwież z bazy
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            disabled={!supabase || !excelRows.length || loading}
-            title="Ryzykowne: usuwa młodsze kopie tej samej PZ/WZ. Najpierw usuń złą partię importu (np. drugi październik)."
-            onClick={() => void handlePurgeBusinessDuplicates()}
-          >
-            Usuń powtórzenia PZ/WZ (ostrożnie)
           </button>
           <button type="button" className="secondary danger" disabled={!supabase || !excelRows.length || loading} onClick={() => void handleClearAll()}>
             Wyczyść cały magazyn wartości
@@ -605,7 +531,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       <section className="card stock-excel-panel">
         <h3><FileSpreadsheet size={18} /> 1. Wgraj plik Excel (doklej do bazy)</h3>
         <p className="hint">
-          Eksport szczegółowy PZ/WZ z kolumną „Cena netto”. Pierwszy raz — pełna historia. Kolejne miesiące — <b>osobny plik tylko z nowym miesiącem</b>, nie zbiorczy export od stycznia (inaczej październik podwoi stary PZ/WZ w bazie).
+          Eksport szczegółowy PZ/WZ z kolumną „Cena netto”. Pierwszy raz — pełna historia. Kolejne miesiące — tylko nowy export; duplikaty są pomijane.
         </p>
         <div className="actions">
           <input
@@ -731,15 +657,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             <ReportDatePicker value={asOfDate} onChange={setAsOfDate} disabled={!excelRows.length || loading} />
           </label>
           <div className="actions">
-            <label className="hint report-dedupe-toggle">
-              <input
-                type="checkbox"
-                checked={dedupeCrossFile}
-                onChange={e => setDedupeCrossFile(e.target.checked)}
-                disabled={!excelRows.length}
-              />
-              {' '}Jedna operacja raz <small>(tylko test — może zmienić kg i wartości; domyślnie wyłączone)</small>
-            </label>
             <button
               type="button"
               className="secondary"
@@ -782,36 +699,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         <p className="hint">Wgraj plik Excel — dane zostaną w Supabase i będą dostępne przy kolejnych logowaniach.</p>
       )}
 
-      {batchSim && (
-        <section className="card stock-excel-panel">
-          <h3>Test bez partii: {batchSim.fileName}</h3>
-          <p className="hint">
-            Symulacja bez zapisu — <b>Δ &gt; 0</b> przy produkcie znaczy: po usunięciu tego pliku stan <b>rośnie</b> (ten import zaniża stan, np. nadmiarowe WZ).
-          </p>
-          <table className="docs-table r14-table">
-            <thead>
-              <tr>
-                <th>Produkt</th>
-                <th className="num">Teraz</th>
-                <th className="num">Bez partii</th>
-                <th className="num">Δ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {batchSim.productDeltas?.map(row => (
-                <tr key={row.product_name}>
-                  <td>{row.product_name}</td>
-                  <td className="num">{Number(row.remaining_now).toLocaleString('pl-PL')}</td>
-                  <td className="num">{Number(row.remaining_without).toLocaleString('pl-PL')}</td>
-                  <td className="num">{row.delta > 0 ? '+' : ''}{Number(row.delta).toLocaleString('pl-PL')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <button type="button" className="mini secondary" onClick={() => setBatchSim(null)}>Zamknij</button>
-        </section>
-      )}
-
       {report && excelRows.length > 0 && (
         <div className="summary r14-summary">
           <span>Stan na: <b>{report.asOfDatePl || formatReportTitleDate(asOfDate)}</b></span>
@@ -828,30 +715,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         </div>
       )}
 
-      {report && (report.diagnostics?.hidden_watch?.length ?? 0) > 0 && (
-        <div className="hint inline-warning warehouse-hidden-watch">
-          {report.diagnostics.hidden_watch.map(h => (
-            <p key={h.product_name}>
-              {h.reason === 'brak_wierszy' ? (
-                <>
-                  <b>{h.product_name}</b> — brak pozycji w bazie. Importuj osobno <b>sierpień</b>, <b>wrzesień</b>, <b>październik</b> (w czerwcu/lipcu w Excelu nie ma jabłka przemysłowego).
-                </>
-              ) : (
-                <>
-                  <b>{h.product_name}</b> nie w tabeli (raport pokazuje tylko stan &gt; 0 lub ruch w wybranym miesiącu).
-                  Surowe saldo Σ PZ−WZ: <b>{h.raw_remaining_kg.toLocaleString('pl-PL')} kg</b>
-                  {' '}(PZ: {h.pz_kg.toLocaleString('pl-PL')} kg w {h.pz_count} liniach,
-                  WZ: {h.wz_kg.toLocaleString('pl-PL')} kg w {h.wz_count} liniach).
-                  {h.product_name === 'Jabłko przemysłowe' && (
-                    <> Porównanie z Comarch na <b>31.10</b>: ustaw datę stanu <b>2026-10-31</b> (na listopadzie „Przybyło/Ubyło” = 0).</>
-                  )}
-                </>
-              )}
-            </p>
-          ))}
-        </div>
-      )}
-
       {rows.length > 0 ? (
         <div className="table-wrap docs-table-wrap">
           <table className="docs-table r14-table">
@@ -864,16 +727,13 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                 <th className="num">Ilość końcowa<br /><small>{report?.asOfDatePl || ''}</small></th>
                 <th className="num">Wartość zakupu<br /><small>netto</small></th>
                 <th className="num">Wartość końcowa<br /><small>netto</small></th>
-                <th>Szczegóły<br /><small>w bazie · podział wartości</small></th>
+                <th>Szczegóły</th>
               </tr>
             </thead>
             <tbody>
               {rows.map(row => {
                 const key = row.product_key || row.product_name
-                const panelWh = `wh:${key}`
-                const panelVal = `val:${key}`
-                const openWh = expanded.has(panelWh)
-                const openVal = expanded.has(panelVal)
+                const open = expanded.has(key)
                 return (
                   <React.Fragment key={key}>
                     <tr>
@@ -889,68 +749,17 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                           <small className="hint"> ({Number(row.remaining_missing_price_kg).toLocaleString('pl-PL')} kg bez ceny)</small>
                         )}
                       </td>
-                      <td className="r14-detail-actions">
-                        {(row.warehouse_pz_count > 0) && (
-                          <button
-                            type="button"
-                            className="mini secondary"
-                            title={`Wszystkie PZ wgrane do ${report?.asOfDatePl || 'daty stanu'} (Σ PZ−WZ)`}
-                            onClick={() => toggleExpand(panelWh)}
-                          >
-                            {openWh ? 'Ukryj' : `${row.warehouse_pz_count} PZ w bazie`}
-                          </button>
-                        )}
-                        {(row.lot_lines?.length > 0) && (
-                          <button
-                            type="button"
-                            className="mini secondary"
-                            title="Tylko partie użyte do wyliczenia wartości końcowej (FIFO od najstarszego PZ)"
-                            onClick={() => toggleExpand(panelVal)}
-                          >
-                            {openVal ? 'Ukryj' : `${row.lot_lines.length} PZ → wartość`}
+                      <td>
+                        {row.lot_lines?.length > 0 && (
+                          <button type="button" className="mini secondary" onClick={() => toggleExpand(key)}>
+                            {open ? 'Ukryj' : `${row.lot_lines.length} PZ`}
                           </button>
                         )}
                       </td>
                     </tr>
-                    {openWh && (row.warehouse_pz_lines?.length > 0) && (
+                    {open && row.lot_lines?.length > 0 && (
                       <tr className="r14-detail-row">
                         <td colSpan={8}>
-                          <p className="hint">
-                            <b>PZ w bazie</b> (do {report?.asOfDatePl || 'daty stanu'}): {row.warehouse_pz_count.toLocaleString('pl-PL')} dokumentów ·{' '}
-                            {Number(row.warehouse_pz_kg || 0).toLocaleString('pl-PL')} kg przyjęć. Tu szukaj np. PZ/006/15/10/2026.
-                          </p>
-                          <div className="r14-pz-scroll">
-                            <table className="r14-lot-table">
-                              <thead>
-                                <tr>
-                                  <th>Nr PZ</th>
-                                  <th>Data</th>
-                                  <th className="num">Ilość kg</th>
-                                  <th className="num">Cena netto</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {row.warehouse_pz_lines.map((line, idx) => (
-                                  <tr key={`wh-${line.pz_no}-${line.pz_date}-${line.qty}-${idx}`}>
-                                    <td>{line.pz_no}</td>
-                                    <td>{line.pz_date}</td>
-                                    <td className="num">{Number(line.qty || 0).toLocaleString('pl-PL')}</td>
-                                    <td className="num">{line.unit_price_net != null ? formatPlMoney(line.unit_price_net) : '—'}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                    {openVal && row.lot_lines?.length > 0 && (
-                      <tr className="r14-detail-row">
-                        <td colSpan={8}>
-                          <p className="hint">
-                            <b>Podział pod wartość końcową</b> — tylko {row.lot_lines.length} najstarszych partii PZ
-                            pokrywających {Number(row.remaining_kg || 0).toLocaleString('pl-PL')} kg stanu (nie pełna lista magazynowa).
-                          </p>
                           <table className="r14-lot-table">
                             <thead>
                               <tr>
@@ -963,7 +772,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                             </thead>
                             <tbody>
                               {row.lot_lines.map(line => (
-                                <tr key={`val-${line.pz_no}-${line.pz_date}-${line.remaining_kg}`}>
+                                <tr key={`${line.pz_no}-${line.pz_date}-${line.remaining_kg}`}>
                                   <td>{line.pz_no}</td>
                                   <td>{line.pz_date}</td>
                                   <td className="num">{Number(line.remaining_kg || 0).toLocaleString('pl-PL')}</td>
@@ -994,9 +803,9 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             </tfoot>
           </table>
         </div>
-      ) : excelRows.length > 0 && !loading && report ? (
+      ) : excelRows.length > 0 && !loading && report && (
         <p className="hint">{report.message}</p>
-      ) : null}
+      )}
     </div>
   )
 }

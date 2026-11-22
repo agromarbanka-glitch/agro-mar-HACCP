@@ -4,17 +4,12 @@
  */
 import { warehouseValueDedupKey } from './reportExcelStore'
 import {
-  classifyStockValueOperation,
+  classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument
 } from './excelImport'
-import {
-  EXCEL_REPORT_VERSION,
-  resolveStockValueMovementDate,
-  excelRowBusinessDedupKey,
-  collectBusinessDuplicateLineIds
-} from './monthlyStockValueFromExcel'
+import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
 export const WAREHOUSE_VALUE_STORE_VERSION = '1.7'
 const INSERT_CHUNK = 250
@@ -50,7 +45,7 @@ function lineToExcelRow(stored, batchFileName = '') {
 }
 
 function resolveWarehouseValueIssueDate(row, documentNo) {
-  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
+  const operation = classifyOperation(row.documentType, documentNo)
   if (operation === 'pominiete_mm') return ''
   const opKind = operation === 'sprzedaz' ? 'sprzedaz' : 'przyjecie'
   return resolveStockValueMovementDate(row.issueDate, documentNo, opKind)
@@ -62,7 +57,7 @@ function resolveWarehouseValueIssueDate(row, documentNo) {
 export function buildWarehouseValueDedupKey(row, { sourceFile = '' } = {}) {
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
   if (!documentNo || !row.productName || !Number(row.qty)) return null
-  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
+  const operation = classifyOperation(row.documentType, documentNo)
   if (operation === 'pominiete_mm') return null
   const issueDate = resolveWarehouseValueIssueDate(row, documentNo)
   if (!issueDate || issueDate === '0000-01-01') return null
@@ -72,7 +67,7 @@ export function buildWarehouseValueDedupKey(row, { sourceFile = '' } = {}) {
 function excelRowToInsert(row, batchId, sourceFile = '') {
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
   if (!documentNo) return { payload: null, reason: 'no_doc' }
-  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
+  const operation = classifyOperation(row.documentType, documentNo)
   if (operation === 'pominiete_mm' || !row.productName || !Number(row.qty)) {
     return { payload: null, reason: 'invalid' }
   }
@@ -408,33 +403,6 @@ export async function appendWarehouseValueFromParsedFiles(client, parsedFiles, {
   const totalSkippedNoDate = results.reduce((s, r) => s + (r.skippedNoDate || 0), 0)
   if (totalAdded > 0) invalidateWarehouseValueLinesCache()
   return { results, totalAdded, totalDuplicates: totalDup, totalSkippedNoDate }
-}
-
-const DELETE_CHUNK = 200
-
-/**
- * Kasuje młodsze kopie tej samej PZ/WZ (zostaje najstarszy wiersz w bazie — jak Comarch).
- */
-export async function purgeBusinessDuplicateWarehouseLines(client, { onProgress } = {}) {
-  if (!client) throw new Error('Brak połączenia z Supabase.')
-  onProgress?.('Wczytywanie wierszy z bazy…')
-  const rows = await fetchAllWarehouseValueLines(client, { forceRefresh: true })
-  const ids = collectBusinessDuplicateLineIds(rows)
-  if (!ids.length) {
-    return { removed: 0, kept: rows.length }
-  }
-  let removed = 0
-  const totalChunks = Math.ceil(ids.length / DELETE_CHUNK)
-  for (let i = 0; i < ids.length; i += DELETE_CHUNK) {
-    const chunk = ids.slice(i, i + DELETE_CHUNK)
-    const { error } = await client.from('warehouse_value_lines').delete().in('id', chunk)
-    if (error) throw error
-    removed += chunk.length
-    onProgress?.(`Usuwanie powtórzeń… ${removed.toLocaleString('pl-PL')} / ${ids.length.toLocaleString('pl-PL')}`)
-    await yieldToUi()
-  }
-  invalidateWarehouseValueLinesCache()
-  return { removed, kept: rows.length - removed, chunks: totalChunks }
 }
 
 export async function deleteWarehouseValueBatch(client, batchId) {

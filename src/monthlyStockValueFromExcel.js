@@ -7,24 +7,20 @@
  * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
  * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
- * v2.10.4: WZ+WZK parowane 1:1; powtórki między plikami (inny nr, ta sama data·produkt·kg).
- * v2.10.3: WZK nie jako luzne PZ przy istniejącym WZ (korekta wydania).
- * v2.10.2: jeden WZ na produkt+miesiąc+ilość (duplikat eksportu Comarch).
  */
 import {
-  classifyStockValueOperation,
+  classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument,
-  isWzkDocument,
   isWzMonthYearDocument,
   monthYearFromDocumentNo,
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
-import { normalizeProductKey, warehouseValueDedupKey, summarizeBusinessDuplicateLines } from './reportExcelStore'
+import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.10.4'
+export const EXCEL_REPORT_VERSION = '2.10'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -149,318 +145,6 @@ function prepareReportRows(excelRows) {
   return forwardFillExcelRows(rows)
 }
 
-export function resolveStockValueRowOperation(row) {
-  if (!row?.productName || !Number(row.qty)) return null
-  if (isMmDocument(row.documentType, row.documentNo)) return null
-  const documentNo = normalizeDocumentNo(row.documentNo)
-  if (!documentNo) return null
-  const signed = Number(row.qty)
-  if (isWzkDocument(row.documentType, documentNo)) {
-    if (!Number.isFinite(signed) || signed === 0) return null
-    if (signed > 0) {
-      return { operation: 'przyjecie', documentNo, qty: roundKg(Math.abs(signed)) }
-    }
-    return { operation: 'sprzedaz', documentNo, qty: roundKg(Math.abs(signed)) }
-  }
-  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
-  if (operation === 'pominiete_mm') return null
-  return { operation, documentNo, qty: roundKg(Math.abs(signed)) }
-}
-
-function warehouseRowOperation(row) {
-  return resolveStockValueRowOperation(row)
-}
-
-/**
- * Eksport Comarch: ten sam kg WZ na kilku numerach w jednym miesiącu — w raporcie liczy się raz.
- */
-function collapseParallelWzExportDuplicates(rows) {
-  const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-  const seen = new Set()
-  const out = []
-  let removed = 0
-  for (const row of sorted) {
-    const op = resolveStockValueRowOperation(row)
-    if (!op || op.operation !== 'sprzedaz') {
-      out.push(row)
-      continue
-    }
-    const issueDate = resolveStockValueMovementDate(row.issueDate, op.documentNo, 'sprzedaz')
-      || resolveDocumentIssueDate(row.issueDate, op.documentNo)
-      || String(row.issueDate || '').slice(0, 10)
-    if (!issueDate) {
-      out.push(row)
-      continue
-    }
-    const key = `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${op.qty}`
-    if (seen.has(key)) {
-      removed += 1
-      continue
-    }
-    seen.add(key)
-    out.push(row)
-  }
-  return { rows: out, removed }
-}
-
-function movementBucketKey(row, op) {
-  const issueDate =
-    resolveStockValueMovementDate(row.issueDate, op.documentNo, op.operation)
-    || resolveDocumentIssueDate(row.issueDate, op.documentNo)
-    || String(row.issueDate || '').slice(0, 10)
-  if (!issueDate) return ''
-  return `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${op.qty}`
-}
-
-function rowMovementIssueDate(row, operation, documentNo) {
-  return (
-    resolveStockValueMovementDate(row.issueDate, documentNo, operation === 'przyjecie' ? 'przyjecie' : 'sprzedaz')
-    || resolveDocumentIssueDate(row.issueDate, documentNo)
-    || String(row.issueDate || '').slice(0, 10)
-  )
-}
-
-/**
- * Ten sam ruch w nowym eksporcie Comarch (inny numer dokumentu) — zostaw starszy wiersz w bazie.
- */
-function collapseCrossFileMovementShadowDuplicates(rows) {
-  const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-  const shadow = new Map()
-  const out = []
-  let removed = 0
-  for (const row of sorted) {
-    const op = resolveStockValueRowOperation(row)
-    if (!op) {
-      out.push(row)
-      continue
-    }
-    const issueDate = rowMovementIssueDate(row, op.operation, op.documentNo)
-    if (!issueDate) {
-      out.push(row)
-      continue
-    }
-    const key = `${op.operation}|${stockValueProductKey(row.productName)}|${issueDate}|${op.qty}`
-    const priorDoc = shadow.get(key)
-    if (priorDoc && priorDoc !== op.documentNo) {
-      removed += 1
-      continue
-    }
-    if (!priorDoc) shadow.set(key, op.documentNo)
-    out.push(row)
-  }
-  return { rows: out, removed }
-}
-
-/**
- * Korekta WZ+WZK: anuluj pary 1:1 (ten sam produkt, miesiąc, kg); reszta WZK+ liczy się jak PZ.
- */
-function applyWzWzkPairwiseCancellation(rows) {
-  const groups = new Map()
-  for (const row of rows || []) {
-    if (!row?.productName || !Number(row.qty)) continue
-    if (isMmDocument(row.documentType, row.documentNo)) continue
-    const documentNo = normalizeDocumentNo(row.documentNo)
-    if (!documentNo) continue
-    const signed = Number(row.qty)
-    const isWzk = isWzkDocument(row.documentType, row.documentNo)
-    const qty = roundKg(Math.abs(signed))
-    const issueDate = rowMovementIssueDate(row, isWzk && signed > 0 ? 'przyjecie' : 'sprzedaz', documentNo)
-    if (!issueDate) continue
-    const bucket = `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${qty}`
-    if (!groups.has(bucket)) groups.set(bucket, { wz: [], wzkPlus: [] })
-    const g = groups.get(bucket)
-    if (isWzk && signed > 0) g.wzkPlus.push(row)
-    else if (!isWzk) {
-      const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
-      if (operation === 'sprzedaz') g.wz.push(row)
-    }
-  }
-
-  const skip = new Set()
-  let cancelled = 0
-  for (const g of groups.values()) {
-    if (!g.wz.length || !g.wzkPlus.length) continue
-    const wzSorted = [...g.wz].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-    const wzkSorted = [...g.wzkPlus].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-    const pairs = Math.min(wzSorted.length, wzkSorted.length)
-    for (let i = 0; i < pairs; i++) {
-      skip.add(wzSorted[i])
-      skip.add(wzkSorted[i])
-      cancelled += 2
-    }
-  }
-
-  return {
-    rows: (rows || []).filter(r => !skip.has(r)),
-    cancelled
-  }
-}
-
-function prepareWarehouseValueReportRows(excelRows) {
-  let filled = prepareReportRows(excelRows || [])
-  const parallelWz = collapseParallelWzExportDuplicates(filled)
-  filled = parallelWz.rows
-  const wzkCancel = applyWzWzkPairwiseCancellation(filled)
-  filled = wzkCancel.rows
-  const shadow = collapseCrossFileMovementShadowDuplicates(filled)
-  return {
-    rows: shadow.rows,
-    parallelWzRemoved: parallelWz.removed,
-    wzkCancelledRows: wzkCancel.cancelled,
-    shadowDuplicatesRemoved: shadow.removed
-  }
-}
-
-/** Klucz jak Comarch: operacja + nr + produkt raportu + ilość (bez nazwy pliku). */
-export function excelRowBusinessDedupKey(row) {
-  const op = warehouseRowOperation(row)
-  if (!op) return null
-  return `${op.operation}|${op.documentNo}|${stockValueProductKey(row.productName)}|${op.qty}`
-}
-
-/**
- * Ta sama PZ/WZ z kilku importów — w raporcie zostaw pierwszy wg id w bazie.
- * Opcjonalne (checkbox w UI); domyślnie Σ wszystkich wierszy jak v2.10.
- */
-/** Id wierszy w Supabase do usunięcia — zostawia najstarszy wpis na operację (comarch). */
-export function collectBusinessDuplicateLineIds(rows) {
-  const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-  const seen = new Set()
-  const toDelete = []
-  for (const row of sorted) {
-    const key = excelRowBusinessDedupKey(row)
-    if (!key || !row._lineId) continue
-    if (seen.has(key)) toDelete.push(row._lineId)
-    else seen.add(key)
-  }
-  return toDelete
-}
-
-export function collapseDuplicateWarehouseRowsForReport(rows) {
-  const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
-  const seen = new Map()
-  const out = []
-  let removed = 0
-  for (const row of sorted) {
-    const key = excelRowBusinessDedupKey(row)
-    if (!key) continue
-    if (seen.has(key)) {
-      removed += 1
-      const keep = seen.get(key)
-      const hasPrice = Number(row.unitNetPrice) > 0
-      const keepHasPrice = Number(keep?.unitNetPrice) > 0
-      if (hasPrice && !keepHasPrice) {
-        const idx = out.indexOf(keep)
-        if (idx >= 0) out[idx] = row
-        seen.set(key, row)
-      }
-      continue
-    }
-    seen.set(key, row)
-    out.push(row)
-  }
-  return { rows: out, removed }
-}
-
-/** Jak bardzo powtórzenia między plikami zmieniają saldo per produkt (Δ ≈ +PZ − WZ z nadmiarowych kopii). */
-export function summarizeBusinessDuplicateImpactByProduct(rows) {
-  const sorted = [...(rows || [])].sort((a, b) => (a._lineId || 0) - (b._lineId || 0))
-  const seen = new Set()
-  const impact = new Map()
-  for (const row of sorted) {
-    const op = warehouseRowOperation(row)
-    const key = excelRowBusinessDedupKey(row)
-    if (!op || !key) continue
-    const label = stockValueReportProductName(row.productName)
-    if (!seen.has(key)) {
-      seen.add(key)
-      continue
-    }
-    const pKey = stockValueProductKey(row.productName)
-    if (!impact.has(pKey)) impact.set(pKey, { product_name: label, extraPz: 0, extraWz: 0 })
-    const bucket = impact.get(pKey)
-    if (op.operation === 'przyjecie') bucket.extraPz += op.qty
-    else if (op.operation === 'sprzedaz') bucket.extraWz += op.qty
-  }
-  return [...impact.values()]
-    .map(p => ({
-      ...p,
-      extraPz: roundKg(p.extraPz),
-      extraWz: roundKg(p.extraWz),
-      netBalanceBias: roundKg(p.extraPz - p.extraWz)
-    }))
-    .filter(p => p.extraPz > 0.001 || p.extraWz > 0.001)
-    .sort((a, b) => Math.abs(b.extraWz - b.extraPz) - Math.abs(a.extraWz - a.extraPz))
-}
-
-/** Produkty, które użytkownik porównuje z Comarch — diagnostyka gdy znikają z tabeli (saldo ≤ 0). */
-export const WATCH_REPORT_PRODUCTS = ['Jabłko przemysłowe', 'Malina świeża PW']
-
-function countRawLinesForReportProduct(excelRows, productLabel) {
-  const key = stockValueProductKey(productLabel)
-  let n = 0
-  for (const r of excelRows || []) {
-    if (!r?.productName) continue
-    if (stockValueProductKey(r.productName) === key) n += 1
-  }
-  return n
-}
-
-function warehouseActivityToDate(lines, productKey, cutoffDate, openingCutoff) {
-  let pz = 0
-  let wz = 0
-  let pzKg = 0
-  let wzKg = 0
-  let openPz = 0
-  let openWz = 0
-  for (const l of lines) {
-    if (l.productKey !== productKey || !l.issueDate || l.issueDate > cutoffDate) continue
-    if (l.operation === 'przyjecie') {
-      if (l.issueDate <= openingCutoff) openPz += l.qty
-      pz += 1
-      pzKg += l.qty
-    } else if (l.operation === 'sprzedaz') {
-      if (l.issueDate <= openingCutoff) openWz += l.qty
-      wz += 1
-      wzKg += l.qty
-    }
-  }
-  return {
-    pz,
-    wz,
-    pzKg: roundKg(pzKg),
-    wzKg: roundKg(wzKg),
-    rawOpening: roundKg(openPz - openWz),
-    rawRemaining: roundKg(pzKg - wzKg)
-  }
-}
-
-export function simulateReportWithoutBatch(excelRows, asOfDate, batchId, options = {}) {
-  const base = computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, options)
-  const filtered = (excelRows || []).filter(r => r._batchId !== batchId)
-  const without = computeMonthlyStockValueReportFromExcel(filtered, asOfDate, options)
-  const watchNames = ['Jabłko przemysłowe', 'Malina świeża PW', 'Jabłko na obierkę', 'Malina świeża 1']
-  const deltas = watchNames.map(name => {
-    const a = base.rows.find(r => r.product_name === name)
-    const b = without.rows.find(r => r.product_name === name)
-    return {
-      product_name: name,
-      remaining_now: roundKg(a?.remaining_kg || 0),
-      remaining_without: roundKg(b?.remaining_kg || 0),
-      delta: roundKg((b?.remaining_kg || 0) - (a?.remaining_kg || 0))
-    }
-  })
-  return {
-    batchId,
-    rowsLeft: filtered.length,
-    removedRows: (excelRows?.length || 0) - filtered.length,
-    totalsNow: base.totals,
-    totalsWithout: without.totals,
-    productDeltas: deltas,
-    businessDuplicates: without.diagnostics?.businessDuplicates
-  }
-}
-
 function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
@@ -483,9 +167,12 @@ function clampStockKg(n) {
 function normalizeExcelRows(rows) {
   const out = []
   for (const row of rows || []) {
-    const op = resolveStockValueRowOperation(row)
-    if (!op) continue
-    const { operation, documentNo, qty } = op
+    if (!row.productName || !Number(row.qty)) continue
+    if (isMmDocument(row.documentType, row.documentNo)) continue
+    const documentNo = normalizeDocumentNo(row.documentNo)
+    if (!documentNo) continue
+    const operation = classifyOperation(row.documentType, documentNo)
+    if (operation === 'pominiete_mm') continue
     const rawIssueDate = resolveDocumentIssueDate(row.issueDate, documentNo) || String(row.issueDate || '').slice(0, 10)
     const issueDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
     if (!issueDate) continue
@@ -498,7 +185,7 @@ function normalizeExcelRows(rows) {
       rawIssueDate,
       productName: label,
       productKey: stockValueProductKey(row.productName),
-      qty,
+      qty: Math.abs(Number(row.qty) || 0),
       unitPriceNet: unitPrice > 0 ? unitPrice : null,
       rowNo: row.rowNo ?? null,
       lineId: row._lineId || `x-${out.length}`
@@ -537,7 +224,7 @@ function ensureRow(map, key, label) {
  * @param {Array} excelRows – wynik readAgromarExcel().rows lub odczyt z Supabase
  * @param {string} asOfDate – RRRR-MM-DD (lub RRRR-MM → ostatni dzień miesiąca)
  */
-export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { fileNames = [], dedupeCrossFile = false } = {}) {
+export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { fileNames = [] } = {}) {
   const bounds = parseAsOfDate(asOfDate)
   if (!bounds) {
     return {
@@ -553,16 +240,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const { monthStart, periodEnd, yearMonth } = bounds
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
-  const prepared = prepareWarehouseValueReportRows(excelRows)
-  let filled = prepared.rows
-  let reportDedupeRemoved = 0
-  if (dedupeCrossFile) {
-    const collapsed = collapseDuplicateWarehouseRowsForReport(filled)
-    filled = collapsed.rows
-    reportDedupeRemoved = collapsed.removed
-  }
-  const businessDuplicates = summarizeBusinessDuplicateLines(filled)
-  const duplicateImpactByProduct = dedupeCrossFile ? [] : summarizeBusinessDuplicateImpactByProduct(prepareReportRows(excelRows || []))
+  const filled = prepareReportRows(excelRows || [])
   const lines = normalizeExcelRows(filled)
 
   if (!lines.length) {
@@ -665,15 +343,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
         String(a.pz_no || '').localeCompare(String(b.pz_no || '')) ||
         (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0)
       )
-    row.warehouse_pz_lines = lots.map(lot => ({
-      pz_no: lot.pz_no,
-      pz_date: lot.pz_date,
-      qty: roundKg(lot.qty),
-      unit_price_net: lot.unit_price_net
-    }))
-    row.warehouse_pz_count = row.warehouse_pz_lines.length
-    row.warehouse_pz_kg = roundKg(row.warehouse_pz_lines.reduce((s, l) => s + l.qty, 0))
-
     if (lots.length && row.remaining_kg > 0) {
       let left = row.remaining_kg
       for (const lot of lots) {
@@ -707,10 +376,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       remaining_value: roundMoney(row.remaining_value),
       purchased_missing_price_kg: roundKg(row.purchased_missing_price_kg),
       remaining_missing_price_kg: roundKg(row.remaining_missing_price_kg),
-      lot_lines: row.lot_lines || [],
-      warehouse_pz_lines: row.warehouse_pz_lines || [],
-      warehouse_pz_count: row.warehouse_pz_count || 0,
-      warehouse_pz_kg: roundKg(row.warehouse_pz_kg || 0)
+      lot_lines: row.lot_lines || []
     }))
     .filter(r =>
       r.opening_kg > 0.0005
@@ -722,39 +388,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       String(a.product_group || '').localeCompare(String(b.product_group || '')) ||
       String(a.product_name || '').localeCompare(String(b.product_name || ''))
     )
-
-  const visibleKeys = new Set(rows.map(r => r.product_key))
-  const hidden_watch = []
-  for (const name of WATCH_REPORT_PRODUCTS) {
-    if (visibleKeys.has(stockValueProductKey(name))) continue
-    const key = stockValueProductKey(name)
-    const row = periodMap.get(key)
-    const act = warehouseActivityToDate(lines, key, cutoffDate, openingCutoff)
-    const rawDbLines = countRawLinesForReportProduct(excelRows, name)
-    if (!row && act.pz + act.wz === 0 && rawDbLines === 0) {
-      hidden_watch.push({
-        product_name: name,
-        reason: 'brak_wierszy',
-        raw_db_lines: 0,
-        raw_remaining_kg: 0
-      })
-      continue
-    }
-    const rawRem = row ? roundKg(row._cum_pz - row._cum_wz) : act.rawRemaining
-    hidden_watch.push({
-      product_name: name,
-      reason: rawRem < -0.001 ? 'ujemny_stan' : rawRem > 0.0005 ? 'ukryte_mimo_dodatniego' : 'zero_stan',
-      raw_remaining_kg: rawRem,
-      opening_raw_kg: row ? roundKg(row._opening_pz - row._opening_wz) : act.rawOpening,
-      purchased_kg: roundKg(row?.purchased_kg || 0),
-      sold_kg: roundKg(row?.sold_kg || 0),
-      pz_count: act.pz,
-      wz_count: act.wz,
-      pz_kg: act.pzKg,
-      wz_kg: act.wzKg,
-      raw_db_lines: rawDbLines
-    })
-  }
 
   const totals = {
     opening_kg: roundKg(rows.reduce((s, r) => s + r.opening_kg, 0)),
@@ -781,38 +414,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzClampedToDocMonth > 0) {
     message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
   }
-  if (prepared.parallelWzRemoved > 0) {
-    message += ` Sklejono ${prepared.parallelWzRemoved} powtórnych WZ (ten sam produkt, miesiąc i kg w eksporcie Comarch).`
-  }
-  if (prepared.wzkCancelledRows > 0) {
-    message += ` Skasowano ${prepared.wzkCancelledRows} linii w parach WZ+WZK (korekta wydania).`
-  }
-  if (prepared.shadowDuplicatesRemoved > 0) {
-    message += ` Pominięto ${prepared.shadowDuplicatesRemoved} powtórnych ruchów z nowszego importu (ten sam dzień·produkt·kg, inny nr dokumentu).`
-  }
-  if (!dedupeCrossFile && businessDuplicates.duplicateLines > 0) {
-    message += ` UWAGA: ${businessDuplicates.duplicateLines} powtórnych operacji PZ/WZ z różnych importów (ok. +${businessDuplicates.duplicatePzKg.toLocaleString('pl-PL')} kg PZ i +${businessDuplicates.duplicateWzKg.toLocaleString('pl-PL')} kg WZ w saldzie). Włącz „Jedna operacja raz” albo użyj „Test bez partii”.`
-  }
-  if (dedupeCrossFile && reportDedupeRemoved > 0) {
-    message += ` Tryb Comarch: pominięto ${reportDedupeRemoved} powtórnych linii między importami (zostawiono starszy wpis w bazie).`
-  }
-  const bigBias = duplicateImpactByProduct.filter(p => Math.abs(p.extraWz - p.extraPz) > 500)
-  if (!dedupeCrossFile && bigBias.length) {
-    const hint = bigBias.slice(0, 3).map(p => `${p.product_name}: nadmiar ~${roundKg(p.extraWz - p.extraPz).toLocaleString('pl-PL')} kg WZ vs PZ w powtórzeniach`).join('; ')
-    message += ` Rozjazd z powtórzeń: ${hint}.`
-  }
-
-  const jabHidden = hidden_watch.find(h => h.product_name === 'Jabłko przemysłowe')
-  if (jabHidden) {
-    if (jabHidden.reason === 'brak_wierszy') {
-      message += ' Jabłko przemysłowe: brak wierszy w bazie — wgraj sierpień, wrzesień i październik (w czerwcu/lipcu tego surowca nie ma w Excelu).'
-    } else {
-      message += ` Jabłko przemysłowe ukryte w tabeli: Σ PZ−WZ=${jabHidden.raw_remaining_kg.toLocaleString('pl-PL')} kg (${jabHidden.pz_count} PZ / ${jabHidden.wz_count} WZ do daty stanu; wierszy w bazie: ${jabHidden.raw_db_lines}). Cel Comarch na 31.10: 11 378 kg.`
-      if (jabHidden.raw_remaining_kg < -0.001) {
-        message += ' Nadmiar WZ — usuń podwójne partie sierpień/wrzesień/październik (przycisk Usuń przy partii), nie „Usuń powtórzenia”.'
-      }
-    }
-  }
 
   const reportPayload = {
     source: 'excel',
@@ -830,21 +431,13 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     diagnostics: {
       inputRows: (excelRows || []).length,
       filledRows: filled.length,
-      businessDuplicates,
-      duplicateImpactByProduct,
-      dedupeCrossFile,
-      reportDedupeRemoved,
       excelLines: lines.length,
       pzLines,
       wzLines,
       linesWithPrice,
       wzAfterCutoff,
       wzClampedToDocMonth,
-      parallelWzCollapsed: prepared.parallelWzRemoved,
-      wzkCancelledRows: prepared.wzkCancelledRows,
-      shadowDuplicatesRemoved: prepared.shadowDuplicatesRemoved,
       openingCutoff,
-      hidden_watch,
       engine: 'cumulative_pz_minus_wz_v28'
     },
     message
@@ -906,9 +499,10 @@ function dedupKeyFromRawRow(row, sourceFile = '') {
   if (!row?.productName || !Number(row.qty)) return null
   const documentNo = normalizeDocumentNo(row.documentNo)
   if (!documentNo) return null
-  const op = resolveStockValueRowOperation(row)
-  if (!op) return null
-  const issueDate = resolveStockValueMovementDate(row.issueDate, op.documentNo, op.operation)
+  const operation = classifyOperation(row.documentType, documentNo)
+  if (operation === 'pominiete_mm') return null
+  const opKind = operation === 'sprzedaz' ? 'sprzedaz' : 'przyjecie'
+  const issueDate = resolveStockValueMovementDate(row.issueDate, documentNo, opKind)
     || resolveDocumentIssueDate(row.issueDate, documentNo)
     || String(row.issueDate || '').slice(0, 10)
   if (!issueDate || issueDate === '0000-01-01') return null
@@ -917,7 +511,7 @@ function dedupKeyFromRawRow(row, sourceFile = '') {
 
 /** Statystyki PZ/WZ wg miesiąca ruchu (do audytu importu). */
 export function computeWarehouseValueMonthStats(excelRows) {
-  const filled = prepareWarehouseValueReportRows(excelRows).rows
+  const filled = prepareReportRows(excelRows || [])
   const lines = normalizeExcelRows(filled)
   const byMonth = new Map()
   for (const line of lines) {
@@ -1009,18 +603,20 @@ export function auditWarehouseValueImport(excelRows, dbRows, { yearMonth = '', p
     for (const row of filledPart) {
     if (!row.productName || !Number(row.qty)) continue
     if (isMmDocument(row.documentType, row.documentNo)) continue
-    const op = resolveStockValueRowOperation(row)
-    if (!op) continue
-    const rawDate = resolveDocumentIssueDate(row.issueDate, op.documentNo)
-    const moveDate = resolveStockValueMovementDate(row.issueDate, op.documentNo, op.operation)
+    const documentNo = normalizeDocumentNo(row.documentNo)
+    if (!documentNo) continue
+    const operation = classifyOperation(row.documentType, documentNo)
+    if (operation === 'pominiete_mm') continue
+    const rawDate = resolveDocumentIssueDate(row.issueDate, documentNo)
+    const moveDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
     if (!moveDate) {
-      skippedNoDate.push({ documentNo: op.documentNo, productName: row.productName, qty: row.qty, operation: op.operation, fileName })
-    } else if (!rawDate && op.operation === 'sprzedaz') {
+      skippedNoDate.push({ documentNo, productName: row.productName, qty: row.qty, operation, fileName })
+    } else if (!rawDate && operation === 'sprzedaz') {
       skippedNoDate.push({
-        documentNo: op.documentNo,
+        documentNo,
         productName: row.productName,
         qty: row.qty,
-        operation: op.operation,
+        operation,
         inferredDate: moveDate,
         fileName
       })

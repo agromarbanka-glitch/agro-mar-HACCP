@@ -480,27 +480,10 @@ export async function readAgromarExcel(file, { skipMm = true, includeUnitPrice =
   return { rows: resultRows, skippedMmCount, headerDocRows, rowsWithoutDoc }
 }
 
-export function isWzkDocument(documentType, documentNo) {
-  const type = String(documentType || '').trim().toUpperCase()
-  const norm = normalizeDocumentNo(documentNo).toUpperCase()
-  return type === 'WZK' || norm.startsWith('WZK/')
-}
-
-/** Magazyn wartości (R14): WZK nie jest zwykłym WZ — znak ilości jak w Comarchu. */
-export function classifyStockValueOperation(documentType, documentNo, rawQty) {
-  if (isWzkDocument(documentType, documentNo)) {
-    const n = Number(rawQty)
-    if (!Number.isFinite(n) || n === 0) return 'pominiete_mm'
-    return n > 0 ? 'przyjecie' : 'sprzedaz'
-  }
-  return classifyOperation(documentType, documentNo)
-}
-
 export function classifyOperation(documentType, documentNo) {
   const type = String(documentType || '').trim().toUpperCase()
   const text = `${documentType} ${documentNo}`.toUpperCase()
   if (isMmDocument(documentType, documentNo)) return 'pominiete_mm'
-  if (isWzkDocument(documentType, documentNo)) return 'sprzedaz'
   if (type === 'PZ' || text.includes('PZ')) return 'przyjecie'
   if (type === 'WZ' || type === 'FV' || type === 'FS' || text.includes('WZ') || text.includes('FV') || text.includes('FS') || text.includes('RR')) return 'sprzedaz'
   return 'przyjecie'
