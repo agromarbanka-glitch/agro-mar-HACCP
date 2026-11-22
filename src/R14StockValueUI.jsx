@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Printer, RefreshCcw, Upload, FileSpreadsheet, Save, Trash2, Database } from 'lucide-react'
+import { AlertTriangle, Printer, RefreshCcw, Upload, FileSpreadsheet, Save, Trash2, Database } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import {
   formatPlMoney,
@@ -773,6 +773,24 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       )}
 
       {report && excelRows.length > 0 && (
+        <div className="warning inline-warning r14-engine-banner" style={{ marginBottom: '0.75rem' }}>
+          <AlertTriangle size={18} />
+          <div>
+            <b>Raport {report.diagnostics?.engineVersion || EXCEL_REPORT_VERSION}</b> · Σ PZ−Σ WZ
+            {excludedBatchIds.size > 0 && (
+              <> · wyłączono {excludedBatchIds.size} import(ów) ({rowsForReport.length.toLocaleString('pl-PL')} wierszy)</>
+            )}
+            {report.diagnostics?.dedupeRemoved > 0 && (
+              <> · dedup {report.diagnostics.dedupeRemoved} linii</>
+            )}
+            {!report?.diagnostics?.comarchCompare?.length && (
+              <> · <span className="hint">Brak tabeli Comarch — przeładuj aplikację (Ctrl+F5), silnik min. 2.10.2</span></>
+            )}
+          </div>
+        </div>
+      )}
+
+      {report && excelRows.length > 0 && (
         <div className="summary r14-summary">
           <span>Stan na: <b>{report.asOfDatePl || formatReportTitleDate(asOfDate)}</b></span>
           <span>Stan początkowy{report.diagnostics?.openingCutoff ? ` (${formatReportTitleDate(report.diagnostics.openingCutoff)})` : ''}: <b>{Number(report.totals?.opening_kg || 0).toLocaleString('pl-PL')} kg</b></span>
@@ -790,7 +808,8 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
 
       {report?.diagnostics?.comarchCompare?.length > 0 && (
         <section className="card stock-excel-panel">
-          <h3>Porównanie z Comarch (31.10.2026)</h3>
+          <h3>Cel Comarch na 31.10.2026 — porównanie ilości końcowych</h3>
+          <p className="hint">Dotyczy stanu jak w zestawieniu Comarch (niezależnie od wybranej daty np. 30.11 — przy braku listopada to ten sam stan magazynowy).</p>
           <table className="docs-table r14-table">
             <thead>
               <tr>

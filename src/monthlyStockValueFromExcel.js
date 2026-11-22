@@ -455,7 +455,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
 
   const comarchCompare = []
-  if (yearMonth === '2026-10' || cutoffDate === '2026-10-31') {
+  const comarchOct2026TargetDate = '2026-10-31'
+  if (cutoffDate >= '2026-10-01' && cutoffDate <= '2026-12-31') {
     for (const [name, ref] of Object.entries(COMARCH_REFERENCE_OCT2026)) {
       const key = stockValueProductKey(name)
       const row = rows.find(r => r.product_name === name) || periodMap.get(key)
@@ -482,8 +483,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       }
     }
     const allOk = comarchCompare.every(c => c.ok)
-    if (allOk) message += ' Zgodność z Comarch (31.10.2026) dla produktów kontrolnych.'
-    else {
+    if (allOk) message += ` Zgodność z Comarch (stan na ${formatReportTitleDate(comarchOct2026TargetDate)}).`
+    else if (cutoffDate !== comarchOct2026TargetDate) {
+      message += ` (Cel Comarch: ${formatReportTitleDate(comarchOct2026TargetDate)} — ustaw tę datę lub porównaj w tabeli poniżej.)`
+    } else {
       message += ' Aby zbić rozjazd: usuń „październik bez MM”, wgraj osobno październik PZ + WZ + WZK (tylko przyrost miesiąca).'
     }
   }
@@ -506,6 +509,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       filledRows: filled.length,
       dedupeRemoved: deduped.removed,
       comarchCompare,
+      comarchTargetDate: comarchCompare.length ? comarchOct2026TargetDate : null,
+      engineVersion: EXCEL_REPORT_VERSION,
       excelLines: lines.length,
       pzLines,
       wzLines,
