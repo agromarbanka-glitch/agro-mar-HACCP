@@ -2,8 +2,9 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.11.2: ilość i wartość końcowa = symulacja FIFO (WZ schodzą z najstarszego PZ).
- * WZK: pary 1:1 z WZ pomijane; pojedyncze WZK wchodzą do FIFO jako rozchód (classifyOperation).
+ * Silnik v2.11.3: ilość i wartość końcowa = symulacja FIFO (WZ schodzą z najstarszego PZ).
+ * Dedup raportu: ta sama operacja (nr PZ/WZ · produkt · kg) z wielu importów — tylko raz.
+ * WZK: pary WZ+WZK 1:1 pomijane; WZK ujemne = przyjęcie, dodatnie = rozchód.
  * Stan początkowy miesiąca = FIFO na dzień przed 1. dniem miesiąca (np. 30.06).
  * Wartość końcowa = suma (pozostałe kg na partii PZ × cena netto tej PZ).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
@@ -20,9 +21,9 @@ import {
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
-import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
+import { excelRowDedupKey, normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.11.2'
+export const EXCEL_REPORT_VERSION = '2.11.3'
 
 /** Produkty porównywane z Comarch — zawsze w tabeli raportu (nawet przy saldzie 0). */
 export const WATCH_REPORT_PRODUCTS = ['Jabłko przemysłowe', 'Malina świeża PW']
@@ -252,39 +253,21 @@ function rowMovementDateRaw(row, operation, documentNo) {
   )
 }
 
-/** Ten sam kg WZ wielokrotnie w eksporcie Comarch — jedna linia do FIFO. */
-function collapseParallelWzExportDuplicates(rows) {
+/** Ten sam dokument·produkt·kg w kilku partiach importu (nakładka YTD) — do FIFO tylko pierwszy wpis. */
+function dedupeCrossBatchReportRows(rows) {
   const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
   const seen = new Set()
   const out = []
   let removed = 0
   for (const row of sorted) {
-    if (!row?.productName || !Number(row.qty)) {
-      out.push(row)
-      continue
+    const key = excelRowDedupKey(row)
+    if (key) {
+      if (seen.has(key)) {
+        removed += 1
+        continue
+      }
+      seen.add(key)
     }
-    const documentNo = normalizeDocumentNo(row.documentNo)
-    if (!documentNo || isMmDocument(row.documentType, row.documentNo)) {
-      out.push(row)
-      continue
-    }
-    const operation = classifyOperation(row.documentType, documentNo)
-    if (operation !== 'sprzedaz' || isWzkDocument(row.documentType, documentNo)) {
-      out.push(row)
-      continue
-    }
-    const issueDate = rowMovementDateRaw(row, 'sprzedaz', documentNo)
-    if (!issueDate) {
-      out.push(row)
-      continue
-    }
-    const qty = roundKg(Math.abs(Number(row.qty)))
-    const key = `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${qty}`
-    if (seen.has(key)) {
-      removed += 1
-      continue
-    }
-    seen.add(key)
     out.push(row)
   }
   return { rows: out, removed }
@@ -333,11 +316,11 @@ function applyWzWzkPairwiseCancellation(rows) {
 
 function prepareStockValueMovementRows(excelRows) {
   let filled = prepareReportRows(excelRows || [])
-  const collapsed = collapseParallelWzExportDuplicates(filled)
-  const cancelled = applyWzWzkPairwiseCancellation(collapsed.rows)
+  const deduped = dedupeCrossBatchReportRows(filled)
+  const cancelled = applyWzWzkPairwiseCancellation(deduped.rows)
   return {
     rows: cancelled.rows,
-    parallelWzRemoved: collapsed.removed,
+    crossBatchDuplicatesRemoved: deduped.removed,
     wzkCancelledRows: cancelled.cancelled
   }
 }
@@ -345,12 +328,16 @@ function prepareStockValueMovementRows(excelRows) {
 function normalizeExcelRows(rows) {
   const out = []
   for (const row of rows || []) {
-    if (!row.productName || !Number(row.qty)) continue
+    const rawQty = Number(row.qty)
+    if (!row.productName || !rawQty) continue
     if (isMmDocument(row.documentType, row.documentNo)) continue
     const documentNo = normalizeDocumentNo(row.documentNo)
     if (!documentNo) continue
-    const operation = classifyOperation(row.documentType, documentNo)
+    const isWzk = isWzkDocument(row.documentType, documentNo)
+    let operation = classifyOperation(row.documentType, documentNo)
     if (operation === 'pominiete_mm') continue
+    if (isWzk) operation = rawQty < 0 ? 'przyjecie' : 'sprzedaz'
+    const qty = Math.abs(rawQty)
     const rawIssueDate = resolveDocumentIssueDate(row.issueDate, documentNo) || String(row.issueDate || '').slice(0, 10)
     const issueDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
     if (!issueDate) continue
@@ -363,7 +350,7 @@ function normalizeExcelRows(rows) {
       rawIssueDate,
       productName: label,
       productKey: stockValueProductKey(row.productName),
-      qty: Math.abs(Number(row.qty) || 0),
+      qty,
       unitPriceNet: unitPrice > 0 ? unitPrice : null,
       rowNo: row.rowNo ?? null,
       lineId: row._lineId || `x-${out.length}`
@@ -592,8 +579,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (fifoWzUnallocatedKg > 0.0005) {
     message += ` Uwaga FIFO: ${productsFifoOversell} produkt(ów) ma WZ bez pokrycia w PZ (łącznie ${fifoWzUnallocatedKg.toLocaleString('pl-PL')} kg) — sprawdź import lub podwójne WZ.`
   }
-  if (prepared.parallelWzRemoved > 0) {
-    message += ` Sklejono ${prepared.parallelWzRemoved} powtórnych WZ (ten sam produkt, miesiąc i kg).`
+  if (prepared.crossBatchDuplicatesRemoved > 0) {
+    message += ` Pominięto ${prepared.crossBatchDuplicatesRemoved} powtórnych operacji (ten sam nr PZ/WZ·produkt·kg z kolejnego importu).`
   }
   if (prepared.wzkCancelledRows > 0) {
     message += ` Anulowano ${prepared.wzkCancelledRows} linii w parach WZ+WZK.`
@@ -622,7 +609,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     diagnostics: {
       inputRows: (excelRows || []).length,
       filledRows: prepared.rows.length,
-      parallelWzRemoved: prepared.parallelWzRemoved,
+      crossBatchDuplicatesRemoved: prepared.crossBatchDuplicatesRemoved,
       wzkCancelledRows: prepared.wzkCancelledRows,
       watchDiag,
       excelLines: lines.length,
