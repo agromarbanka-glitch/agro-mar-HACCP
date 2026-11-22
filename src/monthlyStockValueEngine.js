@@ -413,7 +413,7 @@ th{background:#eee}
 tfoot td{font-weight:bold}
 </style></head><body>
 <h1>${esc(title)}</h1>
-<p class="meta">Ilość końcowa = Σ PZ − Σ WZ (do daty stanu) · wartość netto = ilość końcowa × średnia cena PZ</p>
+<p class="meta">FIFO: WZ schodzą z najstarszego PZ · wartość = suma (pozostałe kg na PZ × cena netto partii) · silnik ${esc(report.diagnostics?.engineVersion || report.diagnostics?.engine || '2.13')}</p>
 <table>
 <thead><tr>
   <th>Lp.</th><th>Produkt</th><th>Stan początkowy</th>

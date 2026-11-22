@@ -2,10 +2,12 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.12.1 — FIFO: WZ schodzą z najstarszego PZ (ilość, wartość, szczegóły).
- * Dedup raportu: ta sama operacja (nr dokumentu·produkt·kg) tylko raz. Bez sklejania WZ po kg/miesiąc.
- * Stan początkowy miesiąca = FIFO na dzień przed 1. dniem miesiąca (np. 30.06).
- * Wartość końcowa = suma (pozostałe kg na partii PZ × cena netto tej PZ).
+ * ZASADA NIEZMIENNA (R14): FIFO — najpierw schodzą najstarsze PZ (data, nr dokumentu, wiersz),
+ * potem kolejne WZ w kolejności chronologicznej. Ilość i wartość końcowa WYŁĄCZNIE z runStockValueFifoSimulation.
+ * Nie używamy Σ PZ−WZ ani średniej ważonej do ilości końcowej.
+ * Stan początkowy miesiąca = ta sama symulacja FIFO na dzień przed 1. dniem miesiąca.
+ * Wartość końcowa = suma (pozostałe kg na partii PZ × cena netto tej PZ po FIFO).
+ * Przed FIFO: dedup importu (ten sam nr PZ/WZ·produkt·kg) i pary korekty WZ+WZK — nie zmieniają zasady FIFO.
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
  * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
  */
@@ -22,7 +24,16 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { excelRowDedupKey, normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.12.1'
+export const EXCEL_REPORT_VERSION = '2.13.0'
+
+/** Publiczna deklaracja zasady — UI / audyt. */
+export const STOCK_VALUE_FIFO_POLICY = Object.freeze({
+  id: 'fifo_oldest_pz_first',
+  quantityRule: 'WZ schodzą z najstarszego PZ (kolejność: data → nr dokumentu → wiersz Excel)',
+  valueRule: 'Suma pozostałych kg na każdej partii PZ × cena netto tej PZ',
+  openingRule: 'FIFO na dzień przed 1. dniem miesiąca raportu',
+  forbidden: 'Σ PZ−Σ WZ jako ilość końcowa, średnia ważona całości, rozkład kg bez symulacji WZ'
+})
 
 /** Cele Comarch — ilość końcowa 31.10.2026. */
 export const COMARCH_REFERENCE_OCT2026 = {
@@ -189,8 +200,8 @@ function compareMovementLine(a, b) {
 }
 
 /**
- * FIFO (niezmienna zasada): WZ w kolejności chronologicznej schodzą z najstarszych partii PZ.
- * @returns stan po cutoff — tylko partie PZ z faktycznym saldem > 0
+ * Jedyny silnik ilości i wartości końcowej R14 (nie modyfikować zasady bez decyzji biznesowej).
+ * WZ w kolejności chronologicznej schodzą z najstarszych partii PZ (compareMovementLine).
  */
 export function runStockValueFifoSimulation(pzLines, wzLines, cutoffDate) {
   const cutoff = String(cutoffDate || '').slice(0, 10)
@@ -652,7 +663,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       openingCutoff,
       fifoWzUnallocatedKg,
       productsFifoOversell,
-      engine: 'fifo_pz_consumption_v212'
+      engine: STOCK_VALUE_FIFO_POLICY.id,
+      fifoPolicy: STOCK_VALUE_FIFO_POLICY
     },
     message
   }

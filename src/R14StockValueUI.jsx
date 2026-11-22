@@ -8,6 +8,7 @@ import {
 } from './monthlyStockValueEngine'
 import {
   EXCEL_REPORT_VERSION,
+  STOCK_VALUE_FIFO_POLICY,
   computeMonthlyStockValueReportFromExcel,
   parseExcelFilesForReport,
   formatReportTitleDate,
@@ -248,7 +249,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const oct = batches.filter(b => /pazdz.*bez\s*mm|paźdz.*bez\s*mm|pazdziernik\s+bez/i.test(b.file_name || '')).map(b => b.id)
       if (!oct.length) return prev
       setMessage?.(
-        'Silnik 2.10: partia października „bez MM” wyłączona z raportu (zbiorczy YTD). Zaznacz „W raporcie”, tylko jeśli to przyrost miesiąca.'
+        'FIFO: partia października „bez MM” wyłączona z raportu (zbiorczy YTD). Zaznacz „W raporcie”, tylko jeśli to przyrost miesiąca.'
       )
       return new Set(oct)
     })
@@ -517,7 +518,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Silnik {EXCEL_REPORT_VERSION} — FIFO</b> (WZ z najstarszego PZ; wartość i szczegóły z tej samej symulacji). Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
+        <b>Silnik {EXCEL_REPORT_VERSION} — zasada stała: FIFO</b> ({STOCK_VALUE_FIFO_POLICY.quantityRule}). Wartość: {STOCK_VALUE_FIFO_POLICY.valueRule}. Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
       </p>
 
       {!isSupabaseConfigured && (
@@ -784,7 +785,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
               <> · dedup {report.diagnostics.dedupeRemoved} linii</>
             )}
             {!report?.diagnostics?.comarchCompare?.length && (
-              <> · <span className="hint">Brak tabeli Comarch — Ctrl+F5, silnik min. 2.12.1</span></>
+              <> · <span className="hint">Brak tabeli Comarch — Ctrl+F5, silnik min. 2.13.0 FIFO</span></>
             )}
           </div>
         </div>
