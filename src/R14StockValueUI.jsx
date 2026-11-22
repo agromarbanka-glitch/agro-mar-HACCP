@@ -245,7 +245,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     if (batches.length < 2) return
     setExcludedBatchIds(prev => {
       if (prev.size > 0) return prev
-      const oct = batches.filter(b => /pazdz|paźdz/i.test(b.file_name || '')).map(b => b.id)
+      const oct = batches.filter(b => /pazdz.*bez\s*mm|paźdz.*bez\s*mm|pazdziernik\s+bez/i.test(b.file_name || '')).map(b => b.id)
       if (!oct.length) return prev
       setMessage?.(
         'Silnik 2.10: partia października „bez MM” wyłączona z raportu (zbiorczy YTD). Zaznacz „W raporcie”, tylko jeśli to przyrost miesiąca.'
@@ -552,7 +552,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         {batches.length > 0 && (
           <>
             <p className="hint">
-              Raport liczy tylko z zaznaczonych partii. Eksport <b>„październik bez MM”</b> to często <b>cały rok</b> — doklejony do czerwca–września zawyża lub psuje salda. Odznacz tę partię lub usuń ją.
+              Raport liczy tylko z zaznaczonych partii. Comarch 31.10: wgraj <b>październik PZ + WZ + WZK</b> (przyrost), <b>nie</b> „październik bez MM” (cały rok). Partia „bez MM” powinna być odznaczona lub usunięta.
             </p>
             {batches.some(b => /pazdz|paźdz/i.test(b.file_name || '')) && (
               <button
@@ -734,7 +734,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
               type="button"
               className="secondary"
               disabled={!excelRows.length || loading}
-              onClick={() => recalculate(excelRows, fileNames, asOfDate)}
+              onClick={() => recalculate(rowsForReport, fileNames, asOfDate)}
             >
               <RefreshCcw size={16} /> Przelicz
             </button>
@@ -786,6 +786,32 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
             </span>
           )}
         </div>
+      )}
+
+      {report?.diagnostics?.comarchCompare?.length > 0 && (
+        <section className="card stock-excel-panel">
+          <h3>Porównanie z Comarch (31.10.2026)</h3>
+          <table className="docs-table r14-table">
+            <thead>
+              <tr>
+                <th>Produkt</th>
+                <th className="num">Comarch kg</th>
+                <th className="num">Aplikacja kg</th>
+                <th className="num">Δ kg</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.diagnostics.comarchCompare.map(c => (
+                <tr key={c.product_name} className={c.ok ? 'r14-ok' : 'r14-warn'}>
+                  <td>{c.product_name}</td>
+                  <td className="num">{Number(c.remaining_kg).toLocaleString('pl-PL')}</td>
+                  <td className="num">{c.actual?.remaining_kg != null ? Number(c.actual.remaining_kg).toLocaleString('pl-PL') : '—'}</td>
+                  <td className="num">{c.delta_kg != null ? Number(c.delta_kg).toLocaleString('pl-PL') : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
       )}
 
       {rows.length > 0 ? (

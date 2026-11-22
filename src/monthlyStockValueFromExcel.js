@@ -13,14 +13,25 @@ import {
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument,
+  isWzkDocument,
   isWzMonthYearDocument,
   monthYearFromDocumentNo,
   forwardFillExcelRows
 } from './excelImport'
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
-import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
+import { excelRowDedupKey, normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.10'
+export const EXCEL_REPORT_VERSION = '2.10.2'
+
+/** Wzorce Comarch — zestawienie na 31.10.2026 (ilości końcowe). */
+export const COMARCH_REFERENCE_OCT2026 = {
+  'Jabłko na obierkę': { opening_kg: 56847, purchased_kg: 93701, sold_kg: 70090, remaining_kg: 80458 },
+  'Jabłko przemysłowe': { opening_kg: 0, purchased_kg: 2757198, sold_kg: 2745820, remaining_kg: 11378 },
+  'Malina świeża 1': { opening_kg: 0, purchased_kg: 18609.5, sold_kg: 13020, remaining_kg: 5589.5 },
+  'Malina świeża PW': { opening_kg: 82663, purchased_kg: 640617.5, sold_kg: 669870, remaining_kg: 53410.5 }
+}
+
+export const COMARCH_REFERENCE_PRODUCTS = Object.keys(COMARCH_REFERENCE_OCT2026)
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -145,6 +156,26 @@ function prepareReportRows(excelRows) {
   return forwardFillExcelRows(rows)
 }
 
+/** Ta sama operacja (nr dokumentu · produkt · kg) — tylko raz do Σ PZ−WZ (nakładka importów). */
+function dedupeReportRowsByOperation(rows) {
+  const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
+  const seen = new Set()
+  const out = []
+  let removed = 0
+  for (const row of sorted) {
+    const key = excelRowDedupKey(row)
+    if (key) {
+      if (seen.has(key)) {
+        removed += 1
+        continue
+      }
+      seen.add(key)
+    }
+    out.push(row)
+  }
+  return { rows: out, removed }
+}
+
 function inPeriod(date, periodStart, periodEnd) {
   return date && date >= periodStart && date <= periodEnd
 }
@@ -171,8 +202,11 @@ function normalizeExcelRows(rows) {
     if (isMmDocument(row.documentType, row.documentNo)) continue
     const documentNo = normalizeDocumentNo(row.documentNo)
     if (!documentNo) continue
-    const operation = classifyOperation(row.documentType, documentNo)
+    let operation = classifyOperation(row.documentType, documentNo)
     if (operation === 'pominiete_mm') continue
+    const rawQty = Number(row.qty)
+    if (isWzkDocument(row.documentType, documentNo) && rawQty < 0) operation = 'przyjecie'
+    const qty = roundKg(Math.abs(rawQty))
     const rawIssueDate = resolveDocumentIssueDate(row.issueDate, documentNo) || String(row.issueDate || '').slice(0, 10)
     const issueDate = resolveStockValueMovementDate(row.issueDate, documentNo, operation)
     if (!issueDate) continue
@@ -185,7 +219,7 @@ function normalizeExcelRows(rows) {
       rawIssueDate,
       productName: label,
       productKey: stockValueProductKey(row.productName),
-      qty: Math.abs(Number(row.qty) || 0),
+      qty,
       unitPriceNet: unitPrice > 0 ? unitPrice : null,
       rowNo: row.rowNo ?? null,
       lineId: row._lineId || `x-${out.length}`
@@ -241,7 +275,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   const cutoffDate = bounds.asOfDate
   const openingCutoff = dayBefore(monthStart)
   const filled = prepareReportRows(excelRows || [])
-  const lines = normalizeExcelRows(filled)
+  const deduped = dedupeReportRowsByOperation(filled)
+  const lines = normalizeExcelRows(deduped.rows)
 
   if (!lines.length) {
     return {
@@ -383,6 +418,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       || r.purchased_kg > 0.0005
       || r.sold_kg > 0.0005
       || r.remaining_kg > 0.0005
+      || COMARCH_REFERENCE_PRODUCTS.includes(r.product_name)
     )
     .sort((a, b) =>
       String(a.product_group || '').localeCompare(String(b.product_group || '')) ||
@@ -414,6 +450,43 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (wzClampedToDocMonth > 0) {
     message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
   }
+  if (deduped.removed > 0) {
+    message += ` Pominięto ${deduped.removed} powtórnych operacji (ten sam nr PZ/WZ·produkt·kg w kolejnym imporcie).`
+  }
+
+  const comarchCompare = []
+  if (yearMonth === '2026-10' || cutoffDate === '2026-10-31') {
+    for (const [name, ref] of Object.entries(COMARCH_REFERENCE_OCT2026)) {
+      const key = stockValueProductKey(name)
+      const row = rows.find(r => r.product_name === name) || periodMap.get(key)
+      if (!row) {
+        comarchCompare.push({ product_name: name, ...ref, actual: null, delta_kg: null, ok: false })
+        continue
+      }
+      const actual = {
+        opening_kg: roundKg(row.opening_kg),
+        purchased_kg: roundKg(row.purchased_kg),
+        sold_kg: roundKg(row.sold_kg),
+        remaining_kg: roundKg(row.remaining_kg)
+      }
+      const delta = roundKg(actual.remaining_kg - ref.remaining_kg)
+      comarchCompare.push({
+        product_name: name,
+        ...ref,
+        actual,
+        delta_kg: delta,
+        ok: Math.abs(delta) < 0.5
+      })
+      if (Math.abs(delta) >= 0.5) {
+        message += ` ${name}: ${actual.remaining_kg.toLocaleString('pl-PL')} kg (Comarch ${ref.remaining_kg.toLocaleString('pl-PL')}) · Δ ${delta.toLocaleString('pl-PL')} kg.`
+      }
+    }
+    const allOk = comarchCompare.every(c => c.ok)
+    if (allOk) message += ' Zgodność z Comarch (31.10.2026) dla produktów kontrolnych.'
+    else {
+      message += ' Aby zbić rozjazd: usuń „październik bez MM”, wgraj osobno październik PZ + WZ + WZK (tylko przyrost miesiąca).'
+    }
+  }
 
   const reportPayload = {
     source: 'excel',
@@ -431,6 +504,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     diagnostics: {
       inputRows: (excelRows || []).length,
       filledRows: filled.length,
+      dedupeRemoved: deduped.removed,
+      comarchCompare,
       excelLines: lines.length,
       pzLines,
       wzLines,
