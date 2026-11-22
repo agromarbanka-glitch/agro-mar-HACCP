@@ -2,9 +2,9 @@
  * Raport magazynowy liczony wyłącznie z pliku Excel (bez bazy HACCP).
  * FIFO · data PZ / data WZ · wartość = ilość × ostatnia kolumna „Cena netto”.
  *
- * Silnik v2.8: ilość końcowa = Σ PZ − Σ WZ (do daty stanu), per produkt raportu Comarch.
- * Stan początkowy miesiąca = saldo na dzień przed 1. dniem miesiąca (np. 30.06).
- * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
+ * Silnik v2.11: ilość i wartość końcowa = symulacja FIFO (WZ schodzą z najstarszego PZ).
+ * Stan początkowy miesiąca = FIFO na dzień przed 1. dniem miesiąca (np. 30.06).
+ * Wartość końcowa = suma (pozostałe kg na partii PZ × cena netto tej PZ).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
  * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
  */
@@ -20,7 +20,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.10'
+export const EXCEL_REPORT_VERSION = '2.11'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -164,6 +164,81 @@ function clampStockKg(n) {
   return v < 0 ? 0 : v
 }
 
+function compareMovementLine(a, b) {
+  return (
+    String(a.issueDate || '').localeCompare(String(b.issueDate || '')) ||
+    String(a.documentNo || '').localeCompare(String(b.documentNo || '')) ||
+    (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0) ||
+    String(a.lineId || '').localeCompare(String(b.lineId || ''))
+  )
+}
+
+/**
+ * FIFO (niezmienna zasada): WZ w kolejności chronologicznej schodzą z najstarszych partii PZ.
+ * @returns stan po cutoff — tylko partie PZ z faktycznym saldem > 0
+ */
+export function runStockValueFifoSimulation(pzLines, wzLines, cutoffDate) {
+  const cutoff = String(cutoffDate || '').slice(0, 10)
+  const lots = (pzLines || [])
+    .filter(p => p.issueDate && p.issueDate <= cutoff)
+    .sort(compareMovementLine)
+    .map(p => ({
+      pz_no: p.documentNo,
+      pz_date: p.issueDate,
+      unit_price_net: p.unitPriceNet,
+      qty: roundKg(p.qty),
+      remaining_kg: roundKg(p.qty)
+    }))
+
+  const wzSorted = (wzLines || [])
+    .filter(w => w.issueDate && w.issueDate <= cutoff)
+    .sort(compareMovementLine)
+
+  let wzUnallocatedKg = 0
+  for (const w of wzSorted) {
+    let need = roundKg(w.qty)
+    if (need <= 0) continue
+    for (const lot of lots) {
+      if (need <= 0.0005) break
+      if (lot.remaining_kg <= 0.0005) continue
+      const take = Math.min(lot.remaining_kg, need)
+      lot.remaining_kg = roundKg(lot.remaining_kg - take)
+      need = roundKg(need - take)
+    }
+    if (need > 0.0005) wzUnallocatedKg += need
+  }
+
+  let remainingKg = 0
+  let remainingValue = 0
+  let missingPriceKg = 0
+  const lot_lines = []
+
+  for (const lot of lots) {
+    const rem = roundKg(lot.remaining_kg)
+    if (rem <= 0.0005) continue
+    remainingKg += rem
+    const lineValue = lot.unit_price_net != null ? roundMoney(rem * lot.unit_price_net) : null
+    if (lineValue != null) remainingValue += lineValue
+    else missingPriceKg += rem
+    lot_lines.push({
+      pz_no: lot.pz_no,
+      pz_date: lot.pz_date,
+      qty: lot.qty,
+      remaining_kg: rem,
+      unit_price_net: lot.unit_price_net,
+      line_value: lineValue
+    })
+  }
+
+  return {
+    remainingKg: roundKg(remainingKg),
+    remainingValue: roundMoney(remainingValue),
+    missingPriceKg: roundKg(missingPriceKg),
+    lot_lines,
+    wzUnallocatedKg: roundKg(wzUnallocatedKg)
+  }
+}
+
 function normalizeExcelRows(rows) {
   const out = []
   for (const row of rows || []) {
@@ -209,12 +284,8 @@ function ensureRow(map, key, label) {
       purchased_missing_price_kg: 0,
       remaining_missing_price_kg: 0,
       lot_lines: [],
-      _cum_pz: 0,
-      _cum_wz: 0,
-      _cum_pz_valued_kg: 0,
-      _cum_pz_value: 0,
-      _opening_pz: 0,
-      _opening_wz: 0
+      _pz: [],
+      _wz: []
     })
   }
   return map.get(key)
@@ -261,40 +332,22 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
 
   const periodMap = new Map()
-  const pzLotsByProduct = new Map()
   let pzLines = 0
   let wzLines = 0
   let wzAfterCutoff = 0
   let wzClampedToDocMonth = 0
   let linesWithPrice = 0
+  let fifoWzUnallocatedKg = 0
+  let productsFifoOversell = 0
 
   lines.forEach((line) => {
-    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo, rowNo, lineId } = line
+    const { operation, issueDate, productName, productKey, qty, unitPriceNet, documentNo } = line
     const row = ensureRow(periodMap, productKey, productName)
 
     if (operation === 'przyjecie') {
       pzLines += 1
       if (unitPriceNet != null) linesWithPrice += 1
-
-      if (openingCutoff && issueDate <= openingCutoff) row._opening_pz += qty
-
-      if (issueDate <= cutoffDate) {
-        row._cum_pz += qty
-        if (unitPriceNet != null) {
-          row._cum_pz_valued_kg += qty
-          row._cum_pz_value += qty * unitPriceNet
-        }
-        if (!pzLotsByProduct.has(productKey)) pzLotsByProduct.set(productKey, [])
-        pzLotsByProduct.get(productKey).push({
-          pz_no: documentNo,
-          pz_date: issueDate,
-          qty,
-          unit_price_net: unitPriceNet,
-          rowNo,
-          lineId: lineId || `pz-${pzLotsByProduct.get(productKey).length}`
-        })
-      }
-
+      row._pz.push(line)
       if (inPeriod(issueDate, monthStart, periodEnd)) {
         row.purchased_kg += qty
         if (unitPriceNet != null) row.purchased_value += qty * unitPriceNet
@@ -310,12 +363,8 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       ) {
         wzClampedToDocMonth += 1
       }
-
-      if (openingCutoff && issueDate <= openingCutoff) row._opening_wz += qty
-
-      if (issueDate <= cutoffDate) row._cum_wz += qty
-      else wzAfterCutoff += 1
-
+      if (issueDate > cutoffDate) wzAfterCutoff += 1
+      else row._wz.push(line)
       if (inPeriod(issueDate, monthStart, periodEnd)) row.sold_kg += qty
     }
   })
@@ -323,43 +372,24 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   let missingPriceLines = 0
 
   for (const row of periodMap.values()) {
-    row.opening_kg = clampStockKg(row._opening_pz - row._opening_wz)
-    row.remaining_kg = clampStockKg(row._cum_pz - row._cum_wz)
+    const openingFifo = openingCutoff
+      ? runStockValueFifoSimulation(row._pz, row._wz, openingCutoff)
+      : { remainingKg: 0, remainingValue: 0, missingPriceKg: 0, lot_lines: [], wzUnallocatedKg: 0 }
+    const closingFifo = runStockValueFifoSimulation(row._pz, row._wz, cutoffDate)
 
-    const avgPrice = row._cum_pz_valued_kg > 0 ? row._cum_pz_value / row._cum_pz_valued_kg : 0
-    if (row.remaining_kg > 0 && avgPrice > 0) {
-      row.remaining_value = roundMoney(row.remaining_kg * avgPrice)
-    } else if (row.remaining_kg > 0) {
-      missingPriceLines += 1
-      row.remaining_missing_price_kg = row.remaining_kg
-      row.remaining_value = 0
-    } else {
-      row.remaining_value = 0
+    if (closingFifo.wzUnallocatedKg > 0.0005) {
+      productsFifoOversell += 1
+      fifoWzUnallocatedKg += closingFifo.wzUnallocatedKg
     }
 
-    const lots = (pzLotsByProduct.get(row.product_key) || [])
-      .sort((a, b) =>
-        String(a.pz_date || '').localeCompare(String(b.pz_date || '')) ||
-        String(a.pz_no || '').localeCompare(String(b.pz_no || '')) ||
-        (Number(a.rowNo) || 0) - (Number(b.rowNo) || 0)
-      )
-    if (lots.length && row.remaining_kg > 0) {
-      let left = row.remaining_kg
-      for (const lot of lots) {
-        if (left <= 0.0005) break
-        const share = Math.min(lot.qty, left)
-        if (share <= 0) continue
-        const lineValue = lot.unit_price_net != null ? roundMoney(share * lot.unit_price_net) : null
-        row.lot_lines.push({
-          pz_no: lot.pz_no,
-          pz_date: lot.pz_date,
-          qty: lot.qty,
-          remaining_kg: roundKg(share),
-          unit_price_net: lot.unit_price_net,
-          line_value: lineValue
-        })
-        left -= share
-      }
+    row.opening_kg = clampStockKg(openingFifo.remainingKg)
+    row.remaining_kg = clampStockKg(closingFifo.remainingKg)
+    row.remaining_value = closingFifo.remainingValue
+    row.remaining_missing_price_kg = closingFifo.missingPriceKg
+    row.lot_lines = closingFifo.lot_lines
+
+    if (row.remaining_kg > 0 && closingFifo.missingPriceKg > 0.0005) {
+      missingPriceLines += 1
     }
   }
 
@@ -399,7 +429,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
 
   let message = rows.length
-    ? `Przeliczono: stan na ${formatReportTitleDate(cutoffDate)} = ${totals.remaining_kg.toLocaleString('pl-PL')} kg (Σ PZ − Σ WZ). Stan początkowy ${formatReportTitleDate(openingCutoff)}: ${totals.opening_kg.toLocaleString('pl-PL')} kg.`
+    ? `Przeliczono: stan na ${formatReportTitleDate(cutoffDate)} = ${totals.remaining_kg.toLocaleString('pl-PL')} kg (FIFO — WZ z najstarszego PZ). Stan początkowy ${formatReportTitleDate(openingCutoff)}: ${totals.opening_kg.toLocaleString('pl-PL')} kg.`
     : `Brak danych do ${formatReportTitleDate(cutoffDate)} w wczytanym pliku.`
 
   if (linesWithPrice === 0 && pzLines > 0) {
@@ -413,6 +443,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   }
   if (wzClampedToDocMonth > 0) {
     message += ` ${wzClampedToDocMonth} WZ z numerem lipca/sierpnia przypisano do miesiąca z numeru dokumentu (zgodnie z Comarch).`
+  }
+  if (fifoWzUnallocatedKg > 0.0005) {
+    message += ` Uwaga FIFO: ${productsFifoOversell} produkt(ów) ma WZ bez pokrycia w PZ (łącznie ${fifoWzUnallocatedKg.toLocaleString('pl-PL')} kg) — sprawdź import lub podwójne WZ.`
   }
 
   const reportPayload = {
@@ -438,7 +471,9 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzAfterCutoff,
       wzClampedToDocMonth,
       openingCutoff,
-      engine: 'cumulative_pz_minus_wz_v28'
+      fifoWzUnallocatedKg,
+      productsFifoOversell,
+      engine: 'fifo_pz_consumption_v211'
     },
     message
   }

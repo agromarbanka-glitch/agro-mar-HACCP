@@ -474,7 +474,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Ilość końcowa</b> = Σ PZ − Σ WZ (do daty). Jeśli widzisz „wczytano mniej niż w bazie” — kliknij <b>Odśwież z bazy</b> (po deployu naprawy paginacji).
+        <b>Ilość końcowa</b> = FIFO (WZ schodzą z najstarszego PZ; szczegóły = partie z saldem). Jeśli widzisz „wczytano mniej niż w bazie” — kliknij <b>Odśwież z bazy</b>.
       </p>
 
       {!isSupabaseConfigured && (
