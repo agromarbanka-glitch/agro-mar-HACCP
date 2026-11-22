@@ -242,6 +242,19 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   }, [reloadFromSupabase])
 
   useEffect(() => {
+    if (batches.length < 2) return
+    setExcludedBatchIds(prev => {
+      if (prev.size > 0) return prev
+      const oct = batches.filter(b => /pazdz|paźdz/i.test(b.file_name || '')).map(b => b.id)
+      if (!oct.length) return prev
+      setMessage?.(
+        'Silnik FIFO: partia października „bez MM” wyłączona z raportu (zbiorczy YTD psuje Malinę PW). Zaznacz „W raporcie FIFO”, tylko jeśli wgrywasz sam przyrost miesiąca.'
+      )
+      return new Set(oct)
+    })
+  }, [batches, setMessage])
+
+  useEffect(() => {
     if (!excelRows.length) {
       setReport(null)
       setCalcLoading(false)
@@ -504,7 +517,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Ilość końcowa</b> = FIFO (WZ schodzą z najstarszego PZ; wartość i szczegóły z tej samej symulacji). WZK: pary WZ+WZK anulowane, reszta WZK jak rozchód. Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
+        <b>Silnik {EXCEL_REPORT_VERSION} — tylko FIFO</b> (WZ z najstarszego PZ; wartość i „Szczegóły” z tej samej symulacji). Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
       </p>
 
       {!isSupabaseConfigured && (
