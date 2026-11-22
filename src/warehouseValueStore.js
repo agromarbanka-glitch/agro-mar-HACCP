@@ -7,11 +7,12 @@ import {
   classifyOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
-  isMmDocument
+  isMmDocument,
+  isWzkDocument
 } from './excelImport'
 import { EXCEL_REPORT_VERSION, resolveStockValueMovementDate } from './monthlyStockValueFromExcel'
 
-export const WAREHOUSE_VALUE_STORE_VERSION = '1.7'
+export const WAREHOUSE_VALUE_STORE_VERSION = '1.8'
 const INSERT_CHUNK = 250
 /** Supabase/PostgREST często zwraca max 1000 wierszy na zapytanie — mniejsze paczki + paginacja po id. */
 const FETCH_PAGE_SIZE = 1000
@@ -80,6 +81,9 @@ function excelRowToInsert(row, batchId, sourceFile = '') {
   if (!dedupKey) return { payload: null, reason: 'no_dedup' }
 
   const price = Number(row.unitNetPrice)
+  const rawQty = Number(row.qty) || 0
+  // WZK: znak w Excelu ma znaczenie (ujemne = zwrot na magazyn). PZ/WZ zwykle dodatnie.
+  const qty = isWzkDocument(row.documentType, documentNo) ? rawQty : Math.abs(rawQty)
   return {
     payload: {
       batch_id: batchId,
@@ -87,7 +91,7 @@ function excelRowToInsert(row, batchId, sourceFile = '') {
       document_type: row.documentType || null,
       document_no: documentNo,
       issue_date: issueDate,
-      qty: Math.abs(Number(row.qty) || 0),
+      qty,
       unit_net_price: price > 0 ? price : null,
       product_name: String(row.productName || '').trim(),
       row_no: row.rowNo ?? null

@@ -23,7 +23,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { excelRowDedupKey, normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.11.3'
+export const EXCEL_REPORT_VERSION = '2.11.4'
 
 /** Produkty porównywane z Comarch — zawsze w tabeli raportu (nawet przy saldzie 0). */
 export const WATCH_REPORT_PRODUCTS = ['Jabłko przemysłowe', 'Malina świeża PW']

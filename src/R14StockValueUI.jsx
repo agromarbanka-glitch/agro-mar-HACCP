@@ -131,13 +131,43 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
+  /** Partie importu wyłączone z FIFO (np. październik „bez MM” = cały rok). */
+  const [excludedBatchIds, setExcludedBatchIds] = useState(() => new Set())
   const [snapshots, setSnapshots] = useState([])
   const fileInputRef = useRef(null)
   const auditInputRef = useRef(null)
   const asOfDateRef = useRef(asOfDate)
   asOfDateRef.current = asOfDate
 
-  const fileNames = useMemo(() => batches.map(b => b.file_name).filter(Boolean), [batches])
+  const fileNames = useMemo(
+    () => batches.filter(b => !excludedBatchIds.has(b.id)).map(b => b.file_name).filter(Boolean),
+    [batches, excludedBatchIds]
+  )
+
+  const rowsForReport = useMemo(
+    () => excelRows.filter(r => !excludedBatchIds.has(r._batchId)),
+    [excelRows, excludedBatchIds]
+  )
+
+  function toggleBatchInReport(batchId) {
+    setExcludedBatchIds(prev => {
+      const next = new Set(prev)
+      if (next.has(batchId)) next.delete(batchId)
+      else next.add(batchId)
+      return next
+    })
+  }
+
+  function excludeBatchesMatchingName(pattern) {
+    const re = pattern instanceof RegExp ? pattern : new RegExp(pattern, 'i')
+    setExcludedBatchIds(prev => {
+      const next = new Set(prev)
+      for (const b of batches) {
+        if (re.test(b.file_name || '')) next.add(b.id)
+      }
+      return next
+    })
+  }
 
   const recalculate = useCallback((rows, names, date) => {
     const result = computeMonthlyStockValueReportFromExcel(rows, date, { fileNames: names })
@@ -221,12 +251,12 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     setCalcLoading(true)
     const timer = window.setTimeout(() => {
       window.requestAnimationFrame(() => {
-        recalculate(excelRows, fileNames, asOfDate)
+        recalculate(rowsForReport, fileNames, asOfDate)
         setCalcLoading(false)
       })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [asOfDate, excelRows, fileNames, recalculate])
+  }, [asOfDate, excelRows, rowsForReport, fileNames, recalculate])
 
   async function handleExcelUpload(fileList) {
     const files = [...(fileList || [])].filter(Boolean)
@@ -507,16 +537,46 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
           </p>
         )}
         {batches.length > 0 && (
-          <ul className="warehouse-batch-list hint">
-            {batches.map(b => (
-              <li key={b.id}>
-                {summarizeBatchRow(b)}
-                <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
-                  <Trash2 size={12} /> Usuń
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            <p className="hint">
+              <b>FIFO</b> liczy tylko z zaznaczonych partii. Eksport <b>„październik bez MM”</b> zawiera często <b>cały rok</b> na nowych numerach — doklejony do czerwca–września psuje Malinę PW (stan 0). Odznacz tę partię lub usuń ją.
+            </p>
+            {batches.some(b => /pazdz|paźdz/i.test(b.file_name || '')) && (
+              <button
+                type="button"
+                className="mini secondary"
+                onClick={() => {
+                  excludeBatchesMatchingName(/pazdz|paźdz/i)
+                  setMessage?.('Wyłączono partie października z przeliczenia FIFO — przelicz ponownie datę 31.10.')
+                }}
+              >
+                Wyłącz październik z raportu (zalecane test)
+              </button>
+            )}
+            <ul className="warehouse-batch-list hint">
+              {batches.map(b => (
+                <li key={b.id}>
+                  <label className="warehouse-batch-toggle">
+                    <input
+                      type="checkbox"
+                      checked={!excludedBatchIds.has(b.id)}
+                      onChange={() => toggleBatchInReport(b.id)}
+                    />
+                    <span>W raporcie FIFO</span>
+                  </label>
+                  {summarizeBatchRow(b)}
+                  <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
+                    <Trash2 size={12} /> Usuń
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {excludedBatchIds.size > 0 && (
+              <p className="hint">
+                Pominięto {excludedBatchIds.size} import(ów) · w raporcie {rowsForReport.length.toLocaleString('pl-PL')} wierszy (z {excelRows.length.toLocaleString('pl-PL')} w bazie).
+              </p>
+            )}
+          </>
         )}
         <div className="actions">
           <button type="button" className="secondary" disabled={!supabase || storeLoading} onClick={() => { invalidateWarehouseValueLinesCache(); void reloadFromSupabase(false, { forceRefresh: true }) }}>
