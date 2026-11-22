@@ -517,7 +517,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Silnik {EXCEL_REPORT_VERSION}</b> — ilość końcowa = <b>Σ PZ − Σ WZ</b> (jak zestawienie Comarch). Wartość = saldo × średnia ważona cena netto z PZ. Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
+        <b>Silnik {EXCEL_REPORT_VERSION} — FIFO</b> (WZ z najstarszego PZ; wartość i szczegóły z tej samej symulacji). Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
       </p>
 
       {!isSupabaseConfigured && (
@@ -776,7 +776,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         <div className="warning inline-warning r14-engine-banner" style={{ marginBottom: '0.75rem' }}>
           <AlertTriangle size={18} />
           <div>
-            <b>Raport {report.diagnostics?.engineVersion || EXCEL_REPORT_VERSION}</b> · Σ PZ−Σ WZ
+            <b>Raport {report.diagnostics?.engineVersion || EXCEL_REPORT_VERSION}</b> · FIFO (WZ z najstarszego PZ)
             {excludedBatchIds.size > 0 && (
               <> · wyłączono {excludedBatchIds.size} import(ów) ({rowsForReport.length.toLocaleString('pl-PL')} wierszy)</>
             )}
@@ -784,7 +784,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
               <> · dedup {report.diagnostics.dedupeRemoved} linii</>
             )}
             {!report?.diagnostics?.comarchCompare?.length && (
-              <> · <span className="hint">Brak tabeli Comarch — przeładuj aplikację (Ctrl+F5), silnik min. 2.10.2</span></>
+              <> · <span className="hint">Brak tabeli Comarch — Ctrl+F5, silnik min. 2.12.1</span></>
             )}
           </div>
         </div>
