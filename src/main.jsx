@@ -11300,7 +11300,7 @@ async function allocateFifo(operationId, productId, qtyNeeded, operationDate = n
 
     {activeTab === 'raporty' && canSeeTab(authProfile, 'raporty') && <>
     <section className="card">
-      <div className="section-title"><Warehouse/><div><h2>Wartość magazynu</h2><p>Zestawienie ilościowo-wartościowe z Excela (FIFO, data PZ/WZ) — zapis w Supabase, osobno od magazynu HACCP. Silnik: {EXCEL_REPORT_VERSION}.</p></div></div>
+      <div className="section-title"><Warehouse/><div><h2>Wartość magazynu</h2><p>Zestawienie ilościowo-wartościowe z Excela (Σ PZ−Σ WZ, data PZ/WZ) — zapis w Supabase, osobno od magazynu HACCP. Silnik: {EXCEL_REPORT_VERSION}.</p></div></div>
       {message && <p className="message">{message}</p>}
       <StockValueReportSection
         supabase={supabase}

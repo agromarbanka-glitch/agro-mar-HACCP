@@ -131,7 +131,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   const [expanded, setExpanded] = useState(() => new Set())
   const [excelRows, setExcelRows] = useState([])
   const [batches, setBatches] = useState([])
-  /** Partie importu wyłączone z FIFO (np. październik „bez MM” = cały rok). */
+  /** Partie importu wyłączone z raportu (np. październik „bez MM” = cały rok). */
   const [excludedBatchIds, setExcludedBatchIds] = useState(() => new Set())
   const [snapshots, setSnapshots] = useState([])
   const fileInputRef = useRef(null)
@@ -248,7 +248,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const oct = batches.filter(b => /pazdz|paźdz/i.test(b.file_name || '')).map(b => b.id)
       if (!oct.length) return prev
       setMessage?.(
-        'Silnik FIFO: partia października „bez MM” wyłączona z raportu (zbiorczy YTD psuje Malinę PW). Zaznacz „W raporcie FIFO”, tylko jeśli wgrywasz sam przyrost miesiąca.'
+        'Silnik 2.10: partia października „bez MM” wyłączona z raportu (zbiorczy YTD). Zaznacz „W raporcie”, tylko jeśli to przyrost miesiąca.'
       )
       return new Set(oct)
     })
@@ -517,7 +517,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Silnik {EXCEL_REPORT_VERSION} — tylko FIFO</b> (WZ z najstarszego PZ; wartość i „Szczegóły” z tej samej symulacji). Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
+        <b>Silnik {EXCEL_REPORT_VERSION}</b> — ilość końcowa = <b>Σ PZ − Σ WZ</b> (jak zestawienie Comarch). Wartość = saldo × średnia ważona cena netto z PZ. Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
       </p>
 
       {!isSupabaseConfigured && (
@@ -552,7 +552,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         {batches.length > 0 && (
           <>
             <p className="hint">
-              <b>FIFO</b> liczy tylko z zaznaczonych partii. Eksport <b>„październik bez MM”</b> zawiera często <b>cały rok</b> na nowych numerach — doklejony do czerwca–września psuje Malinę PW (stan 0). Odznacz tę partię lub usuń ją.
+              Raport liczy tylko z zaznaczonych partii. Eksport <b>„październik bez MM”</b> to często <b>cały rok</b> — doklejony do czerwca–września zawyża lub psuje salda. Odznacz tę partię lub usuń ją.
             </p>
             {batches.some(b => /pazdz|paźdz/i.test(b.file_name || '')) && (
               <button
@@ -560,7 +560,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                 className="mini secondary"
                 onClick={() => {
                   excludeBatchesMatchingName(/pazdz|paźdz/i)
-                  setMessage?.('Wyłączono partie października z przeliczenia FIFO — przelicz ponownie datę 31.10.')
+                  setMessage?.('Wyłączono partie października z raportu — przelicz ponownie datę 31.10.')
                 }}
               >
                 Wyłącz październik z raportu (zalecane test)
@@ -575,7 +575,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
                       checked={!excludedBatchIds.has(b.id)}
                       onChange={() => toggleBatchInReport(b.id)}
                     />
-                    <span>W raporcie FIFO</span>
+                    <span>W raporcie</span>
                   </label>
                   {summarizeBatchRow(b)}
                   <button type="button" className="mini danger" disabled={loading} onClick={() => void handleDeleteBatch(b.id)} title="Usuń ten import">
