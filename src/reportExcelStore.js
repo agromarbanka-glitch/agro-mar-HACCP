@@ -4,7 +4,7 @@
  * Łączenie partii, deduplikacja operacji, ręczne usuwanie.
  */
 import {
-  classifyOperation,
+  classifyStockValueOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument
@@ -47,7 +47,7 @@ function rowOperation(row) {
   if (isMmDocument(row.documentType, row.documentNo)) return null
   const documentNo = normalizeDocumentNo(row.documentNo)
   if (!documentNo) return null
-  const operation = classifyOperation(row.documentType, documentNo)
+  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
   if (operation === 'pominiete_mm') return null
   return { operation, documentNo, product: normalizeProductKey(row.productName), qty: roundQty(row.qty) }
 }
@@ -411,8 +411,9 @@ export function findDuplicateGroups(store) {
 
 export function formatRowSummary(row) {
   const docNo = normalizeDocumentNo(row.documentNo) || row.documentNo || '—'
-  const op = classifyOperation(row.documentType, row.documentNo)
-  const opLabel = op === 'sprzedaz' ? 'WZ' : op === 'przyjecie' ? 'PZ' : String(row.documentType || '')
+  const op = classifyStockValueOperation(row.documentType, row.documentNo, row.qty)
+  let opLabel = op === 'sprzedaz' ? 'WZ' : op === 'przyjecie' ? 'PZ' : String(row.documentType || '')
+  if (op === 'przyjecie' && String(row.documentType || '').toUpperCase().includes('WZK')) opLabel = 'WZK'
   const issueDate = resolveDocumentIssueDate(row.issueDate, row.documentNo) || row.issueDate || '—'
   return `${opLabel} ${docNo} · ${row.productName || '—'} · ${roundQty(row.qty)} kg · ${issueDate}`
 }
@@ -437,7 +438,7 @@ export function storeStats(store) {
   let wz = 0
   for (const stored of rows) {
     const row = toExcelRow(stored)
-    const op = classifyOperation(row.documentType, row.documentNo)
+    const op = classifyStockValueOperation(row.documentType, row.documentNo, row.qty)
     if (op === 'przyjecie') pz += 1
     else if (op === 'sprzedaz') wz += 1
   }

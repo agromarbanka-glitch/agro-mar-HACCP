@@ -4,7 +4,7 @@
  */
 import { warehouseValueDedupKey } from './reportExcelStore'
 import {
-  classifyOperation,
+  classifyStockValueOperation,
   resolveDocumentIssueDate,
   normalizeDocumentNo,
   isMmDocument
@@ -50,7 +50,7 @@ function lineToExcelRow(stored, batchFileName = '') {
 }
 
 function resolveWarehouseValueIssueDate(row, documentNo) {
-  const operation = classifyOperation(row.documentType, documentNo)
+  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
   if (operation === 'pominiete_mm') return ''
   const opKind = operation === 'sprzedaz' ? 'sprzedaz' : 'przyjecie'
   return resolveStockValueMovementDate(row.issueDate, documentNo, opKind)
@@ -62,7 +62,7 @@ function resolveWarehouseValueIssueDate(row, documentNo) {
 export function buildWarehouseValueDedupKey(row, { sourceFile = '' } = {}) {
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
   if (!documentNo || !row.productName || !Number(row.qty)) return null
-  const operation = classifyOperation(row.documentType, documentNo)
+  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
   if (operation === 'pominiete_mm') return null
   const issueDate = resolveWarehouseValueIssueDate(row, documentNo)
   if (!issueDate || issueDate === '0000-01-01') return null
@@ -72,7 +72,7 @@ export function buildWarehouseValueDedupKey(row, { sourceFile = '' } = {}) {
 function excelRowToInsert(row, batchId, sourceFile = '') {
   const documentNo = normalizeDocumentNo(row.documentNo) || row.documentNo
   if (!documentNo) return { payload: null, reason: 'no_doc' }
-  const operation = classifyOperation(row.documentType, documentNo)
+  const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
   if (operation === 'pominiete_mm' || !row.productName || !Number(row.qty)) {
     return { payload: null, reason: 'invalid' }
   }
