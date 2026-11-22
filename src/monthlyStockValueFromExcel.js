@@ -7,7 +7,8 @@
  * Wartość końcowa = ilość końcowa × średnia ważona cena netto z PZ (do daty stanu).
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
  * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
- * v2.10.3: WZK (+ kg) anuluje WZ w tym samym produkcie·miesiącu·kg (nie dodaje PZ obok WZ).
+ * v2.10.4: WZ+WZK parowane 1:1; powtórki między plikami (inny nr, ta sama data·produkt·kg).
+ * v2.10.3: WZK nie jako luzne PZ przy istniejącym WZ (korekta wydania).
  * v2.10.2: jeden WZ na produkt+miesiąc+ilość (duplikat eksportu Comarch).
  */
 import {
@@ -23,7 +24,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { normalizeProductKey, warehouseValueDedupKey, summarizeBusinessDuplicateLines } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.10.3'
+export const EXCEL_REPORT_VERSION = '2.10.4'
 
 export function formatReportTitleDate(isoDate) {
   const d = String(isoDate || '').slice(0, 10)
@@ -156,7 +157,9 @@ export function resolveStockValueRowOperation(row) {
   const signed = Number(row.qty)
   if (isWzkDocument(row.documentType, documentNo)) {
     if (!Number.isFinite(signed) || signed === 0) return null
-    if (signed > 0) return null
+    if (signed > 0) {
+      return { operation: 'przyjecie', documentNo, qty: roundKg(Math.abs(signed)) }
+    }
     return { operation: 'sprzedaz', documentNo, qty: roundKg(Math.abs(signed)) }
   }
   const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
@@ -209,10 +212,49 @@ function movementBucketKey(row, op) {
   return `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${op.qty}`
 }
 
+function rowMovementIssueDate(row, operation, documentNo) {
+  return (
+    resolveStockValueMovementDate(row.issueDate, documentNo, operation === 'przyjecie' ? 'przyjecie' : 'sprzedaz')
+    || resolveDocumentIssueDate(row.issueDate, documentNo)
+    || String(row.issueDate || '').slice(0, 10)
+  )
+}
+
 /**
- * Comarch: WZK z dodatnią ilością przy tym samym kg co WZ to korekta wydania — 0 netto, nie drugie przyjęcie.
+ * Ten sam ruch w nowym eksporcie Comarch (inny numer dokumentu) — zostaw starszy wiersz w bazie.
  */
-function applyWzWzkMutualCancellation(rows) {
+function collapseCrossFileMovementShadowDuplicates(rows) {
+  const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
+  const shadow = new Map()
+  const out = []
+  let removed = 0
+  for (const row of sorted) {
+    const op = resolveStockValueRowOperation(row)
+    if (!op) {
+      out.push(row)
+      continue
+    }
+    const issueDate = rowMovementIssueDate(row, op.operation, op.documentNo)
+    if (!issueDate) {
+      out.push(row)
+      continue
+    }
+    const key = `${op.operation}|${stockValueProductKey(row.productName)}|${issueDate}|${op.qty}`
+    const priorDoc = shadow.get(key)
+    if (priorDoc && priorDoc !== op.documentNo) {
+      removed += 1
+      continue
+    }
+    if (!priorDoc) shadow.set(key, op.documentNo)
+    out.push(row)
+  }
+  return { rows: out, removed }
+}
+
+/**
+ * Korekta WZ+WZK: anuluj pary 1:1 (ten sam produkt, miesiąc, kg); reszta WZK+ liczy się jak PZ.
+ */
+function applyWzWzkPairwiseCancellation(rows) {
   const groups = new Map()
   for (const row of rows || []) {
     if (!row?.productName || !Number(row.qty)) continue
@@ -222,18 +264,15 @@ function applyWzWzkMutualCancellation(rows) {
     const signed = Number(row.qty)
     const isWzk = isWzkDocument(row.documentType, row.documentNo)
     const qty = roundKg(Math.abs(signed))
-    const issueDate =
-      resolveStockValueMovementDate(row.issueDate, documentNo, 'sprzedaz')
-      || resolveDocumentIssueDate(row.issueDate, documentNo)
-      || String(row.issueDate || '').slice(0, 10)
+    const issueDate = rowMovementIssueDate(row, isWzk && signed > 0 ? 'przyjecie' : 'sprzedaz', documentNo)
     if (!issueDate) continue
     const bucket = `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${qty}`
     if (!groups.has(bucket)) groups.set(bucket, { wz: [], wzkPlus: [] })
     const g = groups.get(bucket)
     if (isWzk && signed > 0) g.wzkPlus.push(row)
-    else if (!isWzk && signed !== 0) {
-      const op = classifyStockValueOperation(row.documentType, documentNo, row.qty)
-      if (op === 'sprzedaz') g.wz.push(row)
+    else if (!isWzk) {
+      const operation = classifyStockValueOperation(row.documentType, documentNo, row.qty)
+      if (operation === 'sprzedaz') g.wz.push(row)
     }
   }
 
@@ -241,9 +280,13 @@ function applyWzWzkMutualCancellation(rows) {
   let cancelled = 0
   for (const g of groups.values()) {
     if (!g.wz.length || !g.wzkPlus.length) continue
-    for (const row of [...g.wz, ...g.wzkPlus]) {
-      if (!skip.has(row)) cancelled += 1
-      skip.add(row)
+    const wzSorted = [...g.wz].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
+    const wzkSorted = [...g.wzkPlus].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
+    const pairs = Math.min(wzSorted.length, wzkSorted.length)
+    for (let i = 0; i < pairs; i++) {
+      skip.add(wzSorted[i])
+      skip.add(wzkSorted[i])
+      cancelled += 2
     }
   }
 
@@ -257,11 +300,14 @@ function prepareWarehouseValueReportRows(excelRows) {
   let filled = prepareReportRows(excelRows || [])
   const parallelWz = collapseParallelWzExportDuplicates(filled)
   filled = parallelWz.rows
-  const wzkCancel = applyWzWzkMutualCancellation(filled)
+  const wzkCancel = applyWzWzkPairwiseCancellation(filled)
+  filled = wzkCancel.rows
+  const shadow = collapseCrossFileMovementShadowDuplicates(filled)
   return {
-    rows: wzkCancel.rows,
+    rows: shadow.rows,
     parallelWzRemoved: parallelWz.removed,
-    wzkCancelledRows: wzkCancel.cancelled
+    wzkCancelledRows: wzkCancel.cancelled,
+    shadowDuplicatesRemoved: shadow.removed
   }
 }
 
@@ -739,7 +785,10 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
     message += ` Sklejono ${prepared.parallelWzRemoved} powtórnych WZ (ten sam produkt, miesiąc i kg w eksporcie Comarch).`
   }
   if (prepared.wzkCancelledRows > 0) {
-    message += ` Pominięto ${prepared.wzkCancelledRows} linii WZ+WZK (korekta wydania — 0 netto przy tym samym kg).`
+    message += ` Skasowano ${prepared.wzkCancelledRows} linii w parach WZ+WZK (korekta wydania).`
+  }
+  if (prepared.shadowDuplicatesRemoved > 0) {
+    message += ` Pominięto ${prepared.shadowDuplicatesRemoved} powtórnych ruchów z nowszego importu (ten sam dzień·produkt·kg, inny nr dokumentu).`
   }
   if (!dedupeCrossFile && businessDuplicates.duplicateLines > 0) {
     message += ` UWAGA: ${businessDuplicates.duplicateLines} powtórnych operacji PZ/WZ z różnych importów (ok. +${businessDuplicates.duplicatePzKg.toLocaleString('pl-PL')} kg PZ i +${businessDuplicates.duplicateWzKg.toLocaleString('pl-PL')} kg WZ w saldzie). Włącz „Jedna operacja raz” albo użyj „Test bez partii”.`
@@ -793,6 +842,7 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       wzClampedToDocMonth,
       parallelWzCollapsed: prepared.parallelWzRemoved,
       wzkCancelledRows: prepared.wzkCancelledRows,
+      shadowDuplicatesRemoved: prepared.shadowDuplicatesRemoved,
       openingCutoff,
       hidden_watch,
       engine: 'cumulative_pz_minus_wz_v28'
