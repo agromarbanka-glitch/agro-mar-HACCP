@@ -270,7 +270,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
       const priceHint = linesWithPrice ? ` · ${linesWithPrice} linii w pliku z ceną netto` : ''
       const dupHint = totalDuplicates ? ` · ${totalDuplicates} duplikatów pominięto` : ''
       const skipHint = totalSkippedNoDate ? ` · ${totalSkippedNoDate} wierszy bez daty pominięto przy zapisie` : ''
-      const fileHint = `Plik: ${fileLineCount} linii raportowych · baza: ${dbRows.length} wierszy (${dbLineCount} do FIFO)`
+      const fileHint = `Plik: ${fileLineCount} linii raportowych · baza: ${dbRows.length} wierszy (${dbLineCount} do raportu)`
       const verifyHint = !verify.ok && totalAdded > 0
         ? ' · UWAGA: wynik z bazy różni się od pliku — wyczyść magazyn wartości i wgraj Excel ponownie.'
         : totalAdded > 0 && dbLineCount < fileLineCount - 1
@@ -474,7 +474,7 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
     <div className="stock-value-report">
       <p className="hint">
         <b>Wartość magazynu</b> — osobne narzędzie od HACCP. Silnik {EXCEL_REPORT_VERSION} · dane w Supabase ({WAREHOUSE_VALUE_STORE_VERSION}).
-        <b>Ilość końcowa</b> = FIFO (WZ schodzą z najstarszego PZ; szczegóły = partie z saldem). Jeśli widzisz „wczytano mniej niż w bazie” — kliknij <b>Odśwież z bazy</b>.
+        <b>Ilość końcowa</b> = Σ PZ − Σ WZ (i WZK jako rozchód), jak zestawienie Comarch. Szczegóły = rozkład na PZ do ilości końcowej. Jeśli „wczytano mniej niż w bazie” — <b>Odśwież z bazy</b>.
       </p>
 
       {!isSupabaseConfigured && (
