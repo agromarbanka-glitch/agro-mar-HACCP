@@ -7,7 +7,7 @@
  * Nie używamy Σ PZ−WZ ani średniej ważonej do ilości końcowej.
  * Stan początkowy miesiąca = ta sama symulacja FIFO na dzień przed 1. dniem miesiąca.
  * Wartość końcowa = suma (pozostałe kg na partii PZ × cena netto tej PZ po FIFO).
- * Przed FIFO: dedup importu (ten sam nr PZ/WZ·produkt·kg) i pary korekty WZ+WZK — nie zmieniają zasady FIFO.
+ * Przed FIFO: dedup importu (ten sam nr PZ/WZ·produkt·kg). WZK = zwykły ruch (WZ lub PZ przy ujemnej ilości), bez skracania par.
  * Wiersze z Supabase: bez ponownego forward-fill (sortowanie po dacie psuło daty).
  * WZ WZ/NNN/MM/RRRR: ruch w miesiącu MM z numeru (data Excel poza MM → koniec MM).
  */
@@ -24,7 +24,7 @@ import {
 import { resolveFifoProductGroup, canonicalProductName, normalizeFifoProductKey } from './k03Engine'
 import { excelRowDedupKey, normalizeProductKey, warehouseValueDedupKey } from './reportExcelStore'
 
-export const EXCEL_REPORT_VERSION = '2.13.0'
+export const EXCEL_REPORT_VERSION = '2.13.2'
 
 /** Publiczna deklaracja zasady — UI / audyt. */
 export const STOCK_VALUE_FIFO_POLICY = Object.freeze({
@@ -265,14 +265,6 @@ export function runStockValueFifoSimulation(pzLines, wzLines, cutoffDate) {
   }
 }
 
-function rowMovementDateRaw(row, operation, documentNo) {
-  return (
-    resolveStockValueMovementDate(row.issueDate, documentNo, operation)
-    || resolveDocumentIssueDate(row.issueDate, documentNo)
-    || String(row.issueDate || '').slice(0, 10)
-  )
-}
-
 /** Ten sam nr PZ/WZ·produkt·kg z kolejnego importu — jedna linia do FIFO. */
 function dedupeCrossBatchReportRows(rows) {
   const sorted = [...(rows || [])].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
@@ -293,55 +285,12 @@ function dedupeCrossBatchReportRows(rows) {
   return { rows: out, removed }
 }
 
-/** WZ + WZK (korekta) przy tym samym produkcie·miesiącu·kg → pary 1:1 pomijane w FIFO. */
-function applyWzWzkPairwiseCancellation(rows) {
-  const groups = new Map()
-  for (const row of rows || []) {
-    if (!row?.productName || !Number(row.qty)) continue
-    const documentNo = normalizeDocumentNo(row.documentNo)
-    if (!documentNo || isMmDocument(row.documentType, row.documentNo)) continue
-    const isWzk = isWzkDocument(row.documentType, documentNo)
-    const qty = roundKg(Math.abs(Number(row.qty)))
-    const issueDate = rowMovementDateRaw(
-      row,
-      isWzk ? 'sprzedaz' : classifyOperation(row.documentType, documentNo),
-      documentNo
-    )
-    if (!issueDate) continue
-    const bucket = `${stockValueProductKey(row.productName)}|${issueDate.slice(0, 7)}|${qty}`
-    if (!groups.has(bucket)) groups.set(bucket, { wz: [], wzk: [] })
-    const g = groups.get(bucket)
-    if (isWzk) g.wzk.push(row)
-    else if (classifyOperation(row.documentType, documentNo) === 'sprzedaz') g.wz.push(row)
-  }
-
-  const skip = new Set()
-  let cancelled = 0
-  for (const g of groups.values()) {
-    if (!g.wz.length || !g.wzk.length) continue
-    const wzSorted = [...g.wz].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-    const wzkSorted = [...g.wzk].sort((a, b) => String(a._lineId || '').localeCompare(String(b._lineId || '')))
-    const pairs = Math.min(wzSorted.length, wzkSorted.length)
-    for (let i = 0; i < pairs; i++) {
-      skip.add(wzSorted[i])
-      skip.add(wzkSorted[i])
-      cancelled += 2
-    }
-  }
-  return {
-    rows: (rows || []).filter(r => !skip.has(r)),
-    cancelled
-  }
-}
-
 function prepareStockValueMovementRows(excelRows) {
   const filled = prepareReportRows(excelRows || [])
   const deduped = dedupeCrossBatchReportRows(filled)
-  const cancelled = applyWzWzkPairwiseCancellation(deduped.rows)
   return {
-    rows: cancelled.rows,
-    crossBatchDuplicatesRemoved: deduped.removed,
-    wzkCancelledRows: cancelled.cancelled
+    rows: deduped.rows,
+    crossBatchDuplicatesRemoved: deduped.removed
   }
 }
 
@@ -601,10 +550,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
   if (prepared.crossBatchDuplicatesRemoved > 0) {
     message += ` Pominięto ${prepared.crossBatchDuplicatesRemoved} powtórnych operacji (ten sam nr dokumentu w kolejnym imporcie).`
   }
-  if (prepared.wzkCancelledRows > 0) {
-    message += ` Anulowano ${prepared.wzkCancelledRows} linii w parach WZ+WZK.`
-  }
-
   const comarchCompare = []
   const comarchOct2026TargetDate = '2026-10-31'
   if (cutoffDate >= '2026-10-01' && cutoffDate <= '2026-12-31') {
@@ -649,7 +594,6 @@ export function computeMonthlyStockValueReportFromExcel(excelRows, asOfDate, { f
       inputRows: (excelRows || []).length,
       filledRows: prepared.rows.length,
       crossBatchDuplicatesRemoved: prepared.crossBatchDuplicatesRemoved,
-      wzkCancelledRows: prepared.wzkCancelledRows,
       comarchCompare,
       comarchTargetDate: comarchCompare.length ? comarchOct2026TargetDate : null,
       engineVersion: EXCEL_REPORT_VERSION,

@@ -243,19 +243,6 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
   }, [reloadFromSupabase])
 
   useEffect(() => {
-    if (batches.length < 2) return
-    setExcludedBatchIds(prev => {
-      if (prev.size > 0) return prev
-      const oct = batches.filter(b => /pazdz.*bez\s*mm|paźdz.*bez\s*mm|pazdziernik\s+bez/i.test(b.file_name || '')).map(b => b.id)
-      if (!oct.length) return prev
-      setMessage?.(
-        'FIFO: partia października „bez MM” wyłączona z raportu (zbiorczy YTD). Zaznacz „W raporcie”, tylko jeśli to przyrost miesiąca.'
-      )
-      return new Set(oct)
-    })
-  }, [batches, setMessage])
-
-  useEffect(() => {
     if (!excelRows.length) {
       setReport(null)
       setCalcLoading(false)
@@ -553,18 +540,18 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
         {batches.length > 0 && (
           <>
             <p className="hint">
-              Raport liczy tylko z zaznaczonych partii. Comarch 31.10: wgraj <b>październik PZ + WZ + WZK</b> (przyrost), <b>nie</b> „październik bez MM” (cały rok). Partia „bez MM” powinna być odznaczona lub usunięta.
+              FIFO: wszystkie potrzebne miesiące muszą być zaznaczone „W raporcie” (w tym październik). Unikaj dwóch plików września naraz — zostaw jeden.
             </p>
-            {batches.some(b => /pazdz|paźdz/i.test(b.file_name || '')) && (
+            {excludedBatchIds.size > 0 && (
               <button
                 type="button"
                 className="mini secondary"
                 onClick={() => {
-                  excludeBatchesMatchingName(/pazdz|paźdz/i)
-                  setMessage?.('Wyłączono partie października z raportu — przelicz ponownie datę 31.10.')
+                  setExcludedBatchIds(new Set())
+                  setMessage?.('Włączono wszystkie partie — ustaw datę 31.10.2026 i przelicz (FIFO).')
                 }}
               >
-                Wyłącz październik z raportu (zalecane test)
+                Włącz wszystkie partie do FIFO
               </button>
             )}
             <ul className="warehouse-batch-list hint">
@@ -586,8 +573,10 @@ export function StockValueReportSection({ supabase, savedBy = '', escapeHtml, pr
               ))}
             </ul>
             {excludedBatchIds.size > 0 && (
-              <p className="hint">
-                Pominięto {excludedBatchIds.size} import(ów) · w raporcie {rowsForReport.length.toLocaleString('pl-PL')} wierszy (z {excelRows.length.toLocaleString('pl-PL')} w bazie).
+              <p className="warning inline-warning">
+                FIFO liczy tylko z zaznaczonych partii — wyłączono {excludedBatchIds.size} import(ów) (
+                {rowsForReport.length.toLocaleString('pl-PL')} / {excelRows.length.toLocaleString('pl-PL')} wierszy).
+                Jeśli jabłko na obierkę ≈ 56 847 zamiast 80 458 — zaznacz październik („W raporcie”).
               </p>
             )}
           </>
